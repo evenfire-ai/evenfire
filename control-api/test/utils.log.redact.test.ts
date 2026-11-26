@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { Writable } from 'node:stream'
+import pino from 'pino'
 import { REQUIRED_REDACT_PATHS, TOKEN_LEAK_REDACT_PATHS } from '../src/utils/log/redact.js'
 
 describe('token-leak redaction', () => {
@@ -80,5 +82,29 @@ describe('token-leak redaction', () => {
       expect(TOKEN_LEAK_REDACT_PATHS).toContain(p)
       expect(REQUIRED_REDACT_PATHS).toContain(p)
     }
+  })
+
+  it('removes the Host edge assertion from logged connections, checkpoint results and headers', () => {
+    const lines: string[] = []
+    const sink = new Writable({
+      write(chunk, _encoding, done) {
+        lines.push(String(chunk))
+        done()
+      },
+    })
+    const logger = pino({ redact: { paths: [...TOKEN_LEAK_REDACT_PATHS], remove: true } }, sink)
+    const assertion = 'eyJhbGciOiJSUzI1NiJ9.fixture-edge-assertion.signature'
+
+    logger.info({ edgeAssertion: assertion, hostRef: 'chatllm' }, 'connection')
+    logger.info({ connection: { url: 'host-url', edgeAssertion: assertion } }, 'nested connection')
+    logger.info({ result: { status: 'allowed', hostEdgeAssertion: assertion } }, 'checkpoint')
+    logger.info({ req: { headers: { 'x-clerum-edge-assertion': assertion } } }, 'request')
+    logger.info({ headers: { 'x-clerum-edge-assertion': assertion } }, 'outbound')
+
+    // Witness: every record was written, with its non-secret fields intact.
+    expect(lines).toHaveLength(5)
+    expect(lines[0]).toContain('"hostRef":"chatllm"')
+    expect(lines[2]).toContain('"status":"allowed"')
+    for (const line of lines) expect(line).not.toContain(assertion)
   })
 })

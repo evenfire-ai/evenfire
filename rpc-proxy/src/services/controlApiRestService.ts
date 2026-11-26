@@ -3,6 +3,7 @@ import { type AuthorizedActionV2, actionAuthorityCheckpointRequest } from '../ac
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
 import {
+  CONTROL_API_HOST_EDGE_ASSERTION_MISSING_ERROR,
   type HostAccessDenial,
   type HostAccessDenialCode,
   hostAccessDenialCodeForReason,
@@ -20,7 +21,15 @@ type UserAllowedHost = {
   hostRef: string
   url: string
   bindingStatus?: 'recorded' | 'unavailable'
+  edgeAssertion: string
 }
+
+/**
+ * A V1 Host connection together with the edge assertion control-api signed for
+ * this user, Host and RPC token. The resolver moves the assertion into the
+ * Host request headers; it is never part of the connection the routes see.
+ */
+export type ResolvedHostConnection = ResolvedServerConnection & { edgeAssertion: string }
 
 function controlApiHeaders(rpcAccessToken: string): Record<string, string> {
   return {
@@ -63,6 +72,19 @@ export class ControlApiHostAccessRejectedError extends Error {
     super(`Control API rejected host access (${status})`)
     this.name = 'ControlApiHostAccessRejectedError'
     this.denialCode = denialCode
+  }
+}
+
+/**
+ * control-api authorized the Host (200) but issued no edge assertion: control-api
+ * is older than rpc-proxy. The Host refuses rpc-proxy traffic without one, so the
+ * request cannot proceed; routes answer it as 503 `authority_unavailable`
+ * (`respondControlApiAuthorityUnavailable`), never with this message.
+ */
+export class ControlApiHostEdgeAssertionMissingError extends Error {
+  constructor() {
+    super('Control API MCP host response has no edge assertion')
+    this.name = CONTROL_API_HOST_EDGE_ASSERTION_MISSING_ERROR
   }
 }
 
@@ -225,7 +247,7 @@ export async function fetchHostConnectionFromControlApi(
     directRunBinding?: DirectRunBindingRequest
     fetchImpl?: typeof fetch
   } = {}
-): Promise<ResolvedServerConnection | HostAccessDenial> {
+): Promise<ResolvedHostConnection | HostAccessDenial> {
   const directRunBinding = options.directRunBinding
   const response = await (options.fetchImpl ?? fetch)(
     `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-hosts/${encodeURIComponent(hostRef)}`,
@@ -276,12 +298,19 @@ export async function fetchHostConnectionFromControlApi(
   ) {
     throw new Error('Control API MCP host binding response was invalid')
   }
+  // The Host accepts rpc-proxy traffic only with this assertion: a control-api
+  // that does not issue one cannot authorize a Host request.
+  const edgeAssertion = parsed.edgeAssertion
+  if (typeof edgeAssertion !== 'string' || edgeAssertion === '') {
+    throw new ControlApiHostEdgeAssertionMissingError()
+  }
 
   return {
     name: resolvedHostRef,
     url,
     headers: {},
     ...(attributionBindingStatus ? { attributionBindingStatus } : {}),
+    edgeAssertion,
   }
 }
 

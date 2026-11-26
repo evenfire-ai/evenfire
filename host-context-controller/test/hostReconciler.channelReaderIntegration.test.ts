@@ -15,7 +15,7 @@ import * as k8s from '@kubernetes/client-node'
 import { HostReconciler } from '../src/hostReconciler'
 import { HostCRD } from '../src/types'
 import {
-  asAppsApi,
+  asAppsApiWithSignedAssertionRpcProxy,
   asCoreApi,
   asNetworkingApi,
   asRbacApi,
@@ -34,6 +34,7 @@ vi.mock('../src/config', () => ({
     controlPlaneNamespace: 'control-plane',
     hostNamespace: 'mcp-host',
     rpcProxyNamespace: 'rpc-proxy',
+    hostRpcProxyEdgeProtocol: 'signed-assertion-v1',
     channelsNamespace: 'channels',
     channelReaderImage: 'clerum/channel-reader:test',
     channelReaderImagePullPolicy: 'IfNotPresent',
@@ -120,7 +121,7 @@ function createReconciler() {
   const rbacApi = createMockRbacApi()
 
   const reconciler = new HostReconciler({} as k8s.KubeConfig, {
-    appsApi: asAppsApi(appsApi),
+    appsApi: asAppsApiWithSignedAssertionRpcProxy(appsApi),
     coreApi: asCoreApi(coreApi),
     networkingApi: asNetworkingApi(networkingApi),
     rbacApi: asRbacApi(rbacApi),

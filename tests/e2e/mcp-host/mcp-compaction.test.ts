@@ -22,8 +22,9 @@
  * Run:
  *   cd tests/e2e && E2E_RUN_MCP_COMPACTION=1 npx vitest run mcp-compaction.test.ts
  */
-import { afterAll, describe as baseDescribe, expect, it } from 'vitest'
+import { afterAll, describe as baseDescribe, beforeAll, expect, it } from 'vitest'
 import {
+  DEFAULT_HOST_REF,
   MCP_HOST_URL,
   fetchJson,
   getPodLogs,
@@ -32,6 +33,13 @@ import {
   sendMessage,
   waitForIdle,
 } from '../helpers.js'
+import { issueRealRpcToken } from './runtimeAuth.js'
+
+let statusToken: string
+
+beforeAll(async () => {
+  statusToken = await issueRealRpcToken(['host:status:read'], [DEFAULT_HOST_REF])
+})
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -76,7 +84,7 @@ describe('Phase 1: Airtable MCP multi-step exploration', () => {
       { userId: MCP_USER }
     )
     expect(res.status).toBe(200)
-    await waitForIdle(60_000)
+    await waitForIdle(statusToken, 60_000)
 
     const response = (res.data?.response || '').toLowerCase()
     expect(response.length).toBeGreaterThan(20)
@@ -90,7 +98,7 @@ describe('Phase 1: Airtable MCP multi-step exploration', () => {
       { userId: MCP_USER }
     )
     expect(res.status).toBe(200)
-    await waitForIdle(60_000)
+    await waitForIdle(statusToken, 60_000)
 
     const response = res.data?.response || ''
     expect(response.length).toBeGreaterThan(10)
@@ -104,7 +112,7 @@ describe('Phase 1: Airtable MCP multi-step exploration', () => {
       { userId: MCP_USER }
     )
     expect(res.status).toBe(200)
-    await waitForIdle(90_000)
+    await waitForIdle(statusToken, 90_000)
 
     const response = res.data?.response || ''
     expect(response.length).toBeGreaterThan(20)
@@ -118,7 +126,7 @@ describe('Phase 1: Airtable MCP multi-step exploration', () => {
       { userId: MCP_USER }
     )
     expect(res.status).toBe(200)
-    await waitForIdle(60_000)
+    await waitForIdle(statusToken, 60_000)
 
     const response = (res.data?.response || '').toLowerCase()
     // Should confirm the write
@@ -139,7 +147,7 @@ describe('Phase 2: MongoDB MCP multi-step exploration', () => {
       { userId: MCP_USER }
     )
     expect(res.status).toBe(200)
-    await waitForIdle(60_000)
+    await waitForIdle(statusToken, 60_000)
 
     const response = res.data?.response || ''
     expect(response.length).toBeGreaterThan(20)
@@ -153,7 +161,7 @@ describe('Phase 2: MongoDB MCP multi-step exploration', () => {
       { userId: MCP_USER }
     )
     expect(res.status).toBe(200)
-    await waitForIdle(60_000)
+    await waitForIdle(statusToken, 60_000)
 
     const response = res.data?.response || ''
     expect(response.length).toBeGreaterThan(5)
@@ -167,7 +175,7 @@ describe('Phase 2: MongoDB MCP multi-step exploration', () => {
       { userId: MCP_USER }
     )
     expect(res.status).toBe(200)
-    await waitForIdle(90_000)
+    await waitForIdle(statusToken, 90_000)
 
     const response = res.data?.response || ''
     expect(response.length).toBeGreaterThan(5)
@@ -181,7 +189,7 @@ describe('Phase 2: MongoDB MCP multi-step exploration', () => {
       { userId: MCP_USER }
     )
     expect(res.status).toBe(200)
-    await waitForIdle(60_000)
+    await waitForIdle(statusToken, 60_000)
 
     const response = (res.data?.response || '').toLowerCase()
     expect(response).toMatch(/saved|stored|written|memory|mongodb|database/)
@@ -201,7 +209,7 @@ describe('Phase 3: Cross-system synthesis', () => {
       { userId: MCP_USER }
     )
     expect(res.status).toBe(200)
-    await waitForIdle(90_000)
+    await waitForIdle(statusToken, 90_000)
 
     const response = (res.data?.response || '').toLowerCase()
     expect(response.length).toBeGreaterThan(30)
@@ -217,7 +225,7 @@ describe('Phase 3: Cross-system synthesis', () => {
       { userId: MCP_USER }
     )
     expect(res.status).toBe(200)
-    await waitForIdle(90_000)
+    await waitForIdle(statusToken, 90_000)
 
     const response = res.data?.response || ''
     expect(response.length).toBeGreaterThan(10)
@@ -228,7 +236,7 @@ describe('Phase 3: Cross-system synthesis', () => {
     const health = await fetchJson(`${MCP_HOST_URL}/v1/runtime/health`)
     expect(health.status).toBe(200)
 
-    const status = await getStatus()
+    const status = await getStatus(statusToken)
     expect(status.agent.state).toBe('idle')
     expect(status.agent.tasksSucceeded).toBeGreaterThanOrEqual(8)
 
@@ -291,7 +299,7 @@ describe('Phase 4: Compaction verification', () => {
       { userId: MCP_USER }
     )
     expect(res.status).toBe(200)
-    await waitForIdle(60_000)
+    await waitForIdle(statusToken, 60_000)
 
     const response = (res.data?.response || '').toLowerCase()
     // The summary should still mention Airtable-related content
