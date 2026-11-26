@@ -163,7 +163,7 @@ vi.mock('../../lib/hostApprovalSave', async importOriginal => {
 // N = 75, below the spec's 100 (Ruling 53: the largest N under 60 s inside the
 // whole control-ui run). On an Apple M4 with Node 24 (9 workers), N = 100 took
 // 54-78 s there, over 60 s in 7 of 9 runs, and 17-23 s alone; N = 75 took
-// 41-44 s. APPROVAL_MODEL_RUNS=100 runs the spec's N.
+// 41-48 s there in 4 runs. APPROVAL_MODEL_RUNS=100 runs the spec's N.
 const NUM_RUNS = Number(process.env.APPROVAL_MODEL_RUNS ?? 75)
 const MAX_COMMANDS = 60
 /**
