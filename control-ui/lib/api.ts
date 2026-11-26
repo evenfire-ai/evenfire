@@ -3541,6 +3541,12 @@ export type WorkflowRunSummary = {
   message: string | null
   actor: { type?: string; userId?: string; adminUserId?: string; hostRef?: string } | null
   executionRef: { namespace: string; name: string } | null
+  // The cancel request of a live run: both null, or both set once a cancel was
+  // accepted (it stays set after the run ends). For an admin reader `canceledBy`
+  // is the user id, or `operator:<admin id>` for an operator cancel. Archived
+  // runs (`source: 'audit'`) do not carry these fields.
+  cancelRequestedAt?: string | null
+  canceledBy?: string | null
 
   // Legacy/older UI callers tolerated these fields before Control API moved
   // workflow run reads to the canonical DTO. Keep them optional so current API
@@ -3573,6 +3579,24 @@ export async function getWorkflowRun(
     `/api/v1/admin/workflows/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}`,
     {},
     { signal }
+  ) as Promise<WorkflowRunSummary>
+}
+
+/**
+ * Operator cancel of one run (`POST /api/v1/admin/workflows/:ns/:name/runs/:runId/cancel`).
+ * Resolves with the run as the server stored it: `Canceled` for a run without a
+ * child, or its unchanged phase with `cancelRequestedAt` set when the runtime
+ * still has to stop. Errors carry the server code (`workflow_run_not_found`,
+ * `workflow_run_not_cancellable`) on `code`.
+ */
+export async function cancelWorkflowRun(
+  namespace: string,
+  name: string,
+  runId: string
+): Promise<WorkflowRunSummary> {
+  return apiSend(
+    'POST',
+    `/api/v1/admin/workflows/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}/cancel`
   ) as Promise<WorkflowRunSummary>
 }
 
