@@ -776,6 +776,22 @@ describeRealPostgres('workflow continuation authority on real PostgreSQL', () =>
       expected: { status: 'denied' },
     },
     {
+      // On a single-path recipe the removed grant leaves no visible path, so
+      // the live resolver answers not_found (also terminal for the run).
+      label: 'grant removal, single-path recipe',
+      recipeName: directRecipe,
+      pathKind: 'direct' as const,
+      storedTeam: undefined,
+      change: async (userId: string) => {
+        await databasePool.query(
+          `DELETE FROM user_workflow_triggers
+            WHERE user_id = $1 AND recipe_namespace = $2 AND recipe_name = $3`,
+          [userId, config.sandboxNamespace, directRecipe]
+        )
+      },
+      expected: { status: 'not_found' },
+    },
+    {
       label: 'behaviour change',
       recipeName: directRecipe,
       pathKind: 'direct' as const,
