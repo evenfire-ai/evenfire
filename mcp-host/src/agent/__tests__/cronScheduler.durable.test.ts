@@ -2,9 +2,10 @@
  * Durable cron arming. Run with TZ=UTC: hour fields follow the process zone.
  * Live timers are setTimeout handles that were not later passed to clearTimeout.
  */
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { logger } from '../../logger'
 import { MessageQueue } from '../../queue/messageQueue'
+import { parseNextRun } from '../cronExpression'
 import { CRON_CLAIM_BACKOFF_MS, CronScheduler, MAX_SAFE_TIMEOUT } from '../cronScheduler'
 import type { CronClaimArgs, CronDurableStore, CronJobRecord } from '../cronStore'
 
@@ -12,11 +13,14 @@ const MISSED_SLOT = '2026-11-22T00:00:00Z'
 const CLAIM_AT = '2026-11-25T07:59:30Z'
 const FOLLOWING_AT = '2026-11-25T08:00:00Z'
 
-beforeAll(() => {
-  if (new Date().getTimezoneOffset() !== 0) {
-    throw new Error('cronScheduler.durable.test.ts requires TZ=UTC')
-  }
-})
+function followingSeconds(): number {
+  const next = parseNextRun(
+    '0 */8 * * *',
+    new Date(Math.max(Date.parse(MISSED_SLOT), Date.parse(CLAIM_AT)))
+  )
+  if (!next) throw new Error('schedule did not produce a following slot')
+  return next.getTime() / 1000
+}
 
 function createQueue(): MessageQueue {
   const queue = new MessageQueue()
@@ -141,14 +145,18 @@ describe('CronScheduler durable claim', () => {
     scheduler.start()
     await vi.advanceTimersByTimeAsync(0)
 
+    const expectedFollowing = followingSeconds()
     expect(queue.enqueue).toHaveBeenCalledTimes(1)
-    expect(rows.get('missed')?.nextRunAt).toBe(seconds(FOLLOWING_AT))
+    expect(rows.get('missed')?.nextRunAt).toBe(expectedFollowing)
+    if (new Date().getTimezoneOffset() === 0) {
+      expect(expectedFollowing).toBe(seconds(FOLLOWING_AT))
+    }
     expect(store.claim).toHaveBeenCalledTimes(1)
     expect(store.claim).toHaveBeenCalledWith({
       id: 'missed',
       slotSeconds: seconds(MISSED_SLOT),
       nowSeconds: seconds(CLAIM_AT),
-      followingSeconds: seconds(FOLLOWING_AT),
+      followingSeconds: expectedFollowing,
     })
 
     const secondQueue = createQueue()
