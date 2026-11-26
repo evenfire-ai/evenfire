@@ -2016,6 +2016,21 @@ const ENVIRONMENT_VARIANTS: ReadonlyArray<EnvironmentVariant> = [
   ],
 ]
 
+/** Another host whose URL begins with environment A's recorded REST URL. */
+const HOST_SUFFIX_LOOK_ALIKE = 'https://edge-fixture.example.test.other.example'
+
+/**
+ * C1: other environments whose URL keeps the bound REST URL as a prefix, even once both are
+ * canonicalized. A prefix comparison would take each for the bound environment.
+ */
+const LOOK_ALIKE_ENVIRONMENTS: ReadonlyArray<
+  readonly [label: string, environment: (bound: string) => string]
+> = [
+  ['a host-suffix look-alike', () => HOST_SUFFIX_LOOK_ALIKE],
+  ['the bound URL with another path', bound => `${bound}/api/v1`],
+  ['the bound URL with another port', bound => `${bound}:4443`],
+]
+
 describe('the binding and the deadline at acceptance', () => {
   it('G2-7 fails, without redeeming, when the profile changed with no bump', async () => {
     // Case 1: the profile id changes while the attempt waits.
@@ -2127,6 +2142,29 @@ describe('the binding and the deadline at acceptance', () => {
       expect(redeemFetches(harness).map(record => record.value.url)).toEqual([
         `${envs.A.restBaseUrl}${REDEEM_PATH}`,
       ])
+    }
+  )
+
+  it.each(LOOK_ALIKE_ENVIRONMENTS)(
+    'refuses %s, which begins with the bound URL, without redeeming',
+    async (_label, environment) => {
+      const harness = await createBrowserSignInHarness({ linksAvailable: true })
+      const { service, envs } = harness
+      const lookAlike = environment(envs.A.restBaseUrl)
+      expect(lookAlike.startsWith(envs.A.restBaseUrl)).toBe(true)
+      const { attemptId, state } = await startAttempt(harness)
+
+      expect(service.acceptDesktopLoginLink(codeLink(state, lookAlike))).toBe(true)
+      await harness.drain()
+
+      expect(snapshotsOf(harness, attemptId).at(-1)).toEqual({
+        attemptId,
+        phase: 'ended',
+        outcome: 'failed',
+        reason: 'different_environment',
+      })
+      expect(redeemFetches(harness)).toHaveLength(0)
+      expect(service.getSessionPresence()).toEqual({ hasToken: false, hasMe: false })
     }
   )
 
