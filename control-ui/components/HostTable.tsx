@@ -217,7 +217,11 @@ export function HostTable({
                       <span className="cu-table__cell-name">{displayName}</span>
                     </td>
                     <td className="cu-table__cell-soft">
-                      <span className="cu-table__cell-type" title={AGENT_TYPE_TOOLTIPS[agentType]}>
+                      <span
+                        className="cu-table__cell-type"
+                        tabIndex={0}
+                        data-tooltip={AGENT_TYPE_TOOLTIPS[agentType]}
+                      >
                         {AGENT_TYPE_LABELS[agentType]}
                       </span>
                     </td>

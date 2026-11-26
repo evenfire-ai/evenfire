@@ -161,7 +161,11 @@ export function HostOverviewTab({
         </div>
         {/* __badges, not __meta: that name is the Created <dl> below. */}
         <div className="cu-host-overview-identity__badges">
-          <span className="cu-host-overview-identity__type" title={AGENT_TYPE_TOOLTIPS[agentType]}>
+          <span
+            className="cu-host-overview-identity__type"
+            tabIndex={0}
+            data-tooltip={AGENT_TYPE_TOOLTIPS[agentType]}
+          >
             {AGENT_TYPE_LABELS[agentType]}
           </span>
           <div className="cu-host-overview-identity__status">

@@ -419,12 +419,12 @@ describe('HostTable type column (lifecycle)', () => {
 
     const stateful = within(screen.getByLabelText('Open agent warm-agent')).getByText('Stateful')
     expect(stateful).toHaveAttribute(
-      'title',
+      'data-tooltip',
       'This agent runs continuously; its process is never scaled to zero.'
     )
     const stateless = within(screen.getByLabelText('Open agent cold-agent')).getByText('Stateless')
     expect(stateless).toHaveAttribute(
-      'title',
+      'data-tooltip',
       'This agent persists session state to disk and scales to zero while idle (shown as Idle). It wakes on demand.'
     )
   })

@@ -513,7 +513,7 @@ describe('HostDetailsPage identity integration', () => {
     const typeChip = container.querySelector('.cu-host-overview-identity__type')
     expect(typeChip).toHaveTextContent('Stateful')
     expect(typeChip).toHaveAttribute(
-      'title',
+      'data-tooltip',
       'This agent runs continuously; its process is never scaled to zero.'
     )
     expect(screen.getByText('Created').nextElementSibling).toHaveTextContent(/2026/)
@@ -549,7 +549,7 @@ describe('HostDetailsPage identity integration', () => {
     const typeChip = container.querySelector('.cu-host-overview-identity__type')
     expect(typeChip).toHaveTextContent('Stateless')
     expect(typeChip).toHaveAttribute(
-      'title',
+      'data-tooltip',
       'This agent persists session state to disk and scales to zero while idle (shown as Idle). It wakes on demand.'
     )
   })
