@@ -330,7 +330,7 @@ const bumpEvents = {
 function logoutEvent(id: 'E19' | 'E20'): BumpEvent {
   return {
     id,
-    // `evenfire://logout` reaches the same `AppService.logout()` through `main.ts:110-113`.
+    // `evenfire://logout` reaches the same `AppService.logout()` through `main.ts:120-123`.
     label: id === 'E19' ? 'E19 auth:logout' : 'E20 evenfire://logout',
     check: () => true,
     expect: () => ({ bump: true }),
@@ -1510,7 +1510,7 @@ describe('browser sign-in link acceptance, redeem and install', () => {
 
     expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
     await until(harness, () => redeem.reached, 'the redeem fetch')
-    // `evenfire://logout` reaches the same `AppService.logout()` (`main.ts:110-113`).
+    // `evenfire://logout` reaches the same `AppService.logout()` (`main.ts:120-123`).
     await service.logout()
     redeem.release(edgeResponse(readEdgeRecord(REDEEM_SIGNED_IN)))
     await harness.drain()

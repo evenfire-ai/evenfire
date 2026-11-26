@@ -2767,7 +2767,7 @@ export class AppService {
    * The deadline check for a resume or an unlock-screen (D12), where a sleep may have kept the
    * deadline timer from firing: a waiting attempt past its wall-clock deadline ends `timed_out`,
    * and that end is pushed (deferred, D6), so a renderer that reads nothing still learns of it
-   * (A3-26). `main.ts`'s power monitor does not call it yet.
+   * (A3-26). `main.ts`'s power monitor calls it on `resume` and `unlock-screen`.
    */
   checkBrowserSignInDeadline(): void {
     this.browserSignIn.checkDeadline()

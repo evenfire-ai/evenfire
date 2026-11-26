@@ -6,7 +6,11 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { format } from 'node:util'
 import type { AppService } from '../src/appService.js'
-import type { BrowserSignInClock, BrowserSignInTimerHandle } from '../src/browserSignIn.js'
+import {
+  BrowserSignInAttempts,
+  type BrowserSignInClock,
+  type BrowserSignInTimerHandle,
+} from '../src/browserSignIn.js'
 import type { TokenStore } from '../src/tokenStore.js'
 import type { BrowserSignInSnapshot, SessionMe } from '../src/types.js'
 import { testSessionMe, testTeamSwitchResult } from './authTestFixtures.js'
@@ -17,10 +21,10 @@ import { type EdgeRecordKey, edgeResponse, readEdgeRecord } from './edgeContract
  * with stored profiles A and B and a REST-only profile C, `electron` mocked, the token store a
  * fake passed through `AppServiceOptions.tokenStore`, `bindChatStoreForUser` mocked, and HTTP
  * mocked at `fetch` only, so the real `AuthClient` and `requestJson` run. The service gets the
- * test-only generation observer (feeding `bumpLog`), a `FakeBrowserSignInClock` and the links
- * option through its constructor, as `main.ts` never does. Each snapshot the service pushes
- * through `onBrowserSignInChanged` lands in `pushes`, unless the harness is built without a push
- * target.
+ * test-only generation observer (feeding `bumpLog`) and a `FakeBrowserSignInClock` through its
+ * constructor, which `main.ts` never passes, and the links option, which `main.ts` takes from the
+ * dev-isolation policy. Each snapshot the service pushes through `onBrowserSignInChanged` lands
+ * in `pushes`, unless the harness is built without a push target.
  */
 
 /** One counter is shared by every recorder, so records of different kinds can be ordered. */
@@ -93,6 +97,48 @@ export class FakeBrowserSignInClock implements BrowserSignInClock {
     }
     return next
   }
+}
+
+/**
+ * Snapshots as the real `BrowserSignInAttempts` pushes them (T1), for tests that only carry a
+ * snapshot across a boundary (IPC, `main.ts`). Attempt 1 waits, redeems, ends `failed` with a
+ * reason and is acknowledged; attempt 2 is cancelled; attempt 3 is refused with a reason. In push
+ * order: waiting, redeeming, ended, idle, waiting, ended, waiting, ended.
+ */
+export async function pushedBrowserSignInSnapshots(): Promise<BrowserSignInSnapshot[]> {
+  const pushes: BrowserSignInSnapshot[] = []
+  const store = new BrowserSignInAttempts({
+    push: snapshot => pushes.push(snapshot),
+    warn: (message, error) => {
+      throw new Error(`pushedBrowserSignInSnapshots: unexpected warning ${message}`, {
+        cause: error,
+      })
+    },
+    clock: new FakeBrowserSignInClock(),
+  })
+  const binding = {
+    environmentKey: 'fixture_env-0123456789ab',
+    profileId: null,
+    restBaseUrl: 'https://edge-fixture.example.test',
+  }
+  const record = (n: number) =>
+    store.record({
+      state: `fake-state-${n}`,
+      verifier: `fake-verifier-${n}`,
+      binding,
+      generation: n,
+    })
+  const first = record(1)
+  store.beginRedeem(first)
+  store.end(first, { outcome: 'failed', reason: 'different_environment' })
+  store.acknowledge(first)
+  record(2)
+  store.cancel()
+  const third = record(3)
+  store.end(third, { outcome: 'refused', reason: 'account_disabled' })
+  // Each push is deferred to a microtask (D6).
+  await new Promise<void>(resolve => setImmediate(resolve))
+  return pushes
 }
 
 /**

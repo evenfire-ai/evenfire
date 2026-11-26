@@ -690,6 +690,33 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       )
     }
   )
+  // Browser sign-in (design §10.1). Start takes nothing from the renderer: the service reads the
+  // methods and the sign-in URL itself (D5). What comes back is the login model, the attempt id
+  // and snapshots, never a secret or a URL (C-1, D18).
+  ipcMain.handle('auth:getLoginMethods', async event => {
+    assertTrustedSender(event)
+    return service.getLoginMethods()
+  })
+  ipcMain.handle('auth:startBrowserSignIn', async event => {
+    assertTrustedSender(event)
+    return service.startBrowserSignIn()
+  })
+  ipcMain.handle('auth:cancelBrowserSignIn', async event => {
+    assertTrustedSender(event)
+    return service.cancelBrowserSignIn()
+  })
+  ipcMain.handle('auth:getBrowserSignInState', async event => {
+    assertTrustedSender(event)
+    return service.getBrowserSignInState()
+  })
+  ipcMain.handle('auth:acknowledgeBrowserSignInResult', async (event, payload: unknown) => {
+    assertTrustedSender(event)
+    const attemptId = (payload as { attemptId?: unknown } | null | undefined)?.attemptId
+    if (typeof attemptId !== 'number' || !Number.isSafeInteger(attemptId) || attemptId < 1) {
+      throw new Error('Invalid browser sign-in attempt')
+    }
+    return service.acknowledgeBrowserSignInResult(attemptId)
+  })
   ipcMain.handle('auth:diagnoseLoginBackend', async event => {
     assertTrustedSender(event)
     return service.diagnoseLoginBackend()

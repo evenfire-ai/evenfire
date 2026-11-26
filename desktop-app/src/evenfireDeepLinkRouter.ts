@@ -15,9 +15,9 @@ type EvenfireDeepLinkRouterOptions<TWindow extends RendererTarget> = {
   handleGfsResourceDeepLink: (rawUrl: string) => boolean
   /**
    * Main's `desktop-login` handler (D8). The router calls it synchronously and does nothing else
-   * with the link: no send, no focus, no queue, no log. Without it the link is dropped.
+   * with the link: no send, no focus, no queue, no log.
    */
-  handleDesktopLoginLink?: (rawUrl: string) => void
+  handleDesktopLoginLink: (rawUrl: string) => void
   isRendererReady: () => boolean
   logout: () => Promise<unknown>
   gfsResourceDeepLinkHost: string
@@ -123,7 +123,7 @@ export function createEvenfireDeepLinkRouter<TWindow extends RendererTarget>(
     const { parsed, hostname } = appLink
 
     if (hostname === DESKTOP_LOGIN_DEEP_LINK_HOST) {
-      options.handleDesktopLoginLink?.(rawUrl)
+      options.handleDesktopLoginLink(rawUrl)
       return
     }
 
