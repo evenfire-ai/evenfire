@@ -19,13 +19,8 @@ import {
   IconTrash,
   IconUpload,
 } from '@components/SidebarNav/icons'
-import type { GfsResourceActionId } from '@lib/gfsResourceActions'
-import { gfsActionNeedsAffordances } from '@lib/gfsRowActionAvailability'
-import type {
-  GfsResourceMenuActionKey,
-  GfsResourceMenuPermissionStatus,
-  GfsResourceMenuProps,
-} from './types'
+import { withPermissionGate } from '@lib/gfsResourceMenuPermissionGate'
+import type { GfsResourceMenuActionKey, GfsResourceMenuProps } from './types'
 
 type GfsResourceMenuAction = {
   color?: 'neutral' | 'danger'
@@ -115,17 +110,6 @@ function belowOrAboveTop(anchorRect: AnchorRect, height: number, viewportHeight:
     Math.max(EDGE_INSET, unclampedTop),
     Math.max(EDGE_INSET, viewportHeight - height - EDGE_INSET)
   )
-}
-
-function withPermissionGate(
-  action: GfsResourceMenuAction,
-  actionId: GfsResourceActionId,
-  permissionStatus: GfsResourceMenuPermissionStatus | undefined
-): GfsResourceMenuAction {
-  if (permissionStatus === undefined || permissionStatus === 'ok' || action.submenu) return action
-  // Unresolved or failed bits keep the item visible but inert, so the menu
-  // never offers an action the target may not allow.
-  return gfsActionNeedsAffordances(actionId) ? { ...action, disabled: true } : action
 }
 
 export function GfsResourceMenu({

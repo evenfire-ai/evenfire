@@ -12,6 +12,7 @@ import {
   isGfsSessionGeneration,
 } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
+import { filePreviewActionOptions } from '@lib/gfsResourceActionSurfaces'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
 import { copyGfsDeepLink } from '@lib/gfsResourceClipboard'
 import type { FilePreviewPageProps } from './FilePreviewPage.types'
@@ -244,31 +245,28 @@ export function FilePreviewPage({
     setCopyContentReady(Boolean(copy))
   }, [])
 
-  const resourceActions = buildGfsResourceActions({
-    kind: 'file',
-    uri: gfsUri,
-    handlers: {
-      refresh: !denied && !unavailable && !accessRevoked ? () => void handleRefresh() : undefined,
-      'copy-link': () => void handleCopyLink(),
-      'open-route': onOpenRoute,
-      'copy-content':
-        !denied &&
-        !unavailable &&
-        !accessRevoked &&
-        (fileKind === 'image' || fileKind === 'markdown')
-          ? () => void handleCopyContent()
-          : undefined,
-      ...previewResourceActions.handlers,
-    },
-    canShare: previewResourceActions.canShare,
-    canRename: previewResourceActions.canRename,
-    canMove: previewResourceActions.canMove,
-    canDownload: previewResourceActions.canDownload,
-    canDelete: previewResourceActions.canDelete,
-    mutating: previewResourceActions.mutating,
-    canCopyContent: copyContentReady,
-    refreshing,
-  })
+  const resourceActions = buildGfsResourceActions(
+    filePreviewActionOptions({
+      uri: gfsUri,
+      accessBlocked: Boolean(denied || unavailable || accessRevoked),
+      copyContentSupported: fileKind === 'image' || fileKind === 'markdown',
+      copyContentReady,
+      canShare: previewResourceActions.canShare,
+      canRename: previewResourceActions.canRename,
+      canMove: previewResourceActions.canMove,
+      canDownload: previewResourceActions.canDownload,
+      canDelete: previewResourceActions.canDelete,
+      mutating: previewResourceActions.mutating,
+      refreshing,
+      handlers: {
+        refresh: () => void handleRefresh(),
+        'copy-link': () => void handleCopyLink(),
+        'open-route': onOpenRoute,
+        'copy-content': () => void handleCopyContent(),
+        ...previewResourceActions.handlers,
+      },
+    })
+  )
   const menuResourceName = denied || unavailable || accessRevoked ? 'unavailable file' : fileName
   const fileActionsMenu = (
     <GfsResourceMenu actions={getGfsMenuActions(resourceActions)} resourceName={menuResourceName} />

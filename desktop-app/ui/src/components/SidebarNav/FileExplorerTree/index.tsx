@@ -24,11 +24,9 @@ import { readCachedGfsChildNames } from '@lib/gfsCachedChildNames'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { fetchGfsAuthority } from '@lib/gfsFreshPermissions'
 import { resolveGfsPreview } from '@lib/gfsPreview'
+import { sidebarRowActionOptions } from '@lib/gfsResourceActionSurfaces'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
-import {
-  gfsPendingRowActionAvailability,
-  gfsRowActionAvailability,
-} from '@lib/gfsRowActionAvailability'
+import { gfsRowActionAvailability } from '@lib/gfsRowActionAvailability'
 import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
 import { isGfsChildrenDenied, purgeDeniedGfsChildren } from '@/gfs/deniedChildren'
 import { useGfsDragAdjudication } from '@/gfs/dragAdjudication'
@@ -1256,65 +1254,53 @@ export function FileExplorerTree({
 
   const rowMenuActions = (menu: FileExplorerRowMenu) => {
     const { target } = menu
-    // Built like the Files row menu. Until the bits settle every bit-dependent
-    // action is listed and the menu keeps it inert.
-    const availability =
-      menu.bits === 'ok'
-        ? gfsRowActionAvailability({
+    const inHost = (actionId: GfsHostActionId) => () => {
+      if (!host) return
+      // A menu opened under another session never reaches the host,
+      // even before the session-change cleanup has closed it.
+      const live = liveAuthorityRef.current
+      if (
+        liveDragScopeRef.current === null ||
+        live.scope !== menu.authority.scope ||
+        live.generation !== menu.authority.generation
+      ) {
+        closeRowMenu()
+        return
+      }
+      host.openGfsAction(target, actionId)
+    }
+    // Built like the Files row menu.
+    return getGfsMenuActions(
+      buildGfsResourceActions(
+        sidebarRowActionOptions({
+          kind: target.kind,
+          uri: target.gfsUri,
+          readable: target.readable,
+          previewable: resolveGfsPreview(target) !== null,
+          parentResourceId: target.parentResourceId,
+          bits: menu.bits,
+          availability: gfsRowActionAvailability({
             resource: target,
             listing: menu.listing,
             rowAffordances: menu.rowAffordances,
             parentAffordances: menu.parentAffordances,
-          })
-        : gfsPendingRowActionAvailability(target)
-    const isDirectory = target.kind === 'directory'
-    const readable = target.readable !== false
-    const canPreview = !isDirectory && readable && resolveGfsPreview(target) !== null
-    const canWrite = isDirectory && availability.canWrite
-    const inHost = (actionId: GfsHostActionId) =>
-      host
-        ? () => {
-            // A menu opened under another session never reaches the host,
-            // even before the session-change cleanup has closed it.
-            const live = liveAuthorityRef.current
-            if (
-              liveDragScopeRef.current === null ||
-              live.scope !== menu.authority.scope ||
-              live.generation !== menu.authority.generation
-            ) {
-              closeRowMenu()
-              return
-            }
-            host.openGfsAction(target, actionId)
-          }
-        : undefined
-    return getGfsMenuActions(
-      buildGfsResourceActions({
-        kind: target.kind,
-        uri: target.gfsUri,
-        handlers: {
-          'copy-link': inHost('copy-link'),
-          'open-folder': isDirectory ? () => handleActivateFolder(target) : undefined,
-          'new-folder': inHost('new-folder'),
-          'upload-file': inHost('upload-file'),
-          rename: inHost('rename'),
-          move: inHost('move'),
-          share: inHost('share'),
-          delete: inHost('delete'),
-          preview: canPreview ? () => handleActivateFile(target) : undefined,
-          download: inHost('download'),
-        },
-        canOpenFolder: isDirectory,
-        canRename: availability.canRename,
-        canMove: availability.canMove,
-        canCreateFolder: canWrite,
-        canUpload: canWrite,
-        canShare: availability.canManage,
-        canDelete: availability.canDelete,
-        canPreview,
-        canDownload: !isDirectory && readable,
-        mutating: ctrl.mutating,
-      })
+          }),
+          hostAvailable: Boolean(host),
+          mutating: ctrl.mutating,
+          handlers: {
+            'copy-link': inHost('copy-link'),
+            'open-folder': () => handleActivateFolder(target),
+            'new-folder': inHost('new-folder'),
+            'upload-file': inHost('upload-file'),
+            rename: inHost('rename'),
+            move: inHost('move'),
+            share: inHost('share'),
+            delete: inHost('delete'),
+            preview: () => handleActivateFile(target),
+            download: inHost('download'),
+          },
+        })
+      )
     )
   }
 

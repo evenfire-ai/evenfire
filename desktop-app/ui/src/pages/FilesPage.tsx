@@ -71,6 +71,10 @@ import {
 import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
 import { isGfsPreviewFile, resolveGfsPreview } from '@lib/gfsPreview'
 import type { GfsPreviewResource } from '@lib/gfsPreview'
+import {
+  filesCurrentResourceActionOptions,
+  filesRowActionOptions,
+} from '@lib/gfsResourceActionSurfaces'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
 import type { GfsResourceActionId } from '@lib/gfsResourceActions'
 import { copyGfsDeepLink } from '@lib/gfsResourceClipboard'
@@ -2328,55 +2332,42 @@ export function FilesPage({
   }
 
   const currentResourceActions = current
-    ? buildGfsResourceActions({
-        kind: current.kind,
-        uri: current.gfsUri,
-        handlers: {
-          refresh: () => void handleRefreshCurrent(),
-          'copy-link': () => void handleCopyLink(current.gfsUri),
-          'open-route': () => setOpenLinkOpen(true),
-          rename: () => openRenameTarget(current),
-          move: () => openMoveTarget(current),
-          'new-folder': () => openCreateFolder(current.resourceId, current.name),
-          'upload-file': () =>
-            requestUploadForFolder(
-              current.resourceId,
-              new Set(items.map(item => item.name)),
-              current.name
-            ),
-          share: () => openManageCurrent(),
-          preview:
-            currentIsFile && currentPreviewAvailable
-              ? () => void openFilePreview(current)
-              : undefined,
-          download: currentIsFile
-            ? () => void handleDownload(current.gfsUri, current.name)
-            : undefined,
-          'download-zip': currentIsFolder
-            ? () => void handleFolderZipDownload(crumbAsResource(current))
-            : undefined,
-          replace:
-            currentIsFile && canWriteCurrent
-              ? (file, context) => {
-                  if (file) void handleReplaceCurrentFile(file)
-                  else context?.requestFileSelection?.()
-                }
-              : undefined,
-          delete: () => void openDeleteTarget(current),
-        },
-        canRename: canWriteCurrent,
-        canMove: canMoveCurrent,
-        canCreateFolder: currentIsFolder && canWriteCurrent,
-        canUpload: currentIsFolder && canWriteCurrent,
-        canShare: canManageCurrent,
-        canPreview: currentPreviewAvailable,
-        canDownload: currentIsFile,
-        canDownloadZip: currentIsFolder,
-        canReplace: currentIsFile && canWriteCurrent,
-        canDelete: canDeleteCurrent,
-        mutating: ctrl.mutating,
-        refreshing: refreshingCurrent,
-      })
+    ? buildGfsResourceActions(
+        filesCurrentResourceActionOptions({
+          kind: current.kind,
+          uri: current.gfsUri,
+          canWrite: canWriteCurrent,
+          canManage: canManageCurrent,
+          canDelete: canDeleteCurrent,
+          canMove: canMoveCurrent,
+          previewable: currentPreviewAvailable,
+          mutating: ctrl.mutating,
+          refreshing: refreshingCurrent,
+          handlers: {
+            refresh: () => void handleRefreshCurrent(),
+            'copy-link': () => void handleCopyLink(current.gfsUri),
+            'open-route': () => setOpenLinkOpen(true),
+            rename: () => openRenameTarget(current),
+            move: () => openMoveTarget(current),
+            'new-folder': () => openCreateFolder(current.resourceId, current.name),
+            'upload-file': () =>
+              requestUploadForFolder(
+                current.resourceId,
+                new Set(items.map(item => item.name)),
+                current.name
+              ),
+            share: () => openManageCurrent(),
+            preview: () => void openFilePreview(current),
+            download: () => void handleDownload(current.gfsUri, current.name),
+            'download-zip': () => void handleFolderZipDownload(crumbAsResource(current)),
+            replace: (file, context) => {
+              if (file) void handleReplaceCurrentFile(file)
+              else context?.requestFileSelection?.()
+            },
+            delete: () => void openDeleteTarget(current),
+          },
+        })
+      )
     : []
 
   const openResource = (resource: GfsDriveResource) => {
@@ -2401,54 +2392,34 @@ export function FilesPage({
   const resourceMenuActionsFor = (
     resource: GfsDriveResource,
     availability: GfsRowActionAvailability
-  ) => {
-    const isDirectory = resource.kind === 'directory'
-    const canPreview =
-      !isDirectory && resource.readable !== false && isGfsPreviewFile(resource.name)
-    const canDownload = !isDirectory && resource.readable !== false
-    const canDownloadZip = isDirectory && resource.readable !== false
-    const canRename = availability.canRename
-    const canWrite = isDirectory && availability.canWrite
-    const canManage = availability.canManage
-    const canDelete = availability.canDelete
-    return getGfsMenuActions(
-      buildGfsResourceActions({
-        kind: resource.kind,
-        uri: resource.gfsUri,
-        handlers: {
-          'copy-link': () => void handleCopyLink(resource.gfsUri),
-          'open-route': () => setOpenLinkOpen(true),
-          'open-folder': isDirectory ? () => openResource(resource) : undefined,
-          'new-folder': canWrite
-            ? () => openCreateFolder(resource.resourceId, resource.name)
-            : undefined,
-          'upload-file': canWrite
-            ? () => requestUploadForFolder(resource.resourceId, new Set(), resource.name)
-            : undefined,
-          rename: () => openRenameTarget(resource),
-          move: () => openMoveTarget(resource),
-          share: () => openManage(resource),
-          delete: () => openDeleteTarget(resource),
-          preview: canPreview ? () => void openFilePreview(resource) : undefined,
-          download: canDownload
-            ? () => void handleDownload(resource.gfsUri, resource.name)
-            : undefined,
-          'download-zip': canDownloadZip ? () => void handleFolderZipDownload(resource) : undefined,
-        },
-        canOpenFolder: isDirectory,
-        canRename,
-        canMove: availability.canMove,
-        canCreateFolder: canWrite,
-        canUpload: canWrite,
-        canShare: canManage,
-        canDelete,
-        canPreview,
-        canDownload,
-        canDownloadZip,
-        mutating: ctrl.mutating,
-      })
+  ) =>
+    getGfsMenuActions(
+      buildGfsResourceActions(
+        filesRowActionOptions({
+          kind: resource.kind,
+          uri: resource.gfsUri,
+          readable: resource.readable,
+          previewable: isGfsPreviewFile(resource.name),
+          availability,
+          mutating: ctrl.mutating,
+          handlers: {
+            'copy-link': () => void handleCopyLink(resource.gfsUri),
+            'open-route': () => setOpenLinkOpen(true),
+            'open-folder': () => openResource(resource),
+            'new-folder': () => openCreateFolder(resource.resourceId, resource.name),
+            'upload-file': () =>
+              requestUploadForFolder(resource.resourceId, new Set(), resource.name),
+            rename: () => openRenameTarget(resource),
+            move: () => openMoveTarget(resource),
+            share: () => openManage(resource),
+            delete: () => openDeleteTarget(resource),
+            preview: () => void openFilePreview(resource),
+            download: () => void handleDownload(resource.gfsUri, resource.name),
+            'download-zip': () => void handleFolderZipDownload(resource),
+          },
+        })
+      )
     )
-  }
 
   const currentIsBeingRenamed = renameTarget?.resourceId === current?.resourceId
   const currentIsInBreadcrumbs = Boolean(
