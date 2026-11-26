@@ -168,7 +168,7 @@ const NUM_RUNS = Number(process.env.APPROVAL_MODEL_RUNS ?? 75)
 const MAX_COMMANDS = 60
 /**
  * The per-test timeout, per run: about twice the slowest a run took inside the
- * whole control-ui run (0.68 s: 78.4 s / 116 runs). About 123 s at N = 75, and
+ * whole control-ui run (0.68 s: 78.4 s / 116 runs). About 124 s at N = 75, and
  * it grows with APPROVAL_MODEL_RUNS.
  */
 const TIMEOUT_MS_PER_RUN = 1_350
@@ -1948,32 +1948,50 @@ function checkL2(w: World): void {
 }
 
 /**
+ * How L3 sees a switch run: its conflicts (writes answered 409), and every
+ * other request. An other is a request the switch never received (hung,
+ * dropped or timed out: not delivered, Ruling 68) or any answer but 200 or a
+ * write's 409. L3 holds the run only when it met one to six conflicts and
+ * nothing else, and no `AdvanceClock` command moved the clock during it.
+ */
+function l3Run(
+  w: World,
+  record: SwitchRecord
+): { conflicts: FakeLogEntry[]; others: FakeLogEntry[]; held: boolean } {
+  const requests = w.fake.log.filter(entry => {
+    const tag = w.owners.get(entry.seq)
+    return tag?.kind === 'switch' && tag.id === record.id
+  })
+  const conflicts = requests.filter(
+    entry => entry.kind === 'write' && entry.response?.status === 409
+  )
+  const others = requests.filter(
+    entry =>
+      !entry.delivered ||
+      !(
+        entry.response?.status === 200 ||
+        (entry.kind === 'write' && entry.response?.status === 409)
+      )
+  )
+  const held =
+    conflicts.length > 0 && conflicts.length <= 6 && others.length === 0 && !record.clockMoved
+  return { conflicts, others, held }
+}
+
+/**
  * L3: the switch succeeds through up to six conflicts inside its 20 s budget.
- * Every run that met only conflicts is held to it, unless an `AdvanceClock`
- * command moved the clock during the run: the drain only runs the clock to
- * each next timer, so the budget can run out only through the switch's own
- * waits.
+ * The spec promises that only after consecutive conflicts, so L3 holds only a
+ * run whose every request was delivered and answered 200, or 409 for a
+ * write (l3Run). Without a moved clock, a held run's time is its backoff
+ * waits alone: the drain runs the clock only to the next timer, and only when
+ * no request of the run is still to be answered.
  */
 function checkL3(w: World): void {
   for (const record of w.switches) {
     const outcome = record.outcome
     if (!outcome) continue
-    const requests = w.fake.log.filter(entry => {
-      const tag = w.owners.get(entry.seq)
-      return tag?.kind === 'switch' && tag.id === record.id
-    })
-    const conflicts = requests.filter(
-      entry => entry.kind === 'write' && entry.response?.status === 409
-    )
-    const others = requests.filter(
-      entry =>
-        !(
-          entry.response?.status === 200 ||
-          (entry.kind === 'write' && entry.response?.status === 409)
-        )
-    )
-    if (conflicts.length === 0 || conflicts.length > 6 || others.length > 0) continue
-    if (record.clockMoved) continue
+    const { conflicts, held } = l3Run(w, record)
+    if (!held) continue
     const elapsed = (record.settleClock ?? 0) - record.startClock
     count(w.stats, 'checks', 'L3')
     if (outcome.kind === 'failed') {
@@ -3207,12 +3225,11 @@ const PINS = {
   },
   sixConflicts: (w: World) => {
     const record = w.switches[0]
-    const conflicts = record
-      ? writesOf(w, { kind: 'switch', id: record.id }).filter(put => put.response?.status === 409)
-      : []
-    return record?.outcome?.kind === 'saved' && conflicts.length === 6
+    // L3 must hold this run (l3Run): six conflicts and nothing else.
+    const run = record ? l3Run(w, record) : undefined
+    return record?.outcome?.kind === 'saved' && run?.held && run.conflicts.length === 6
       ? null
-      : 'the switch did not save Manual through six conflicts'
+      : 'the switch did not save Manual through six conflicts that L3 holds'
   },
   switchContinuation: (w: World) => {
     const record = w.switches[0]
@@ -3239,6 +3256,21 @@ const PINS = {
     return save?.settledInView === false && record?.settledInInstance === false && record.shown
       ? null
       : 'no save and no switch ended away from their tab with their toasts'
+  },
+  hungReadSkipsL3: (w: World) => {
+    const record = w.switches[0]
+    if (!record?.outcome) return 'the switch did not end'
+    const run = l3Run(w, record)
+    // A read of this run that a hang struck, and that never reached the switch.
+    const hungRead = run.others.some(
+      entry =>
+        entry.kind === 'read' &&
+        !entry.delivered &&
+        w.faults.some(fault => fault.kind === 'hang' && fault.entrySeq === entry.seq)
+    )
+    return hungRead && run.conflicts.length > 0 && !record.clockMoved && !run.held
+      ? null
+      : 'the switch did not meet conflicts and a hung read, with L3 skipping it for the read'
   },
 } satisfies Record<string, (w: World) => string | null>
 
@@ -3664,6 +3696,26 @@ const EXAMPLES: Example[] = [
       new SetToManual(false),
       new Navigate('overview'),
       new Step(4),
+    ],
+  ],
+  // L3 (Ruling 68, the review's probe): two of the switch's reads hang and
+  // time out on its 8 s read timer while it meets conflicts, and its budget
+  // runs out. The time went to the hung reads, not to conflicts, so L3 does
+  // not hold the run. Example 12's jitter seed, as in the probe.
+  [
+    scriptedScheduler(),
+    {
+      crd: 'current',
+      start: 'alpha',
+      blocks: { alpha: { ...OPEN_BLOCK, ceiling: 'auto' }, beta: null },
+      random: 12,
+      pin: 'hungReadSkipsL3',
+    },
+    [
+      new Step(4),
+      new ArmFault('alpha', 'read', 'hang'),
+      new SwitchThroughConflicts(6),
+      new ArmFault('alpha', 'read', 'hang'),
     ],
   ],
 ]
