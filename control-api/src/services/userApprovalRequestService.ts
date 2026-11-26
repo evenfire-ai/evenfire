@@ -24,6 +24,7 @@ import {
 } from './workflows/workflowActionTransition.js'
 import type { WorkflowAuthorityBinding } from './workflows/workflowAuthorityBindingService.js'
 import { persistWorkflowAuthorityBinding } from './workflows/workflowAuthorityBindingService.js'
+import { storedMaxRunDurationSeconds } from './workflows/workflowRunDuration.js'
 import {
   type WorkflowTriggerGrantResult,
   resolveWorkflowTriggerGrant,
@@ -908,7 +909,7 @@ async function createWorkflowRunForApprovedTriggerIntent(
       row.inputs ? JSON.stringify(row.inputs) : null,
       row.intermediateParameters ? JSON.stringify(row.intermediateParameters) : null,
       row.outputOverrides ? JSON.stringify(row.outputOverrides) : null,
-      row.maxDurationSeconds,
+      storedMaxRunDurationSeconds(row.maxDurationSeconds),
       row.ttlSecondsAfterFinished,
       params.approvalRequestId,
       row.idempotencyPayloadHash,

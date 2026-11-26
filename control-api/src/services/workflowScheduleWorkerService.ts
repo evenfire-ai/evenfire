@@ -39,7 +39,9 @@
  *       - `Pending` created less than FORBID_PENDING_ACTIVE_BOUND_SECONDS ago, or
  *       - `Running` or `AuthorizationPaused` started less than
  *         min(max_duration_seconds ?? cap, cap) + FORBID_RUNNING_GRACE_SECONDS
- *         ago, with cap = FORBID_RUNNING_MAX_DURATION_CAP_SECONDS.
+ *         ago, with cap = WORKFLOW_RUN_MAX_DURATION_CAP_SECONDS
+ *         (workflows/workflowRunDuration.ts). Every run insert stores that cap
+ *         when the recipe gives no duration; rows written before it may hold NULL.
  *     Nothing terminalises a `Pending` row whose child CR never got created,
  *     and the WRC only reaps `Running` rows that carry max_duration_seconds, so
  *     without these bounds one stuck row would block the schedule forever.
@@ -72,6 +74,7 @@ import {
   workflowScheduleWorkerRunsTotal,
 } from '../observability/metrics.js'
 import { createRun } from './workflowRunService.js'
+import { WORKFLOW_RUN_MAX_DURATION_CAP_SECONDS } from './workflows/workflowRunDuration.js'
 
 const SCHEDULE_WORKER_LOCK_KEY_SQL = `hashtext('wrc-schedule-worker-v1')`
 
@@ -97,16 +100,6 @@ type ScheduleConcurrencyPolicy = 'Forbid' | 'Replace' | 'Allow'
  * nothing ever moves the row out of Pending.
  */
 export const FORBID_PENDING_ACTIVE_BOUND_SECONDS = 15 * 60
-
-/**
- * Ceiling on a `Running` run's own max_duration_seconds, and the value used
- * when it is NULL. Equals the WRC's hard limit on
- * `spec.runRetention.maxRunDurationSeconds` (workflow-recipes/src/config.ts
- * DEFAULT_WORKFLOW_MAX_RUN_DURATION_SECONDS, enforced in workflowLimits.ts;
- * the env override can only lower it). The CRD default (604800) is above it,
- * hence the clamp.
- */
-export const FORBID_RUNNING_MAX_DURATION_CAP_SECONDS = 24 * 60 * 60
 
 /**
  * Slack after a `Running` run's deadline before it stops blocking. The WRC
@@ -173,8 +166,8 @@ interface ScheduleRow {
   allowed_actors: TriggerAllowedActor[] | null
   /**
    * Denormalized copy of `spec.runRetention.maxRunDurationSeconds` written by
-   * the WRC schedule sync. NULL means no timeout; any positive integer must be
-   * copied onto the workflow_runs row so stuck-run enforcement can function.
+   * the WRC schedule sync. A positive integer is copied onto the workflow_runs
+   * row; NULL makes createRun store WORKFLOW_RUN_MAX_DURATION_CAP_SECONDS.
    */
   max_duration_seconds: number | null
   /**
@@ -552,7 +545,7 @@ export async function findActiveRunForRecipe(
       recipeNamespace,
       recipeName,
       FORBID_PENDING_ACTIVE_BOUND_SECONDS,
-      FORBID_RUNNING_MAX_DURATION_CAP_SECONDS,
+      WORKFLOW_RUN_MAX_DURATION_CAP_SECONDS,
       FORBID_RUNNING_GRACE_SECONDS,
     ]
   )
