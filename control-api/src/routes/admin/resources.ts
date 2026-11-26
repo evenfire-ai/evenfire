@@ -1043,10 +1043,18 @@ export function createAdminResourcesRouter(
             const secretRefIssue = await validateHostSecretRef(gateway, hostSpec)
             if (secretRefIssue) throw new HostSpecInvalidError(secretRefIssue)
             return gateway.updateResource(plural, req.params.name, body, ns, {
-              approvalChangeSummary: buildApprovalChangeSummary({
-                before: recordValue(ratchetCurrent?.spec)?.approval,
-                after: hostSpec.approval,
-              }),
+              // Spec §6.8: the summary is computed from the read the write is
+              // based on. Only a versioned PUT can change spec.approval (the
+              // version rule), and for it the pre-lock read above and the locked
+              // read agree, or the write conflicts. A version-less PUT leaves
+              // approval as stored, so it records no summary: one built from the
+              // pre-lock read could show another writer's change as this one's.
+              approvalChangeSummary: body.metadata?.resourceVersion
+                ? buildApprovalChangeSummary({
+                    before: recordValue(ratchetCurrent?.spec)?.approval,
+                    after: hostSpec.approval,
+                  })
+                : undefined,
             })
           })
         } catch (err) {

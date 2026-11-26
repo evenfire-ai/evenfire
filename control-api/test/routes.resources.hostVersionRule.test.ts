@@ -8,8 +8,9 @@
  * version-conflict envelope (test/fixtures/wire/host-put-409.wire.json) with
  * the reason `approval_requires_version`.
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { type MockInstance, afterEach, describe, expect, it } from 'vitest'
 import request from 'supertest'
+import { pool } from '../src/db.js'
 import {
   type HarnessAllowedModel,
   type HarnessObject,
@@ -179,5 +180,85 @@ describe('Host PUT version rule', () => {
 
     expect(res.status).toBe(200)
     expect(storedSpec(harness).contextRef).toBe('ctx-b')
+  })
+
+  describe('the summary comes from the write that changes approval (security m-3)', () => {
+    const intentSummary = (h: HostRouteHarness): string | undefined =>
+      (
+        h.adminOperations.find(call => call.method === 'persistHostIntent')?.input as
+          | { summary?: string }
+          | undefined
+      )?.summary
+
+    it('a version-less PUT whose pre-lock read differs from the locked read records no summary', async () => {
+      // The route's pre-write read sees approval `allow_all`; another writer
+      // restores `manual` before the locked read (the first Postgres connection
+      // of the write). The PUT carries `manual`, so it passes the version rule
+      // and changes nothing; a summary built from the earlier read would record
+      // allow_all to manual on the durable record as this request's change.
+      harness = buildHostRouteHarness({ allowedModels: ALLOWED_MODELS })
+      const raced = harness
+      raced.store.seed('hosts', {
+        ...SEED,
+        spec: {
+          ...SEED.spec,
+          approval: { defaultPolicy: 'cli_only', channels: {}, modeCeiling: 'allow_all' },
+        },
+      })
+      const connect = pool.connect as unknown as MockInstance
+      const real = connect.getMockImplementation() as (...args: unknown[]) => Promise<unknown>
+      let flipped = false
+      connect.mockImplementation(async (...args: unknown[]) => {
+        if (!flipped) {
+          flipped = true
+          const stored = raced.store.get('hosts', 'foo')!
+          raced.store.seed('hosts', {
+            ...stored,
+            spec: {
+              ...stored.spec,
+              approval: { defaultPolicy: 'cli_only', channels: {}, modeCeiling: 'manual' },
+            },
+          })
+        }
+        return real(...args)
+      })
+
+      const res = await request(raced.app)
+        .put(HOST_PATH)
+        .send({
+          spec: {
+            ...SEED.spec,
+            contextRef: 'ctx-b',
+            approval: { defaultPolicy: 'cli_only', channels: {}, modeCeiling: 'manual' },
+          },
+        })
+
+      expect(flipped).toBe(true)
+      expect(res.status).toBe(200)
+      expect(raced.adminOperations.filter(c => c.method === 'persistHostIntent')).toHaveLength(1)
+      expect(intentSummary(raced)).toBeUndefined()
+    })
+
+    it('a versioned PUT that changes approval still records a summary', async () => {
+      harness = seededHarness()
+      const read = await request(harness.app).get(HOST_PATH)
+
+      const res = await request(harness.app)
+        .put(HOST_PATH)
+        .send({
+          metadata: { resourceVersion: read.body.metadata.resourceVersion },
+          spec: {
+            ...(read.body.spec as Record<string, unknown>),
+            approval: { defaultPolicy: 'cli_only', channels: {}, modeCeiling: 'allow_all' },
+          },
+        })
+
+      expect(res.status).toBe(200)
+      const summary = intentSummary(harness)
+      expect(summary).toBeDefined()
+      expect(JSON.parse(summary as string).fields).toEqual({
+        modeCeiling: { old: 'manual', new: 'allow_all' },
+      })
+    })
   })
 })
