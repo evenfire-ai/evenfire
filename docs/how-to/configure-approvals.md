@@ -380,11 +380,10 @@ Other things to know:
   (it refuses private ones). Neither `deploy/base` nor the minikube overlay
   sets it. Setting `http_request` to Skip without an allowlist logs an
   `[approval-config]` warning at startup.
-- **In-flight action checks.** Any change to `spec.approval`, the off switch
-  included, changes the Host's approval-policy fingerprint. An action-authority
-  check that was bound to the earlier fingerprint fails revalidation and
-  comes back stale (`access_path_stale`) instead of running, so it has to be
-  checked again against the new policy.
+- **In-flight action checks.** With `CONTROL_API_USER_ACCESS_ACTION_CONTEXT_V2` on
+  (off by default), any `spec.approval` change, the off switch included, makes an
+  action check bound to the earlier policy come back `access_path_stale`, so it is
+  checked again.
 - **Concurrent edits.** A Host PUT that changes `spec.approval` must carry
   the `metadata.resourceVersion` it read. Without it control-api answers
   `409 {"error":"conflict","reason":"approval_requires_version"}`. A PUT
