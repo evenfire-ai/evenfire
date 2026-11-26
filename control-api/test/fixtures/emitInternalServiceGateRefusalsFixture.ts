@@ -58,10 +58,15 @@ function withAlteredSignature(signed: string): string {
 
 /**
  * Stands for rpc-proxy's call to the V1 Host access route behind control-api's
- * internal service gate. It mounts, in the order of `app.ts`, the gate
- * (`requireInternalToken`, then `requireInternalService('rpc-proxy')` on `/rpc`)
- * and the real RPC access users router, sends each case as GET and as POST
- * (`authorized` as GET only), and prints one JSON line with every answer:
+ * internal service gate. It mounts only the gate (`requireInternalToken`, then
+ * `requireInternalService('rpc-proxy')` on `/rpc`) and, behind it, the real RPC
+ * access users router, all at the root. It does not mount `/api/v1`, the
+ * app-level middleware or the routers `app.ts` mounts before the gate, or the
+ * teams and hosts routers of `createRpcAccessRouter`. The order of the two gates
+ * before `createRpcAccessRouter` in `app.ts` is pinned by
+ * `rpc-proxy/src/__tests__/host-access-denial.cross-service.test.ts`. It sends
+ * each case as GET and as POST (`authorized` as GET only), and prints one JSON
+ * line with every answer:
  * status, response headers and the raw body text. The service tokens are the
  * ones control-api's config holds at run time; the wrong token is random.
  * All cases go to one server bound on 127.0.0.1, which must serve each of them.
