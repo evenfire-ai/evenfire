@@ -1,7 +1,9 @@
 /**
- * DEFAULT_POLICIES (the audit's copy of the Host CRD `defaultPolicy` enum) must
- * equal the enum of the CRD fixture control-ui records
- * (control-ui/test/fixtures/wire/host-crd-approval.current.json).
+ * The audit's copies of the Host CRD's two approval enums must equal the
+ * enums of the CRD fixture control-ui records
+ * (control-ui/test/fixtures/wire/host-crd-approval.current.json):
+ * `defaultPolicy` (DEFAULT_POLICIES, and FIELD_ENUMS.defaultPolicy) and
+ * `modeCeiling` (FIELD_ENUMS.modeCeiling).
  */
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'

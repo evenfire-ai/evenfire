@@ -328,7 +328,8 @@ describe('buildHostApprovalChange', () => {
     }
 
     // The headroom measured for this worst case (every field changed, four
-    // channels, escape-heavy model): two more native tools still fit, four do not.
+    // channels, escape-heavy model): with two more native tools, and with
+    // three, the summary still fits in tier 2; with four it falls to tier 3.
     const SYNTHETIC = ['synthetic_native_a', 'synthetic_native_b']
     const syntheticNative = (name: string): boolean =>
       MCP_HOST_NATIVE_TOOL_NAMES.includes(name) || SYNTHETIC.includes(name)
