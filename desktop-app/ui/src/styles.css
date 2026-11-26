@@ -3740,8 +3740,12 @@ body.sidebar-resizing {
 }
 
 .agent-row-icon svg {
-  width: 15px;
-  height: 15px;
+  /* 16px puts the box on whole-pixel margins inside the 28px circle
+   * (6px each side, not 6.5px): at fractional display zooms the glyph's
+   * sub-pixel-sized ears and eyes rasterize with less left/right
+   * asymmetry, so the robot reads centered instead of a hair left. */
+  width: 16px;
+  height: 16px;
 }
 
 :root[data-theme='light'] .agent-row-icon {
