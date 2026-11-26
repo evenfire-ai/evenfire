@@ -2385,4 +2385,72 @@ describe('redeeming: Cancel, a new start and the interactive login count', () =>
     expect(redeemFetches(harness)).toHaveLength(1)
     expect(endStatesOf(harness, attemptId)).toEqual(['signed_in'])
   })
+
+  it('lets the fail-safe of a failed install leave a newer attempt alone', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs } = harness
+    const first = await startAttempt(harness)
+    // The store's `end`, through which the terminal fail-safe ends its attempt (R-25), recording
+    // which attempt was current when each call ran.
+    const store = (service as unknown as { browserSignIn: BrowserSignInAttempts }).browserSignIn
+    const storeEnd = store.end.bind(store)
+    const endCalls: Array<{
+      id: number
+      current: number | null
+      phase: string | null
+      ended: boolean
+    }> = []
+    vi.spyOn(store, 'end').mockImplementation((id, end) => {
+      const current = store.current()
+      const ended = storeEnd(id, end)
+      endCalls.push({ id, current: current?.id ?? null, phase: current?.phase ?? null, ended })
+      return ended
+    })
+    // The settle step's discovery commit, held. Logout makes the first call and the settle step
+    // the second; while the second is held, the settle op keeps the owner, so the new start's
+    // op 2 queues ahead of the fail-safe op, which is queued only after the settle.
+    const pending = service as unknown as {
+      commitPendingRuntimeConfigDiscoveryIfSafe(): Promise<void>
+    }
+    const commitPending = pending.commitPendingRuntimeConfigDiscoveryIfSafe.bind(service)
+    const settleCommit = deferred<void>()
+    let commits = 0
+    vi.spyOn(pending, 'commitPendingRuntimeConfigDiscoveryIfSafe').mockImplementation(async () => {
+      commits += 1
+      if (commits === 2) await settleCommit.promise
+      return commitPending()
+    })
+    const write = harness.hold('installTokenWrite')
+
+    expect(service.acceptDesktopLoginLink(codeLink(first.state, envs.A.restBaseUrl))).toBe(true)
+    await until(harness, () => write.reached, "the install's token write")
+    // X1 leaves the session in memory, so the new start needs a logout. Both queue behind the
+    // install op, ahead of its settle op.
+    const logout = service.logout()
+    const second = service.startBrowserSignIn()
+    write.release(new Error('fake keychain write failure'))
+    await until(
+      harness,
+      () => commits === 2 && methodsFetches(harness).length === 2,
+      "the settle step's commit and the new start's methods read"
+    )
+    await harness.drain({ owner: false })
+    expect(endStatesOf(harness, first.attemptId)).toEqual(['failed'])
+    settleCommit.resolve()
+    await expect(logout).resolves.toEqual(expect.any(Number))
+    const { attemptId } = await second
+    await harness.drain()
+
+    expect(attemptId).toBe(first.attemptId + 1)
+    expect(commits).toBe(2)
+    // The positive control: the fail-safe's `end` for the first attempt ran while the newer one
+    // was current and waiting, and ended nothing.
+    expect(endCalls.filter(call => call.id === first.attemptId)).toEqual([
+      { id: first.attemptId, current: first.attemptId, phase: 'redeeming', ended: true },
+      { id: first.attemptId, current: attemptId, phase: 'waiting', ended: false },
+    ])
+    expect(harness.secretsSeen).toContain(`${LINK_HANDLING_FAILED} Error`)
+    expect(endStatesOf(harness, first.attemptId)).toEqual(['failed'])
+    expect(snapshotsOf(harness, attemptId)).toEqual([{ attemptId, phase: 'waiting' }])
+  })
 })
