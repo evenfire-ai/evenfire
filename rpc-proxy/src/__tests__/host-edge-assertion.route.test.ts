@@ -630,11 +630,13 @@ describe('authentication failures reach the client as 401', () => {
 })
 
 // Two row sets for the V1 re-resolve before a wake-and-hold retry.
-// V1_WAKE_ROWS: every route of this file that retries through wake-and-hold
-// with the V1 refresh, each passing its own denial answer for a denied
-// re-resolve; the approval-mode PATCH is covered in
-// session-approval-mode-passthrough.test.ts. They run the re-resolved
-// assertion case and one denial case.
+// V1_WAKE_ROWS: every V1 route that retries through wake-and-hold with the V1
+// refresh, each passing its own denial answer for a denied re-resolve. That is
+// 13 of the 14 `wakeAndHoldAuthorityOptions` sites in routes/rpc.ts; session
+// search is V2 only. They run the re-resolved assertion case, one denial case
+// and the failure-stub matrix of the V1 re-resolve outcome block.
+// session-approval-mode-passthrough.test.ts covers the approval-mode body and
+// scope with a mocked resolver.
 // REFRESH_ROWS: a single-attempt route (re-issued at most once after the wake)
 // and a route that retries until the hold deadline. They run the cases of the
 // shared re-resolve and wake-and-hold code: the other denials, the 401, the
@@ -655,11 +657,13 @@ const V1_WAKE_ROW_LABELS = [
   'task cancel',
   'artifacts list',
   'artifact download',
+  'approval mode',
 ]
-const V1_WAKE_ROWS = V1_WAKE_ROW_LABELS.map(label => {
-  const row = ROUTE_SCOPE_ROWS.find(candidate => candidate.label === label)
+const V1_WAKE_ROWS: RequestRow[] = V1_WAKE_ROW_LABELS.map(label => {
+  const row = FIRST_RESOLVE_ROWS.find(candidate => candidate.label === label)
   if (!row) throw new Error(`no route row labelled ${label}`)
-  return row
+  if (row.hostPath === null) throw new Error(`route row ${label} never calls the Host`)
+  return { ...row, hostPath: row.hostPath }
 })
 
 // The first resolve succeeds; every later Host-access call (a re-resolve before
@@ -1535,8 +1539,8 @@ describe('V1 re-resolve outcome', () => {
   })
 
   it('covers every V1 wake route and every failure stub but the GET success', () => {
-    expect(V1_WAKE_ROWS).toHaveLength(12)
-    expect(RE_RESOLVE_OUTCOME_CASES).toHaveLength(12 * (FAILURE_STUBS.length - 1))
+    expect(V1_WAKE_ROWS).toHaveLength(13)
+    expect(RE_RESOLVE_OUTCOME_CASES).toHaveLength(13 * (FAILURE_STUBS.length - 1))
   })
 
   it.each(RE_RESOLVE_OUTCOME_CASES)(
