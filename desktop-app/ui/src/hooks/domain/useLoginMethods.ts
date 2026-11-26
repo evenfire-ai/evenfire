@@ -18,12 +18,16 @@ const NO_SEND = 0
  * Main stamps each answer with the generation it captured when it dispatched the read, but a
  * binding change returns no generation, so the renderer keeps its own request epoch. The helper
  * moves the epoch before each binding-changing call: an answer to a read sent under an older
- * epoch is dropped (L6), and within an epoch answers apply in non-decreasing generation order
- * (S5). A failed read carries no generation, so it is ordered by when it was sent: it shows the
- * unreachable state only if no read sent after it in the epoch has applied an answer. The reverse
- * is not symmetric, on purpose: an answer of the same epoch that passes the generation order
- * still replaces an earlier failure, whichever of the two reads was sent first. The helper reads
- * the model again when the call settles, success or failure, so the screen never stays on
+ * epoch is dropped (L6). Within an epoch, answers apply in non-decreasing generation order (S5),
+ * and answers of one generation in the order their reads were sent: an answer is dropped when
+ * its generation is below the applied answer's, or equal to it and its read was sent before the
+ * applied answer's read. This order covers every answer main resolves with, `unreachable` too:
+ * main returns a network failure, a timeout or a 5xx as an answer, not a rejection (round-3
+ * review minor 2). A rejected read carries no generation, so it is ordered by when it was sent: it shows
+ * the unreachable state only if no read sent after it in the epoch has applied an answer. The
+ * reverse is not symmetric, on purpose: an answer of the same epoch that passes the order above
+ * still replaces an earlier rejection, whichever of the two reads was sent first. The helper
+ * reads the model again when the call settles, success or failure, so the screen never stays on
  * `loading` (L7). The login screen sends its own reads; nothing reads on mount.
  */
 export function useLoginMethods({
@@ -40,6 +44,12 @@ export function useLoginMethods({
    * and a binding change needs no reset.
    */
   const appliedSendRef = useRef(NO_SEND)
+  /**
+   * The send number of the read whose answer applied last: with `appliedGenerationRef`, the
+   * order an answer must pass. A binding change needs no reset: a read of the current epoch was
+   * sent after every read of an earlier one.
+   */
+  const appliedAnswerSendRef = useRef(NO_SEND)
 
   const refresh = useCallback(() => {
     const epoch = epochRef.current
@@ -51,7 +61,16 @@ export function useLoginMethods({
       answer => {
         if (epochRef.current !== epoch) return
         if (answer.generation < appliedGenerationRef.current) return
+        // The same generation: a read sent after this one has already applied its answer, which
+        // is newer, even when this answer is main's `unreachable` (round-3 review minor 2).
+        if (
+          answer.generation === appliedGenerationRef.current &&
+          send < appliedAnswerSendRef.current
+        ) {
+          return
+        }
         appliedGenerationRef.current = answer.generation
+        appliedAnswerSendRef.current = send
         appliedSendRef.current = Math.max(appliedSendRef.current, send)
         setModel(answer.model)
       },

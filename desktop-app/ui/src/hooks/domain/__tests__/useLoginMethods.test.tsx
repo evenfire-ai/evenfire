@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 /**
  * `useLoginMethods`: the login screen's model, read from main over IPC (E12) and ordered by the
- * renderer's request epoch, then by main's generation (D15; S5, L6, L7).
+ * renderer's request epoch, then by main's generation, then by the order the reads were sent
+ * (D15; S5, L6, L7).
  *
  * Every model the fake main answers with is built by main's own `buildLoginMethodsModel` from
  * the edge's recorded answers (T1, design §10.1), and every rejection is fed in the form Electron
@@ -150,7 +151,7 @@ describe('useLoginMethods: scenarios', () => {
     expect(shown).not.toContainEqual(password)
   })
 
-  it('applies an answer of the same generation that arrives later', async () => {
+  it('applies a later-sent answer of the same generation that arrives later', async () => {
     const main = installMain()
     const { hook } = mountHook()
 
@@ -161,6 +162,30 @@ describe('useLoginMethods: scenarios', () => {
     await act(async () => main.read(1).resolve({ model: modelOf('oidc-only'), generation: 4 }))
 
     expect(hook.result.current.model).toEqual(modelOf('oidc-only'))
+  })
+
+  it("keeps a newer model when an earlier read's answer of the same generation arrives late (round-3 review minor 2)", async () => {
+    const main = installMain()
+    const { hook, shown } = mountHook()
+    const oidcOnly = modelOf('oidc-only')
+    // Main resolves a network failure, a timeout or a 5xx as this answer, not as a rejection.
+    const unreachable = modelOf('unreachable')
+    expect(unreachable, "main's model for a failed fetch").toEqual(UNREACHABLE)
+
+    // The first read hangs; Retry sends a second one, with no bump between them.
+    act(() => hook.result.current.refresh())
+    act(() => hook.result.current.refresh())
+    await act(async () => main.read(1).resolve({ model: oidcOnly, generation: 4 }))
+    expect(hook.result.current.model, "the later read's answer applies").toEqual(oidcOnly)
+    await act(async () => main.read(0).resolve({ model: unreachable, generation: 4 }))
+
+    expect(hook.result.current.model, "the earlier read's late answer is dropped").toEqual(oidcOnly)
+    expect(shown).not.toContainEqual(UNREACHABLE)
+
+    // Positive control: the same answer applies when its read was sent after the applied one.
+    act(() => hook.result.current.refresh())
+    await act(async () => main.read(2).resolve({ model: unreachable, generation: 4 }))
+    expect(hook.result.current.model, "a later read's answer applies").toEqual(UNREACHABLE)
   })
 
   it("G2-15b never shows env A's form after a binding change", async () => {
@@ -412,8 +437,12 @@ type PropertyWorld = {
   violations: string[]
 }
 
-/** Both orders must occur across the runs, or the property proves nothing about them. */
-const coverage = { staleEpochDeliveries: 0, olderGenerationDeliveries: 0 }
+/** Each order must occur across the runs, or the property proves nothing about it. */
+const coverage = {
+  staleEpochDeliveries: 0,
+  olderGenerationDeliveries: 0,
+  earlierSentSameGenerationDeliveries: 0,
+}
 
 function unansweredReads(world: PropertyWorld): PropertyRead[] {
   return world.reads.filter(read => !read.answered)
@@ -452,7 +481,12 @@ function checkPredicates(world: PropertyWorld, label: string) {
     return
   }
   const highest = Math.max(...current.map(delivery => delivery.generation))
-  const reference = current.filter(delivery => delivery.generation === highest).at(-1)
+  // Of the answers at the highest generation, the one whose read was sent last (round-3 review
+  // minor 2): read ids are numbered in send order.
+  const reference = current
+    .filter(delivery => delivery.generation === highest)
+    .sort((a, b) => a.read.id - b.read.id)
+    .at(-1)
   expect(shown, `${label}: S5, the newest model at the highest generation`).toBe(reference?.model)
 }
 
@@ -494,6 +528,13 @@ class AnswerCommand implements fc.AsyncCommand<PropertyModel, PropertyWorld> {
           const sameEpoch = world.deliveries.filter(item => item.read.epoch === read.epoch)
           if (sameEpoch.some(item => item.generation > delivered.generation)) {
             coverage.olderGenerationDeliveries += 1
+          }
+          if (
+            sameEpoch.some(
+              item => item.generation === delivered.generation && item.read.id > read.id
+            )
+          ) {
+            coverage.earlierSentSameGenerationDeliveries += 1
           }
           world.deliveries.push({ read, generation: delivered.generation, model: delivered.model })
           return delivered
@@ -561,6 +602,7 @@ describe('useLoginMethods: S5, L6 and L7', () => {
   it('holds S5, L6 and L7 under generated answers and binding changes', async () => {
     coverage.staleEpochDeliveries = 0
     coverage.olderGenerationDeliveries = 0
+    coverage.earlierSentSameGenerationDeliveries = 0
     await fc.assert(
       fc.asyncProperty(
         fc.scheduler(),
@@ -635,6 +677,10 @@ describe('useLoginMethods: S5, L6 and L7', () => {
     expect(
       coverage.olderGenerationDeliveries,
       'an answer arrived after a newer one of its epoch'
+    ).toBeGreaterThan(0)
+    expect(
+      coverage.earlierSentSameGenerationDeliveries,
+      'an answer arrived after one of its generation whose read was sent later'
     ).toBeGreaterThan(0)
   }, 60_000)
 })
