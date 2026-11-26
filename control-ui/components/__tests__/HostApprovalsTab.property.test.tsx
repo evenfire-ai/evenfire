@@ -28,12 +28,28 @@
  *   continuation writes nothing into it), L1 and S6 (a written group shows
  *   its write's values or a later load's, never an older load's), and, as a
  *   save or a switch settles, L2 (message and draft after an error), L4 (the
- *   outcome is shown), L5 (the tab loads again), S3's success toast and S4's
- *   "no switch result without a run".
+ *   outcome is shown in its tab), L5 (the tab loads again) and S4's "no
+ *   switch result without a run".
+ * - Also after every step, each approval toast both ways: it comes from a
+ *   save or a switch that settled in that step, with that outcome's text and
+ *   tone, and each outcome that owes a toast shows one. A success toast with
+ *   no `saved` save behind it breaks S3; with no `saved` or `already` switch,
+ *   S4.
  * - At rest, once the scheduler is drained and the clock has run out: S1, S2,
- *   S3, S4, S7 and S8 on the history, L1 and L2 again, and L3.
+ *   S3, S4, S7 and S8 on the history, L1 and L2 again, L3, and L4 (every
+ *   switch run was shown, in its tab or by its toast).
+ * - After a fixed example: that it reached the case it pins (`PINS`), as a
+ *   harness check.
  * The properties a step breaks are thrown together, so a counterexample names
  * each one.
+ *
+ * **The oracle's own readers.** The ceiling and the channel switches come
+ * from mcp-host's `readModeCeiling` and `readChannelSwitch`; the block, the
+ * tools (true, false or absent), the policy, the approvers and the judge come
+ * from readers in this file, not from the product's helpers. The one product
+ * helper left is `looseningItems`, for S7 (see its import). The section's
+ * "Unsaved changes" decides nothing: the suite keeps its own dirty flag from
+ * the rows it set.
  *
  * **Runs (Ruling 53).** `APPROVAL_MODEL_RUNS` generated runs (default 100)
  * follow the fixed `EXAMPLES`. `APPROVAL_MODEL_SEED` sets the seed, which is
@@ -143,14 +159,15 @@ vi.mock('../../lib/hostApprovalSave', async importOriginal => {
 
 // ── Budget (Ruling 53) ──────────────────────────────────────────────────────
 
-// N = 100: the 100 runs and the 14 examples take about 21 s alone and 58-60 s
-// inside the whole control-ui run (8 workers), on an Apple M4 with Node 24.
+// N = 100: the 100 runs and the 16 examples take about 18-22 s alone and 59.5 s
+// inside the whole control-ui run (9 workers, vitest's default for 10 cores),
+// on an Apple M4 with Node 24.
 const NUM_RUNS = Number(process.env.APPROVAL_MODEL_RUNS ?? 100)
 const MAX_COMMANDS = 60
 /**
- * The per-test timeout, per run: about twice the 0.52 s a run takes inside
- * the whole control-ui run (59.75 s / 114 runs). 120 s at N = 100, and it
- * grows with APPROVAL_MODEL_RUNS.
+ * The per-test timeout, per run: about twice the 0.51 s a run takes inside
+ * the whole control-ui run (59.5 s / 116 runs). About 122 s at N = 100, and
+ * it grows with APPROVAL_MODEL_RUNS.
  */
 const TIMEOUT_MS_PER_RUN = 1_050
 
