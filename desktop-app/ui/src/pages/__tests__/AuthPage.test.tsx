@@ -501,6 +501,37 @@ describe('AuthPage: the login screen from main’s model (design §10.1)', () =>
     }
   })
 
+  // A binding change in flight sets `busy`, and the auth flows that run one set the raw
+  // `authTransitioning` (completing desktop setup sets both).
+  it.each(['busy', 'authTransitioning'] as const)(
+    'disables Retry while %s is set, so no read races a binding change (Task 13 review)',
+    async flag => {
+      const user = userEvent.setup()
+      const refreshLoginMethods = vi.fn()
+      const page = (auth: Partial<AuthContextValue>) => (
+        <AuthContext.Provider
+          value={makeAuthValue({ loginScreen: UNREACHABLE, refreshLoginMethods, ...auth })}
+        >
+          <AuthPage />
+        </AuthContext.Provider>
+      )
+      const retry = () => screen.getByRole('button', { name: 'Retry' }) as HTMLButtonElement
+
+      const { rerender } = render(page({ [flag]: true }))
+      const reads = refreshLoginMethods.mock.calls.length
+      expect(retry().disabled, `Retry is disabled while ${flag} is set`).toBe(true)
+      await user.click(retry())
+      expect(refreshLoginMethods, 'no read is sent').toHaveBeenCalledTimes(reads)
+
+      // Positive control: once the action settles, Retry reads again.
+      rerender(page({ [flag]: false }))
+      expect(retry().disabled, 'Retry is usable once the action settles').toBe(false)
+      await user.click(retry())
+      // `refreshLoginMethods` keeps its identity, so the rerender reads nothing by itself.
+      expect(refreshLoginMethods, 'Retry reads the methods').toHaveBeenCalledTimes(reads + 1)
+    }
+  )
+
   it('starts a browser sign-in from Continue', async () => {
     const user = userEvent.setup()
     const handleStartBrowserSignIn = vi.fn()

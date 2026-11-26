@@ -192,7 +192,10 @@ export function AuthPage() {
         )
       case 'misconfigured':
       case 'unreachable':
-        // No form and no guess: Retry reads the methods again.
+        // No form and no guess: Retry reads the methods again. Not while an auth action runs:
+        // a binding change in flight (each sets `busy`) has moved the request epoch, and a read
+        // sent then could apply the binding being left until the change's own read lands
+        // (Task 13 review).
         return (
           <div className="auth-form-stack">
             {loginScreen.kind === 'misconfigured' ? (
@@ -200,7 +203,11 @@ export function AuthPage() {
             ) : (
               <StatusBanner tone="warn" text={BROWSER_SIGN_IN_COPY.unreachable} />
             )}
-            <Button block onClick={() => refreshLoginMethods()}>
+            <Button
+              block
+              disabled={busy || authTransitioning}
+              onClick={() => refreshLoginMethods()}
+            >
               {BROWSER_SIGN_IN_COPY.retry}
             </Button>
           </div>
