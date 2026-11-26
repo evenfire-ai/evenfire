@@ -141,10 +141,9 @@ const nextConfig = {
       // Host detail tab consolidation (R1-H1 in feat/agent-ux-polish PR
       // review): the old top-level tabs are now sub-tabs under the new
       // `access` and `advanced` parents. Send each old slug to its new
-      // parent so bookmarks, shared links, and the approval-tools E2E
-      // (which navigates to /hosts/<name>/approvals) still reach the
-      // section they used to. Per-tool approval has its own top-level
-      // Approvals tab (slug `approval-settings`), so `approvals` lands there.
+      // parent so bookmarks and shared links still reach the section they
+      // used to. Per-tool approval has its own top-level Approvals tab (slug
+      // `approval-settings`), so `approvals` lands there.
       {
         source: '/agents/:name/member-access',
         destination: '/agents/:name/access',

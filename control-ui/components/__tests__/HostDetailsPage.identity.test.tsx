@@ -496,7 +496,7 @@ describe('HostDetailsPage identity integration', () => {
     expect(screen.queryByLabelText('http_request')).toBeNull()
   })
 
-  it('keeps Per-tool approval actions in the top toolbar without a duplicate title', async () => {
+  it("keeps the per-tool section's actions in the section, under one title", async () => {
     mockParams = { name: 'foo', tab: 'approval-settings' }
     render(<HostDetailsPage />)
 
