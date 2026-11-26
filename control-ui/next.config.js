@@ -17,12 +17,20 @@ const nextConfig = {
   turbopack: {
     root: path.join(__dirname, '..'),
   },
-  // Control UI is never meant to be framed: forbid it on every path, with the
+  // Control UI is never meant to be framed: forbid it on every page, with the
   // CSP directive and the older header for browsers that only read the latter.
+  //
+  // `/control-api/*` is left out. The app-router proxy there forwards the
+  // upstream response's headers, but Next sets config headers on the response
+  // first and drops a route handler's header of the same name afterwards
+  // (send-response), so these values would silently replace any
+  // Content-Security-Policy or X-Frame-Options control-api sets, for example a
+  // `sandbox` policy on a user-content download. The proxy serves API
+  // responses, not Control UI pages, so control-api keeps control of them.
   async headers() {
     return [
       {
-        source: '/:path*',
+        source: '/((?!control-api/).*)',
         headers: [
           { key: 'Content-Security-Policy', value: "frame-ancestors 'none'" },
           { key: 'X-Frame-Options', value: 'DENY' },
