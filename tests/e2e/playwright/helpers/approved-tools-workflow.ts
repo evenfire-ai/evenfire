@@ -109,33 +109,47 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
     // `workflow_trigger` is a known tool with a conditional default, so it has its
     // own row; no custom row is added.
     await page.locator('#approval-workflow_trigger').selectOption('required')
+    // Host status writes churn while the agent rolls, so a save can meet a 409 and
+    // retry (the tab reads again and sends a new PUT). Match the first PUT that
+    // succeeds, not the first PUT.
     const update = page.waitForResponse(
       response =>
         new URL(response.url()).pathname ===
           browserApiPath(`/api/v1/admin/hosts/${scenario.agentName}`) &&
-        response.request().method() === 'PUT'
+        response.request().method() === 'PUT' &&
+        response.ok()
     )
     await page
       .locator('.cu-host-approval-section__actions')
       .getByRole('button', { name: 'Save', exact: true })
       .click()
     // An agent with no approval settings of its own asks for a policy on its first
-    // save. Both policies are valid here; the workflow journey needs the block.
+    // save. "Nobody (Desktop only)" (`cli_only`) is not an open policy, so it adds no
+    // loosening dialog; "Any channel user" would add one. The dialog's own
+    // visibility is the signal, so wait for it rather than poll.
     const firstSave = page.getByRole('dialog', {
       name: 'Give this agent its own approval settings',
     })
-    if (await firstSave.isVisible({ timeout: 5_000 }).catch(() => false)) {
+    const firstSaveShown = await firstSave
+      .waitFor({ state: 'visible', timeout: 5_000 })
+      .then(() => true)
+      // A timeout means the agent already has its own block and no dialog opens.
+      // Dropping it is correct; the PUT assertion below fails if the save did not run.
+      .catch(() => false)
+    if (firstSaveShown) {
       await firstSave.getByLabel('Who can approve from a channel').selectOption('cli_only')
       await firstSave.getByRole('button', { name: 'Save', exact: true }).click()
     }
     const response = await update
-    expect(response.ok()).toBe(true)
     expect((await response.json()).spec.approval.tools.workflow_trigger).toBe(true)
     // Saving Required to a tool that already asks never loosens approval, so no
-    // confirmation dialog is expected. The tab leaves edit view and shows the toast;
-    // the stored row reads Required in the read view.
+    // confirmation dialog is expected. The tab leaves edit view and shows the toast.
     await expect(page.getByText('Per-tool overrides saved.')).toBeVisible()
     await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeVisible()
+    await expect(page.locator('[data-tool-row="workflow_trigger"]')).toHaveAttribute(
+      'data-tool-state',
+      'required'
+    )
   })
 
   // The approval map is not part of the runtime-token contract: HCC never reads

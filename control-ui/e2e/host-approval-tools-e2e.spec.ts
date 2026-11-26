@@ -26,9 +26,14 @@
  * `spec.approval`.
  */
 import { type Page, expect, test } from '@playwright/test'
-import { adminCredentials, api, loginThroughUi } from './qa-recorder-helpers'
+import {
+  type ApiResult,
+  CONTROL_UI_URL,
+  adminCredentials,
+  api,
+  loginThroughUi,
+} from './qa-recorder-helpers'
 
-const CONTROL_UI_URL = process.env.CONTROL_UI_URL || 'http://localhost:3000'
 const HOST_NAME = process.env.E2E_HOST_NAME || 'chatllm'
 const HOST_PATH = `/api/v1/admin/hosts/${encodeURIComponent(HOST_NAME)}`
 
@@ -45,19 +50,39 @@ async function readHost(page: Page): Promise<HostBody> {
 }
 
 /**
+ * A versioned Host PUT. The version comes from a fresh read, and a 409
+ * `resource_changed` (the host's status moved between the read and the write)
+ * is retried once from a new read: the status churns while the agent rolls.
+ */
+async function putWithVersion(
+  page: Page,
+  buildSpec: (host: HostBody) => Record<string, unknown>
+): Promise<ApiResult> {
+  let result: ApiResult | undefined
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const host = await readHost(page)
+    const version = host.metadata?.resourceVersion
+    expect(version, 'the host read carries a resourceVersion').toBeTruthy()
+    result = await api(page.request, 'PUT', HOST_PATH, {
+      metadata: { resourceVersion: version },
+      spec: buildSpec(host),
+    })
+    const reason = (result.data as { reason?: string }).reason
+    if (!(result.status === 409 && reason === 'resource_changed')) break
+  }
+  return result as ApiResult
+}
+
+/**
  * Start a scenario from a known state: the host has its own approval block (so the
  * tab never opens the first-save dialog) with no per-tool overrides. The write
- * carries the version it just read, as the version rule requires.
+ * carries a version, as the version rule requires.
  */
 async function resetApprovalTools(page: Page): Promise<void> {
-  const host = await readHost(page)
-  const version = host.metadata?.resourceVersion
-  expect(version, 'the host read carries a resourceVersion').toBeTruthy()
-  const spec = host.spec ?? {}
-  const { tools: _removed, ...approval } = spec.approval ?? {}
-  const { status } = await api(page.request, 'PUT', HOST_PATH, {
-    metadata: { resourceVersion: version },
-    spec: { ...spec, approval: { defaultPolicy: 'channel_users', ...approval } },
+  const { status } = await putWithVersion(page, host => {
+    const spec = host.spec ?? {}
+    const { tools: _removed, ...approval } = spec.approval ?? {}
+    return { ...spec, approval: { defaultPolicy: 'channel_users', ...approval } }
   })
   expect(status).toBe(200)
 }
@@ -181,10 +206,16 @@ test.describe('Approvals tab E2E -- per-tool overrides, off switch, version rule
     expect(refused.status).toBe(409)
     expect(refused.data).toMatchObject({ error: 'conflict', reason: 'approval_requires_version' })
 
-    // Positive partner: the same body with the stored version is accepted.
-    const accepted = await api(page.request, 'PUT', HOST_PATH, {
-      metadata: { resourceVersion: host.metadata?.resourceVersion },
-      spec: changed,
+    // Positive partner: the same change with a stored version is accepted.
+    const accepted = await putWithVersion(page, fresh => {
+      const freshSpec = fresh.spec ?? {}
+      return {
+        ...freshSpec,
+        approval: {
+          ...(freshSpec.approval ?? {}),
+          tools: { ...freshSpec.approval?.tools, http_request: true },
+        },
+      }
     })
     expect(accepted.status).toBe(200)
 
