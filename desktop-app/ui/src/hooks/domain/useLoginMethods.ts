@@ -20,8 +20,10 @@ const NO_SEND = 0
  * moves the epoch before each binding-changing call: an answer to a read sent under an older
  * epoch is dropped (L6), and within an epoch answers apply in non-decreasing generation order
  * (S5). A failed read carries no generation, so it is ordered by when it was sent: it shows the
- * unreachable state only if no read sent after it in the epoch has applied an answer. The helper
- * reads the model again when the call settles, success or failure, so the screen never stays on
+ * unreachable state only if no read sent after it in the epoch has applied an answer. The reverse
+ * is not symmetric, on purpose: an answer of the same epoch that passes the generation order
+ * still replaces an earlier failure, whichever of the two reads was sent first. The helper reads
+ * the model again when the call settles, success or failure, so the screen never stays on
  * `loading` (L7). The login screen sends its own reads; nothing reads on mount.
  */
 export function useLoginMethods({
