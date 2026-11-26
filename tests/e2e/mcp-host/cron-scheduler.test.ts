@@ -20,8 +20,10 @@
  * lets the agent self-orchestrate create -> fire -> verify -> report.
  *
  * Requires a real LLM API key — these tests make actual LLM calls.
- * The LLM must discover the cron_manage tool from its schema (no
- * explicit tool naming in prompts).
+ * In the Phase 1 and 2 cases other than CR-11, the LLM must discover the
+ * cron_manage tool from its schema (no explicit tool naming in prompts).
+ * CR-11's recipe instruction and every Phase 3 prompt
+ * (CRON_TOOL_INSTRUCTION) name the tool explicitly.
  *
  * Minikube branch profile (default deploy overlay):
  *   - Host CRD chatllm: provider zai, model glm-4.7
