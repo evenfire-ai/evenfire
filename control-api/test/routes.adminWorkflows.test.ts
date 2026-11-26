@@ -1005,7 +1005,8 @@ describe('routes/admin/workflows', () => {
 
       const insertCall = mockPoolQuery.mock.calls[1] as [string, unknown[]]
       expect(insertCall[0]).toContain('INSERT INTO workflow_runs')
-      expect(insertCall[1]?.[11]).toBeNull()
+      // A recipe without a duration stores the 24 h run cap (workflowRunDuration.ts).
+      expect(insertCall[1]?.[11]).toBe(86_400)
       expect(insertCall[1]?.[12]).toBe(2_592_000)
     })
 
