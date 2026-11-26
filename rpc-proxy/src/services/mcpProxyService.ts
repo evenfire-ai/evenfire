@@ -150,7 +150,7 @@ function logHostResolveUnavailable(
   const host = sanitizeHostRefForLog(hostRef)
   if (refusal.cause === 'edge_assertion_missing') {
     console.warn(
-      `[RPC_PROXY] control-api answered the host resolve without an edge assertion; upgrade control-api before RPC Proxy host=${host}`
+      `[RPC_PROXY] control-api answered the host resolve without an edge assertion; upgrade control-api before RPC Proxy phase=${phase} host=${host}`
     )
     return
   }

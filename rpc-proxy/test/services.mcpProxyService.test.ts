@@ -487,4 +487,51 @@ describe('V1 Host resolve: thrown and unavailable control-api answers', () => {
     ])
     expectNoSecret(lines[0]!, 'status-detail')
   })
+
+  // A connection for this user and Host, valid except that it has no edge
+  // assertion: what a control-api older than the assertion answers.
+  function connectionWithoutAssertion(): Response {
+    return mkResponse(
+      200,
+      JSON.stringify({ userId: USER_ID, hostRef: 'agent2', url: 'http://agent2.mcp-host:8080' })
+    )
+  }
+
+  function missingAssertionLine(phase: 'resolve' | 're-resolve'): string {
+    return `[RPC_PROXY] control-api answered the host resolve without an edge assertion; upgrade control-api before RPC Proxy phase=${phase} host=agent2`
+  }
+
+  it('resolveHostConnectionForUser logs the phase of a missing edge assertion', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(connectionWithoutAssertion())
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    const resolved = await resolveHostConnectionForUser(USER_ID, 'agent2', TOKEN)
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(resolved).toEqual({ unavailable: true, cause: 'edge_assertion_missing' })
+    // Every warn call: the one line is the witness, and no generic line was written.
+    const lines = warn.mock.calls.map(args => String(args[0]))
+    expect(lines).toEqual([missingAssertionLine('resolve')])
+    expectNoSecret(lines[0]!, 'agent2.mcp-host')
+  })
+
+  it('refreshV1HostConnection logs the phase of a missing edge assertion', async () => {
+    const host = nearExpiryHost()
+    const heldAssertion = host.headers[HOST_EDGE_ASSERTION_HEADER]
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(connectionWithoutAssertion())
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    const refusal = await refreshV1HostConnection(host, USER_ID, 'agent2', TOKEN)
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(refusal).toEqual({ unavailable: true, cause: 'edge_assertion_missing' })
+    expect(host.headers[HOST_EDGE_ASSERTION_HEADER]).toBe(heldAssertion)
+    const lines = warn.mock.calls.map(args => String(args[0]))
+    expect(lines).toEqual([missingAssertionLine('re-resolve')])
+    expectNoSecret(lines[0]!, 'agent2.mcp-host')
+  })
 })
