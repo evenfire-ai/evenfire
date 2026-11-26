@@ -42,7 +42,9 @@ const FAILED_SAVE = wrapLikeElectronIpc(
 /**
  * What main's `getLoginMethods` rejects with when the active REST URL is not http(s): the error
  * `canonicalizeDesktopRestEndpoint` throws when the read captures the binding
- * (`appService.ts` `captureAuthEnvironmentBinding`). Taken from running that function.
+ * (`appService.ts` `captureAuthEnvironmentBinding`). Taken from running that function. Main can
+ * reach it: a stored profile file is loaded without a protocol check (`config.ts`
+ * `normalizeRuntimeConfig`), and `applyRuntimeConfig` makes its URL the active one.
  */
 function failedRead(): Error {
   try {
@@ -257,9 +259,10 @@ describe('useLoginMethods: scenarios', () => {
     const main = installMain()
     const { hook } = mountHook()
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-    // Synthetic, adversarial input (plan, Fixtures): no error main's getLoginMethods throws names
-    // a URL (`failedRead()`'s does not), so this message carries one as a canary that proves the
-    // log line keeps only the error's class (D18).
+    // Synthetic, adversarial input (plan, Fixtures): the throws traced in main's getLoginMethods
+    // (`desktop_setup_required` and `canonicalizeDesktopRestEndpoint`'s fixed messages, as in
+    // `failedRead()`) name no URL, so this message carries one as a canary that proves the log
+    // line keeps only the error's class (D18).
     const failure = wrapLikeElectronIpc(
       'auth:getLoginMethods',
       new Error('stale_runtime_environment https://api.example.test')
