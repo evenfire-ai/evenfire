@@ -1289,13 +1289,21 @@ export class SqliteConversationStore implements ConversationStore {
       },
       resolvedKey
     )
-    if (resolvedKey) {
-      this.cache.delete(resolvedKey)
-    }
     const evictedId = result.sessionId ?? params.sessionId
+    if (resolvedKey) {
+      const cached = this.cache.get(resolvedKey)
+      if (!cached || !evictedId || cached.id === evictedId) {
+        this.cache.delete(resolvedKey)
+      }
+    }
     if (evictedId) {
       const mappedKey = this.sessionKeyById.get(evictedId)
-      if (mappedKey) this.cache.delete(mappedKey)
+      if (mappedKey) {
+        const cached = this.cache.get(mappedKey)
+        if (!cached || cached.id === evictedId) {
+          this.cache.delete(mappedKey)
+        }
+      }
       this.ordinals.delete(evictedId)
       this.sessionKeyById.delete(evictedId)
     }

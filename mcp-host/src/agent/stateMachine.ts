@@ -1581,12 +1581,15 @@ export class AgentStateMachine extends EventEmitter {
     }
 
     // Step 4: Abort matching in-flight processing executors, await unwind,
-    // and only then commit `endObsoleteApprovalSession`.
+    // commit `endObsoleteApprovalSession` for the aborted session BEFORE
+    // releasing `suspendedSessions`, and guard against ending a newer session.
     for (const [taskId, executor] of Array.from(this.activeExecutors.entries())) {
       if (executor.executorState !== 'processing') continue
       if (!matchesChannelReconcileTarget(executor.identityScope, filter)) continue
       const sessionKey =
         executor.sessionKey ?? resolveCanonicalSessionKey(executor.sourceTask.sourceMessage)
+      const obsoleteSessionId =
+        executor.conversationId ?? this.conversationManager.getSessionByKey(sessionKey)?.id
       executor.abortForIdentity(endReason)
       this.lifecycle.transition(taskId, 'cancelled', endReason)
       await Promise.race([
@@ -1598,14 +1601,26 @@ export class AgentStateMachine extends EventEmitter {
       this.lifecycle.purgeRecord(taskId)
       this.queue.purgeTask(taskId)
       this.promptCache?.drop(sessionKey)
-      this.releaseSessionForTask(executor.sourceTask)
       const store = this.conversationManager.getStore()
-      if (store.endObsoleteApprovalSession) {
+      if (obsoleteSessionId && store.endObsoleteApprovalSession) {
+        await store.endObsoleteApprovalSession({
+          sessionKey,
+          sessionId: obsoleteSessionId,
+          endReason,
+        })
+      } else if (filter.liveLinkedUserId !== null && store.rotateSessionOnIdentityChange) {
+        await store.rotateSessionOnIdentityChange({
+          sessionKey,
+          expectedLinkedUserId: filter.liveLinkedUserId,
+          endReason,
+        })
+      } else if (store.endObsoleteApprovalSession) {
         await store.endObsoleteApprovalSession({
           sessionKey,
           endReason,
         })
       }
+      this.releaseSessionForTask(executor.sourceTask)
     }
   }
 
@@ -2123,13 +2138,21 @@ export class AgentStateMachine extends EventEmitter {
     try {
       await executor.run()
     } finally {
-      // Remove if completed/failed but NOT if waiting_approval
-      if (executor.executorState !== 'waiting_approval') {
+      // Remove if completed/failed/aborted, but NOT if still waiting_approval
+      // OR already resumed into processing by `handleApproval` before `run()`'s
+      // finally settled (`R62`, `R85`).
+      const stillActive =
+        !executor.signal.aborted &&
+        (executor.executorState === 'waiting_approval' || executor.executorState === 'processing')
+      if (!stillActive) {
         this.activeExecutors.delete(task.id)
       }
     }
 
-    return executor.executorState === 'waiting_approval'
+    return (
+      !executor.signal.aborted &&
+      (executor.executorState === 'waiting_approval' || executor.executorState === 'processing')
+    )
   }
 
   private createTaskExecutor(

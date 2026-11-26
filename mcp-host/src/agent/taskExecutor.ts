@@ -549,6 +549,10 @@ export class TaskExecutor {
     return this.conversation?.session_key ?? this.conversation?.user_id
   }
 
+  get conversationId(): string | undefined {
+    return this.conversation?.id
+  }
+
   get sourceTask(): Task {
     return this.task
   }
@@ -765,6 +769,25 @@ export class TaskExecutor {
         isExternalChannelMsg &&
         rawUserInput.trim().length === 0 &&
         (hasChannelAttachmentIds || hasAttachmentIngestErrors)
+
+      // Issue #1640 (X9/X10): hydrate active retained channel attachments BEFORE
+      // `startTurn()` transitions `sessions.state` to `'processing'` so a fresh
+      // turn never resurrects already-expired attachments (`expires_at < now`)
+      // that have not yet been swept, while mid-turn reads and `resumeAfterApproval()`
+      // still honor the `sessions.state = 'processing'` pin (`R36`, `R87`).
+      if (isExternalChannelMsg && this.resolvedLinkedUserId) {
+        this.hydratedChannelAttachments = await withAbort(
+          () =>
+            hydrateActiveChannelAttachments({
+              conversationStore: this.deps.conversationManager.getStore(),
+              sessionKey,
+              linkedUserId: this.resolvedLinkedUserId!,
+              currentTurnAttachmentIds: msg?.channelAttachmentIds,
+            }),
+          this.abortController.signal
+        )
+      }
+
       const persistedUserInput = isChannelAttachmentOnly
         ? attachmentOnlyUserInputMarker(msg?.channelAttachmentIds?.length ?? 0)
         : rawUserInput
@@ -813,21 +836,6 @@ export class TaskExecutor {
         this.logProviderWorkflowAccessDenied('request')
         await this.completeWithStaticResponse(this.workflowAccessDeniedResponse)
         return
-      }
-
-      // Issue #1640 (X9/X10): hydrate retained channel attachments for this
-      // `(sessionKey, resolvedLinkedUserId)` before attachment-only exit or LLM loop.
-      if (isExternalChannelMsg && this.resolvedLinkedUserId) {
-        this.hydratedChannelAttachments = await withAbort(
-          () =>
-            hydrateActiveChannelAttachments({
-              conversationStore: this.deps.conversationManager.getStore(),
-              sessionKey,
-              linkedUserId: this.resolvedLinkedUserId!,
-              currentTurnAttachmentIds: msg?.channelAttachmentIds,
-            }),
-          this.abortController.signal
-        )
       }
 
       // Issue #1640 (X9): deterministic early exit for attachment-only channel
