@@ -576,16 +576,27 @@ describe('HostApprovalsTab', () => {
       })
       const fooNotices = vi.fn()
       subscribeHostChanged('foo', fooNotices)
-
-      tab.leave()
-      await act(async () => {
-        put.deliverNow()
+      const emitted: Array<[string, unknown]> = []
+      const unsubscribe = subscribeRootToast((message, options) => {
+        emitted.push([message, options])
       })
-      await waitFor(() => expect(writes(fake)[0].delivered).toBe(true))
-      await settle()
+
+      try {
+        tab.leave()
+        await act(async () => {
+          put.deliverNow()
+        })
+        await waitFor(() => expect(writes(fake)[0].delivered).toBe(true))
+        await settle()
+      } finally {
+        unsubscribe()
+      }
 
       expect(approvalOf(fake.stored('foo')), 'the write landed').toEqual({ tools: SAVED_TOOLS })
       expect(tab.toasts('success'), 'the root toast').toEqual([savedFor('foo')])
+      // Ruling 81's partner: a per-tool success continuation keeps Toast's
+      // default duration; only the switch's carries step 7's caveat.
+      expect(emitted).toEqual([[savedFor('foo'), { tone: 'success' }]])
       expect(fooNotices, 'the Host-changed notice').toHaveBeenCalledTimes(1)
       expect(unanswered(fake)).toEqual([])
       tab.unmount()

@@ -228,6 +228,14 @@ export const CONTINUATION_PROBLEM_DURATION_MS = 8000
  */
 export const SWITCH_FAILURE_CONTINUATION_DURATION_MS = 30_000
 
+/**
+ * How long the root toast of a switch that saved Manual, or found it, after
+ * its tab was left stays (ruling 81). It carries step 7's caveat on what still
+ * runs without a card and, on an agent a manifest sets, the manifest warning,
+ * which Toast's 3.5 s default leaves no time to read.
+ */
+export const SWITCH_SUCCESS_CONTINUATION_DURATION_MS = 15_000
+
 function problem(message: string, tone: 'warning' | 'error' = 'error'): ContinuationToast {
   return { message, options: { tone, durationMs: CONTINUATION_PROBLEM_DURATION_MS } }
 }
@@ -295,8 +303,9 @@ export const SWITCH_TOAST_STILL_RUNNING_TEXT = `${STILL_RUNNING_TEXT}: ${SKIP_TO
  * Spec §6.3 step 7: the root toast for a switch whose tab unmounted or now
  * shows another agent: every outcome, named after the agent. A success says
  * what still runs without a card, and adds the manifest warning
- * (`switchManifestWarning`) when a manifest sets the agent's settings. A
- * failure carries the kubectl fallback, since no tab shows it, and stays
+ * (`switchManifestWarning`) when a manifest sets the agent's settings, so it
+ * stays longer than other successes (`SWITCH_SUCCESS_CONTINUATION_DURATION_MS`).
+ * A failure carries the kubectl fallback, since no tab shows it, and stays
  * longer than other problems (`SWITCH_FAILURE_CONTINUATION_DURATION_MS`).
  */
 export function offSwitchContinuationToast(
@@ -311,7 +320,7 @@ export function offSwitchContinuationToast(
         message: [`Manual is saved for agent ${host}.`, APPLIED_AT_NEXT_CALL_TEXT, ...after].join(
           ' '
         ),
-        options: { tone: 'success' },
+        options: { tone: 'success', durationMs: SWITCH_SUCCESS_CONTINUATION_DURATION_MS },
       }
     case 'already':
       return {
@@ -321,7 +330,7 @@ export function offSwitchContinuationToast(
           APPLIED_AT_NEXT_CALL_TEXT,
           ...after,
         ].join(' '),
-        options: { tone: 'success' },
+        options: { tone: 'success', durationMs: SWITCH_SUCCESS_CONTINUATION_DURATION_MS },
       }
     case 'failed':
       return {

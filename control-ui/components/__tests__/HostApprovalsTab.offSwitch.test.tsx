@@ -888,7 +888,7 @@ describe('HostApprovalsTab — Set to Manual now', () => {
       tab.unmount()
     })
 
-    it('a switch that settles after the tab was left reports in the root toast, naming the agent, and fires the notice', async () => {
+    it('a switch that settles after the tab was left reports in the root toast, naming the agent, for 15 s, and fires the notice (ruling 81)', async () => {
       const fake = tabFake({ modeCeiling: 'auto' })
       const tab = renderApprovalsTab({ fake, host: 'foo' })
       await approvalSettingsDriver()
@@ -899,19 +899,31 @@ describe('HostApprovalsTab — Set to Manual now', () => {
       })
       const notices = vi.fn()
       subscribeHostChanged('foo', notices)
-
-      tab.leave()
-      await act(async () => {
-        put.deliverNow()
+      // What the root toast was asked to show, with its options.
+      const emitted: Array<[string, unknown]> = []
+      const unsubscribe = subscribeRootToast((message, options) => {
+        emitted.push([message, options])
       })
-      await waitFor(() => expect(tab.toasts('success')).toEqual([savedFor('foo')]))
+
+      try {
+        tab.leave()
+        await act(async () => {
+          put.deliverNow()
+        })
+        await waitFor(() => expect(tab.toasts('success')).toEqual([savedFor('foo')]))
+      } finally {
+        unsubscribe()
+      }
       expect(notices, 'the Host-changed notice').toHaveBeenCalledTimes(1)
       expect(fake.stored('foo').spec.approval).toEqual({ modeCeiling: 'manual' })
+      // Ruling 81: it carries step 7's caveat (and any manifest warning), so it
+      // stays 15 s, not Toast's 3.5 s default.
+      expect(emitted).toEqual([[savedFor('foo'), { tone: 'success', durationMs: 15_000 }]])
       expect(unanswered(fake)).toEqual([])
       tab.unmount()
     })
 
-    it('an Already Manual that settles after the tab was left reports in the root toast, naming the agent (finding 2)', async () => {
+    it('an Already Manual that settles after the tab was left reports in the root toast, naming the agent, for 15 s (finding 2, ruling 81)', async () => {
       const fake = tabFake({ modeCeiling: 'manual' })
       const tab = renderApprovalsTab({ fake, host: 'foo' })
       await approvalSettingsDriver()
@@ -922,15 +934,25 @@ describe('HostApprovalsTab — Set to Manual now', () => {
       })
       const notices = vi.fn()
       subscribeHostChanged('foo', notices)
-
-      tab.leave()
-      await act(async () => {
-        read.deliverNow()
+      const emitted: Array<[string, unknown]> = []
+      const unsubscribe = subscribeRootToast((message, options) => {
+        emitted.push([message, options])
       })
-      await waitFor(() => expect(tab.toasts('success')).toEqual([alreadyFor('foo')]))
+
+      try {
+        tab.leave()
+        await act(async () => {
+          read.deliverNow()
+        })
+        await waitFor(() => expect(tab.toasts('success')).toEqual([alreadyFor('foo')]))
+      } finally {
+        unsubscribe()
+      }
       expect(notices, 'the Host-changed notice').toHaveBeenCalledTimes(1)
       expect(reads(fake), "the switch's one read").toHaveLength(1)
       expect(writes(fake), 'nothing written').toEqual([])
+      // Ruling 81: 15 s, as for a switch that wrote.
+      expect(emitted).toEqual([[alreadyFor('foo'), { tone: 'success', durationMs: 15_000 }]])
       expect(unanswered(fake)).toEqual([])
       tab.unmount()
     })
