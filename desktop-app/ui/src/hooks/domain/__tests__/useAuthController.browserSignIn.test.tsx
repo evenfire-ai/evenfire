@@ -158,6 +158,9 @@ function installBridge(harness: BrowserSignInHarness) {
     clearRuntimeConfigSelection: ipc('clearRuntimeConfigSelection', () =>
       service.clearRuntimeConfigSelection()
     ),
+    passwordLogin: ipc('passwordLogin', (email: string, password: string) =>
+      service.passwordLogin(email, password)
+    ),
     getLoginMethods: ipc('getLoginMethods', async () => {
       const answer = await service.getLoginMethods()
       loginAnswers.push(answer)
@@ -757,6 +760,49 @@ describe('useAuthController: the auth gates and a browser sign-in (D14)', () => 
     expect(bridge.auth.selectRuntimeConfigForHandoff, 'the link selects B').toHaveBeenCalledTimes(1)
     // The selection's bump ends the waiting attempt `replaced` (A3-15).
     expect(endStatesOf(harness, browserSignIn.attemptId ?? 0)).toEqual(['replaced'])
+    await waitFor(() => expect(page.controller().browserSignIn.phase).toBe('idle'))
+  })
+
+  // Decision 9 (Task 14a review M4): a waiting attempt sets nothing, so the password form stays
+  // usable, and a password login then ends the attempt `replaced` (A3-16, D14).
+  it('keeps the password form usable while waiting, and a password login replaces the attempt', async () => {
+    const { harness, bridge } = await createSignInMain()
+    const page = await mountAuthPage(bridge)
+    await act(async () => {
+      await page.controller().handleStartBrowserSignIn()
+    })
+    const { attemptId } = page.controller().browserSignIn
+    expect(page.controller().browserSignIn.phase, 'main opened the browser and waits').toBe(
+      'waiting'
+    )
+    await waitFor(() =>
+      expect(
+        screen.queryByText('Finish signing in in your browser'),
+        'the page shows the waiting attempt'
+      ).not.toBeNull()
+    )
+
+    const email = screen.getByLabelText('Email') as HTMLInputElement
+    const password = screen.getByLabelText('Password') as HTMLInputElement
+    fireEvent.change(email, { target: { value: 'member@example.test' } })
+    fireEvent.change(password, { target: { value: 'fake-password' } })
+    const submit = password.closest('form')?.querySelector('button[type="submit"]')
+    if (!(submit instanceof HTMLButtonElement)) throw new Error('the password form has no submit')
+    expect(email.disabled, 'the email input is enabled while waiting').toBe(false)
+    expect(password.disabled, 'the password input is enabled while waiting').toBe(false)
+    expect(submit.disabled, 'the password submit is enabled while waiting').toBe(false)
+
+    fireEvent.click(submit)
+    await waitFor(() =>
+      expect(page.setStatus, 'the password login signs in').toHaveBeenCalledWith(
+        'Signed in.',
+        'success'
+      )
+    )
+    expect(bridge.auth.passwordLogin, 'the login reached main').toHaveBeenCalledTimes(1)
+    expect(endStatesOf(harness, attemptId ?? 0), "the login's bump replaced the attempt").toEqual([
+      'replaced',
+    ])
     await waitFor(() => expect(page.controller().browserSignIn.phase).toBe('idle'))
   })
 
