@@ -1668,6 +1668,10 @@ describe('browser sign-in link acceptance, redeem and install', () => {
     expect(
       harness.secretsSeen.filter(text => secrets.some(secret => text.includes(secret)))
     ).toEqual([])
+    // The session token left only through the one token-store write.
+    const token = recordedSessionToken()
+    expect(harness.tokenWrites.map(write => write.value)).toEqual([token])
+    expect(harness.secretsSeen.filter(text => text.includes(token))).toEqual([token])
   })
 
   it('drops an error link for the waiting state while its redeem is held', async () => {
