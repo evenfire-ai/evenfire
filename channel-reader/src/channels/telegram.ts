@@ -4,6 +4,7 @@
 import { Bot, Context } from 'grammy'
 import { config } from '../config'
 import { RPCClient } from '../rpcClient'
+import { logCaughtError } from '../safeLog'
 import {
   type TelegramCallbackAction,
   type TelegramToolApprovalDecision,
@@ -178,7 +179,7 @@ export class TelegramAdapter implements ChannelAdapter {
         throw earlyFailure
       }
     } catch (err) {
-      console.error('[Telegram] Failed to initialize bot:', err)
+      logCaughtError('error', 'telegram_init_failed', err)
       this.resetConnectionState()
       throw err
     }
@@ -296,7 +297,7 @@ export class TelegramAdapter implements ChannelAdapter {
     try {
       await ctx.answerCallbackQuery?.({ text, show_alert: showAlert })
     } catch (err) {
-      console.warn('[Telegram] Failed to answer callback query:', err)
+      logCaughtError('warn', 'telegram_callback_failed', err)
     }
   }
 
@@ -548,10 +549,7 @@ export class TelegramAdapter implements ChannelAdapter {
           }
         })
         .catch(err => {
-          console.error(
-            '[Telegram] Verification command handler failed:',
-            err instanceof Error ? err.message : err
-          )
+          logCaughtError('error', 'telegram_verification_failed', err)
         })
       return
     }
@@ -603,7 +601,7 @@ export class TelegramAdapter implements ChannelAdapter {
         options
       )
     } catch (err) {
-      console.error('[Telegram] Failed to send message:', err)
+      logCaughtError('error', 'telegram_send_failed', err)
       throw err
     }
   }
@@ -634,7 +632,7 @@ export class TelegramAdapter implements ChannelAdapter {
       // Ignore "message is not modified" errors (Telegram returns 400 if text unchanged)
       const msg = err instanceof Error ? err.message : String(err)
       if (!msg.includes('message is not modified')) {
-        console.error(`[Telegram] Failed to edit message ${messageId}:`, msg)
+        logCaughtError('error', 'telegram_edit_failed', msg, { messageId })
       }
     }
   }

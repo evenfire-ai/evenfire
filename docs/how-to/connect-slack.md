@@ -26,6 +26,7 @@ send to link your account.
    | `app_mentions:read`                                                | receiving `app_mention` events                                      |
    | `channels:history`, `groups:history`, `im:history`, `mpim:history` | receiving `message` events from channels, private channels, and DMs |
    | `chat:write`                                                       | posting and editing replies (`chat.postMessage`, `chat.update`)     |
+   | `files:read`                                                       | reading files a user attaches in a DM or channel                    |
    | `files:write`                                                      | delivering workflow result documents (`files.uploadV2`)             |
    | `channels:read`, `groups:read`, `im:read`, `mpim:read`             | reading conversation metadata at link time (`conversations.info`)   |
    | `users:read`                                                       | naming DM conversations at link time (`users.info`)                 |
@@ -74,6 +75,7 @@ oauth_config:
       - im:read
       - mpim:read
       - chat:write
+      - files:read
       - files:write
       - users:read
 settings:

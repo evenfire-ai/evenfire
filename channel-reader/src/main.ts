@@ -2,6 +2,9 @@ import { randomBytes } from 'node:crypto'
 import http from 'node:http'
 import { validateCommunicationChannelConfig } from './channelConfigValidation'
 import { EmailAdapter, SlackAdapter, TeamsAdapter, TelegramAdapter } from './channels'
+import type { SlackSharedFileRef } from './channels/slack'
+import { deliverSlackAnswer, slackFailureReason } from './channels/slackDelivery'
+import { channelRunErrorText } from './channels/slackText'
 import { config } from './config'
 import { CredentialsResolver, DevCredentialsResolver, ResolvedCredentials } from './credentials'
 import {
@@ -25,6 +28,7 @@ import {
   type ShellAction,
   type ShellCardDescriptor,
 } from './rpcClient'
+import { logCaughtError } from './safeLog'
 import { type TraceContextV1, mintChannelTraceContext } from './traceContext'
 import {
   Attachment,
@@ -476,6 +480,7 @@ type ChannelReaderRpcClient = Pick<
   | 'getCronResults'
   | 'acknowledgeCronResult'
 > & {
+  cancelTask?: RPCClient['cancelTask']
   authorizeProviderMessage?: RPCClient['authorizeProviderMessage']
   downloadWorkflowResultByRun?: RPCClient['downloadWorkflowResultByRun']
   confirmSlackLinkSession?: RPCClient['confirmSlackLinkSession']
@@ -495,6 +500,8 @@ export interface ChannelReaderOptions {
   channels?: CommunicationChannelCRD[]
   sleep?: (ms: number) => Promise<void>
   credentialsResolver?: { resolve(cc: CommunicationChannelCRD): Promise<ResolvedCredentials> }
+  /** Overrides CLERUM_CHANNEL_RUN_TIMEOUT_MS. */
+  runTimeoutMs?: number
 }
 
 export class ChannelReader {
@@ -534,6 +541,7 @@ export class ChannelReader {
   private workflowApprovalCoordinator: WorkflowApprovalCoordinator
   /** Timestamp (Date.now()) of the last periodic CommunicationChannel resync. */
   private lastChannelResyncAt: number = 0
+  private readonly runTimeoutMs: number
 
   constructor(options: ChannelReaderOptions = {}) {
     if (options.rpcClient) {
@@ -549,6 +557,7 @@ export class ChannelReader {
     this.channels = options.channels ?? []
     this.sleepImpl = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)))
     this.credentialsResolver = options.credentialsResolver ?? null
+    this.runTimeoutMs = options.runTimeoutMs ?? config.channelRunTimeoutMs
     this.workflowApprovalCoordinator = new WorkflowApprovalCoordinator({
       rpcClient: this.rpcClient,
       notificationDeliveryClient: this.notificationDeliveryClient,
@@ -1016,6 +1025,31 @@ export class ChannelReader {
     return this.adapterForChannelType(source.channelType)
   }
 
+  private async attachSlackFiles(
+    message: Message,
+    files: SlackSharedFileRef[] | undefined
+  ): Promise<void> {
+    if (!files || files.length === 0) return
+    const adapter = this.adapterForMessage(message)
+    if (!(adapter instanceof SlackAdapter)) {
+      const names = files.map(file => file.name || file.id).join(', ')
+      message.content = `${message.content}\n\n[Attached ${names}, but the file contents were not available.]`
+      return
+    }
+    try {
+      const appendix = await adapter.inlineSharedFiles(files)
+      if (appendix) message.content = `${message.content}\n\n${appendix}`
+    } catch (err) {
+      console.error(
+        JSON.stringify({
+          level: 'error',
+          msg: 'slack_file_inline_failed',
+          code: err instanceof Error ? err.message : 'unknown',
+        })
+      )
+    }
+  }
+
   private slackMessageFromHandoff(handoff: SlackMessageHandoff): Message | null {
     const providerTarget = handoff.providerTarget
     if (
@@ -1174,6 +1208,7 @@ export class ChannelReader {
       if (request.workflowRunId) {
         await this.deliverProviderWorkflowResult(message, request.workflowRunId)
       } else {
+        if (request.slackFiles?.length) message.slackFiles = request.slackFiles
         await this.handleMessages([message])
       }
       return { ok: true }
@@ -1666,7 +1701,6 @@ export class ChannelReader {
 
       // Check if this is an approval/denial command
       const runtimeContent = contentWithoutAddressedBotMention(msg)
-      const runtimeMsg = runtimeContent === msg.content ? msg : { ...msg, content: runtimeContent }
       const trimmed = runtimeContent.trim().toLowerCase()
       const toolApprovalAction = parseToolApprovalAction(runtimeContent)
       if (toolApprovalAction && 'rejected' in toolApprovalAction) {
@@ -1704,6 +1738,15 @@ export class ChannelReader {
         continue
       }
 
+      if (msg.channelType === 'slack' && msg.slackFiles?.length) {
+        await this.attachSlackFiles(msg, msg.slackFiles)
+      }
+      const runtimeContentAfterFiles = contentWithoutAddressedBotMention(msg)
+      const runtimeMsg =
+        runtimeContentAfterFiles === msg.content
+          ? msg
+          : { ...msg, content: runtimeContentAfterFiles }
+
       // Forward to mcp-host
       console.log('[Main] Forwarding message to mcp-host...')
 
@@ -1713,7 +1756,7 @@ export class ChannelReader {
         try {
           await this.handleMessageWithProgress(runtimeMsg, adapter, traceContext)
         } catch (err) {
-          console.error(`[Main] Progress flow failed, falling back:`, err)
+          logCaughtError('error', 'progress_flow_failed', err)
           // Fall back to synchronous
           const response = await this.rpcClient.sendMessage(runtimeMsg, { traceContext })
           if (response.success && response.status === 'waiting_approval' && response.approval) {
@@ -2091,9 +2134,19 @@ export class ChannelReader {
       ): Promise<void> => {
         const operation = statusEditQueue.then(async () => {
           try {
-            await adapter.editMessage(responseChannelId, statusMessageId, content, options)
+            await adapter.editMessage(responseChannelId, statusMessageId, content, {
+              ...options,
+              runId: taskId,
+            })
           } catch (err) {
-            console.error(`[Main] Failed to edit status message for task ${taskId}:`, err)
+            console.error(
+              JSON.stringify({
+                level: 'error',
+                msg: 'status_edit_failed',
+                taskId,
+                code: err instanceof Error ? err.message : 'unknown',
+              })
+            )
             if (mustSucceed) throw err
           }
         })
@@ -2102,9 +2155,102 @@ export class ChannelReader {
       }
 
       let finalDelivered = false
+      let terminalDeliveryStarted = false
+      let completionAnnounced = false
       let finalDeliveryInFlight: Promise<boolean> | null = null
       let resultPollingFallbackStarted = false
       let approvalPromptDelivered = false
+      let stream: { close: () => void; steps: ProgressStep[] } | undefined
+      const closeStream = () => stream?.close()
+      const streamSteps = () => stream?.steps ?? []
+      let runTimer: ReturnType<typeof setTimeout> | undefined
+      let pollIntervalMs = RESULT_POLL_FALLBACK_INTERVAL_MS
+      let pollDeadline = Date.now() + RESULT_POLL_FALLBACK_TIMEOUT_MS
+
+      const clearRunTimer = () => {
+        if (runTimer) clearTimeout(runTimer)
+        runTimer = undefined
+      }
+      const armRunTimer = () => {
+        clearRunTimer()
+        runTimer = setTimeout(() => {
+          void failRun('timed out')
+        }, this.runTimeoutMs)
+        runTimer.unref?.()
+      }
+      const resetPollDeadline = () => {
+        pollDeadline = Date.now() + RESULT_POLL_FALLBACK_TIMEOUT_MS
+      }
+      const noteRunActivity = (): boolean => {
+        if (!acceptProgressUpdates) return false
+        armRunTimer()
+        resetPollDeadline()
+        return true
+      }
+      // A pending or waiting_approval result only changes how often we poll.
+      // Progress events and an approval decision move the deadline.
+      const noteHostStillRunning = (status: string) => {
+        if (status === 'waiting_approval') pollIntervalMs = 30_000
+        else pollIntervalMs = RESULT_POLL_FALLBACK_INTERVAL_MS
+        armRunTimer()
+      }
+
+      const failRun = async (reason: string): Promise<void> => {
+        if (finalDelivered || terminalDeliveryStarted || completionAnnounced) return
+        try {
+          const delivered = await deliverFinalResult()
+          if (delivered) return
+        } catch (err) {
+          logCaughtError('error', 'result_poll_failed', err, { taskId })
+          // The host was unreachable. Keep polling until the deadline so a
+          // later completed answer can replace the apology.
+          if (Date.now() < pollDeadline) {
+            clearRunTimer()
+            const text = channelRunErrorText(reason)
+            try {
+              await editStatus(text, true)
+            } catch {
+              // The poll will try the answer again.
+            }
+            return
+          }
+        }
+        if (finalDelivered || terminalDeliveryStarted || completionAnnounced) return
+        finalDelivered = true
+        acceptProgressUpdates = false
+        clearRunTimer()
+        const text = channelRunErrorText(reason)
+        try {
+          await editStatus(text, true)
+        } catch {
+          try {
+            await adapter.sendMessage(
+              responseChannelId,
+              text,
+              this.replyTargetMessageId(msg),
+              undefined,
+              { runId: taskId }
+            )
+          } catch (err) {
+            console.error(
+              JSON.stringify({
+                level: 'error',
+                msg: 'terminal_status_failed',
+                taskId,
+                code: err instanceof Error ? err.message : 'unknown',
+              })
+            )
+          }
+        }
+        this.clearPendingApprovalForTask(msg, taskId)
+        try {
+          await this.rpcClient.cancelTask?.(taskId, msg)
+        } catch {
+          // cancelTask logs the Slack-unrelated transport failure itself.
+        }
+        closeStream()
+        resolveOnce()
+      }
 
       const deliverApprovalPrompt = async (params: {
         requestId: string
@@ -2114,6 +2260,7 @@ export class ChannelReader {
         shellCard?: ShellCardDescriptor
         notificationRendered: boolean
       }): Promise<void> => {
+        if (finalDelivered || terminalDeliveryStarted) return
         const approvalKey = this.pendingApprovalKey(msg)
         const existing = this.pendingApprovals.get(approvalKey)
         if (approvalPromptDelivered && existing?.requestId === params.requestId) return
@@ -2138,10 +2285,14 @@ export class ChannelReader {
           ...lastingGrantState(params),
           startResultPollingFallback,
           updateStatusAfterDecision: content => {
+            pollIntervalMs = RESULT_POLL_FALLBACK_INTERVAL_MS
+            resetPollDeadline()
             acceptProgressUpdates = true
+            armRunTimer()
             return editStatus(content)
           },
         })
+        clearRunTimer()
         const notification = withShellCardNotice(params.notification, params.shellCard)
         await editStatus(
           notification,
@@ -2158,12 +2309,15 @@ export class ChannelReader {
       }
 
       const deliverFinalResult = async (): Promise<boolean> => {
-        if (finalDelivered) return true
         if (finalDeliveryInFlight) return finalDeliveryInFlight
+        if (finalDelivered) return true
 
         finalDeliveryInFlight = (async () => {
           const result = await this.rpcClient.getTaskResult(taskId, msg)
+          if (finalDelivered) return true
+          if (!result || typeof result.status !== 'string') return false
           if (result.status === 'waiting_approval' && result.approval) {
+            noteHostStillRunning(result.status)
             await deliverApprovalPrompt({
               requestId: result.approval.requestId,
               userId: result.approval.userId,
@@ -2175,62 +2329,171 @@ export class ChannelReader {
             return false
           }
           if (result.status === 'pending' || result.status === 'waiting_approval') {
+            noteHostStillRunning(result.status)
             return false
           }
+          // Commit before any Slack edit so the silence timer cannot replace the answer.
+          // A throw clears the latch so a later poll can retry.
+          terminalDeliveryStarted = true
+          clearRunTimer()
           acceptProgressUpdates = false
 
-          if (result.success && result.response) {
-            const finalText = formatFinalMessage(stream.steps, result.response)
-            try {
-              await editStatus(finalText, true)
-            } catch {
-              await adapter.sendMessage(
-                responseChannelId,
-                finalText,
-                this.replyTargetMessageId(msg)
+          try {
+            if (result.success && result.response) {
+              const finalText = formatFinalMessage(
+                stream?.steps ?? [],
+                result.response,
+                msg.channelType === 'slack' ? { truncateAt: null } : undefined
               )
+              if (msg.channelType === 'slack') {
+                const outcome = await deliverSlackAnswer(
+                  {
+                    taskId,
+                    edit: text => editStatus(text, true),
+                    post: async text => {
+                      const messageTs = await adapter.sendMessage(
+                        responseChannelId,
+                        text,
+                        this.replyTargetMessageId(msg),
+                        undefined,
+                        { runId: taskId }
+                      )
+                      if (!messageTs) throw new Error('slack_post_failed')
+                    },
+                    uploadSnippet: async (filename, text) => {
+                      if (adapter instanceof SlackAdapter) {
+                        await adapter.uploadTextSnippet(
+                          responseChannelId,
+                          text,
+                          filename,
+                          this.replyTargetMessageId(msg),
+                          taskId
+                        )
+                        return
+                      }
+                      await adapter.sendMessage(
+                        responseChannelId,
+                        text,
+                        this.replyTargetMessageId(msg),
+                        undefined,
+                        { runId: taskId }
+                      )
+                    },
+                    onApiError: (err, op) => {
+                      console.error(
+                        JSON.stringify({
+                          level: 'error',
+                          msg: 'slack_api_error',
+                          taskId,
+                          op,
+                          code: slackFailureReason(err),
+                        })
+                      )
+                    },
+                  },
+                  finalText
+                )
+                if (outcome === 'error') {
+                  try {
+                    await this.rpcClient.cancelTask?.(taskId, msg)
+                  } catch {
+                    // cancelTask logs the transport failure.
+                  }
+                  finalDelivered = true
+                  clearRunTimer()
+                  this.clearPendingApprovalForTask(msg, taskId)
+                  console.error(
+                    JSON.stringify({
+                      level: 'error',
+                      msg: 'slack_answer_incomplete',
+                      taskId,
+                    })
+                  )
+                  return true
+                }
+              } else {
+                try {
+                  await editStatus(finalText, true)
+                } catch {
+                  await adapter.sendMessage(
+                    responseChannelId,
+                    finalText,
+                    this.replyTargetMessageId(msg)
+                  )
+                }
+              }
+              finalDelivered = true
+              clearRunTimer()
+              this.clearPendingApprovalForTask(msg, taskId)
+              console.log(`[Main] Final result delivered for task ${taskId} via ${msg.channelType}`)
+              if (result.attachments && result.attachments.length > 0) {
+                await adapter.sendMessage(
+                  responseChannelId,
+                  '',
+                  this.replyTargetMessageId(msg),
+                  result.attachments
+                )
+              }
+            } else if (result.error) {
+              const errorText =
+                msg.channelType === 'slack'
+                  ? channelRunErrorText(result.error.message ?? 'unknown error')
+                  : `Error: ${result.error.message ?? 'Unknown error'}`
+              try {
+                await editStatus(errorText, true)
+              } catch {
+                try {
+                  await adapter.sendMessage(
+                    responseChannelId,
+                    errorText,
+                    this.replyTargetMessageId(msg),
+                    undefined,
+                    { runId: taskId }
+                  )
+                } catch (err) {
+                  console.error(
+                    JSON.stringify({
+                      level: 'error',
+                      msg: 'terminal_status_failed',
+                      taskId,
+                      code: err instanceof Error ? err.message : 'unknown',
+                    })
+                  )
+                }
+              }
+              finalDelivered = true
+              clearRunTimer()
+              this.clearPendingApprovalForTask(msg, taskId)
+              try {
+                await this.rpcClient.cancelTask?.(taskId, msg)
+              } catch {
+                // The task is already failed. Cancel is idempotent and does not free the conversation if the executor never settles.
+              }
+              console.log(`[Main] Final error delivered for task ${taskId} via ${msg.channelType}`)
+            } else {
+              const finalText = formatFinalMessage(streamSteps(), 'Done.')
+              try {
+                await editStatus(finalText, true)
+              } catch {
+                await adapter.sendMessage(
+                  responseChannelId,
+                  finalText,
+                  this.replyTargetMessageId(msg)
+                )
+              }
+              finalDelivered = true
+              clearRunTimer()
+              this.clearPendingApprovalForTask(msg, taskId)
+              console.log(`[Main] Final result delivered for task ${taskId} via ${msg.channelType}`)
             }
-            finalDelivered = true
-            this.clearPendingApprovalForTask(msg, taskId)
-            console.log(`[Main] Final result delivered for task ${taskId} via ${msg.channelType}`)
-            if (result.attachments && result.attachments.length > 0) {
-              await adapter.sendMessage(
-                responseChannelId,
-                '',
-                this.replyTargetMessageId(msg),
-                result.attachments
-              )
-            }
-          } else if (result.error) {
-            const errorText = `Error: ${result.error.message ?? 'Unknown error'}`
-            try {
-              await editStatus(errorText, true)
-            } catch {
-              await adapter.sendMessage(
-                responseChannelId,
-                errorText,
-                this.replyTargetMessageId(msg)
-              )
-            }
-            finalDelivered = true
-            this.clearPendingApprovalForTask(msg, taskId)
-            console.log(`[Main] Final error delivered for task ${taskId} via ${msg.channelType}`)
-          } else {
-            const finalText = formatFinalMessage(stream.steps, 'Done.')
-            try {
-              await editStatus(finalText, true)
-            } catch {
-              await adapter.sendMessage(
-                responseChannelId,
-                finalText,
-                this.replyTargetMessageId(msg)
-              )
-            }
-            finalDelivered = true
-            this.clearPendingApprovalForTask(msg, taskId)
-            console.log(`[Main] Final result delivered for task ${taskId} via ${msg.channelType}`)
+            return true
+          } catch (err) {
+            terminalDeliveryStarted = false
+            completionAnnounced = false
+            acceptProgressUpdates = true
+            armRunTimer()
+            throw err
           }
-          return true
         })()
 
         try {
@@ -2243,36 +2506,46 @@ export class ChannelReader {
       const startResultPollingFallback = () => {
         if (resultPollingFallbackStarted) return
         resultPollingFallbackStarted = true
+        resetPollDeadline()
 
         void (async () => {
-          const deadline = Date.now() + RESULT_POLL_FALLBACK_TIMEOUT_MS
-          while (!finalDelivered && Date.now() < deadline) {
-            await new Promise(resolve => setTimeout(resolve, RESULT_POLL_FALLBACK_INTERVAL_MS))
+          while (!finalDelivered) {
+            await new Promise<void>(resolve => {
+              const timer = setTimeout(resolve, pollIntervalMs)
+              timer.unref?.()
+            })
             if (finalDelivered) return
+            if (Date.now() >= pollDeadline) {
+              await failRun('timed out')
+              closeStream()
+              resolveOnce()
+              return
+            }
             try {
               const delivered = await deliverFinalResult()
               if (delivered) {
-                stream.close()
+                closeStream()
                 resolveOnce()
                 return
               }
             } catch (err) {
-              console.error(`[Main] result polling fallback failed for task ${taskId}:`, err)
+              logCaughtError('error', 'result_poll_failed', err, { taskId })
             }
-          }
-          if (!finalDelivered) {
-            console.warn(`[Main] Result polling fallback timed out for task ${taskId}`)
           }
         })()
       }
 
-      const stream = createProgressStream({
+      stream = createProgressStream({
         mcpHostUrl: this.rpcClient.getBaseUrl(),
         taskId,
         source: msg,
         onProgress: (steps: ProgressStep[]) => {
-          if (!acceptProgressUpdates) return
+          // Silence, not wall-clock age, trips the cap. Tool progress is activity.
+          if (!noteRunActivity()) return
           void editStatus(formatProgressUpdate(steps))
+        },
+        onActivity: () => {
+          noteRunActivity()
         },
         onSuspended: async suspended => {
           // Approval needed. Fetch the server-formatted notification (which
@@ -2301,7 +2574,7 @@ export class ChannelReader {
               shellCard = readShellCard(result.approval.shellCard)
             }
           } catch (err) {
-            console.error(`[Main] Failed to fetch approval notification for task ${taskId}:`, err)
+            logCaughtError('error', 'approval_notification_fetch_failed', err, { taskId })
           }
           await deliverApprovalPrompt({
             requestId: suspended.requestId,
@@ -2316,35 +2589,57 @@ export class ChannelReader {
           resolveOnce()
         },
         onTerminal: async terminal => {
-          if (finalDelivered) {
-            stream.close()
+          // A terminal result already being posted must not be replaced by a
+          // later cancelled or timeout event. failRun uses the same flag.
+          if (finalDelivered || terminalDeliveryStarted) {
+            closeStream()
             resolveOnce()
             return
           }
-          if (terminal.status === 'cancelled') {
+          if (terminal.status === 'cancelled' || terminal.status === 'timeout') {
             acceptProgressUpdates = false
             finalDelivered = true
-            await editStatus('Request cancelled.')
+            clearRunTimer()
+            const timedOut =
+              terminal.status === 'timeout' || terminal.reason === 'channel_run_timeout'
+            await editStatus(timedOut ? channelRunErrorText('timed out') : 'Request cancelled.')
             this.clearPendingApprovalForTask(msg, taskId)
           } else if (terminal.status === 'failed' && terminal.error) {
             acceptProgressUpdates = false
             finalDelivered = true
-            await editStatus(`Error: ${terminal.error.message}`)
+            clearRunTimer()
+            await editStatus(
+              msg.channelType === 'slack'
+                ? channelRunErrorText(terminal.error.message)
+                : `Error: ${terminal.error.message}`
+            )
             this.clearPendingApprovalForTask(msg, taskId)
+            try {
+              await this.rpcClient.cancelTask?.(taskId, msg)
+            } catch {
+              // The task is already failed. Cancel is idempotent and does not free the conversation if the executor never settles.
+            }
           } else {
-            // status === 'completed' (or unknown — treat as completed)
+            // The host already said this run completed. Do not let the silence
+            // cap discard the answer while the body is still being fetched.
+            completionAnnounced = true
+            clearRunTimer()
             try {
               const delivered = await deliverFinalResult()
               if (!delivered) {
                 startResultPollingFallback()
                 await editStatus(
-                  formatFinalMessage(stream.steps, 'Final response is still syncing.')
+                  formatFinalMessage(streamSteps(), 'Final response is still syncing.')
                 )
               }
             } catch (err) {
-              console.error(`[Main] terminal(completed) result fetch failed:`, err)
+              completionAnnounced = false
+              armRunTimer()
+              logCaughtError('error', 'terminal_result_fetch_failed', err, { taskId })
               startResultPollingFallback()
-              await editStatus(formatFinalMessage(stream.steps, 'Final response is still syncing.'))
+              await editStatus(
+                formatFinalMessage(streamSteps(), 'Final response is still syncing.')
+              )
             }
           }
           // Belt-and-braces close: the SSE IIFE closes itself on terminal
@@ -2352,11 +2647,11 @@ export class ChannelReader {
           // that doesn't auto-close — and an explicit close here is harmless
           // (close() is idempotent) and matches the spec's "closes the stream"
           // language for onTerminal.
-          stream.close()
+          closeStream()
           resolveOnce()
         },
         onError: async (error: string) => {
-          console.error(`[Main] Progress stream error: ${error}`)
+          logCaughtError('error', 'progress_stream_failed', error, { taskId })
           // `task_not_found_or_expired` is NOT a transport failure: mcp-host is
           // healthy. It means the reporter was never registered within the 180s
           // wait (queue saturation \u2014 task may still be processing) or was evicted
@@ -2368,7 +2663,7 @@ export class ChannelReader {
               // Path B: the answer is already computed + stored \u2192 deliver it.
               const delivered = await deliverFinalResult()
               if (delivered) {
-                stream.close()
+                closeStream()
                 resolveOnce()
                 return
               }
@@ -2377,10 +2672,7 @@ export class ChannelReader {
                 return
               }
             } catch (err) {
-              console.error(
-                `[Main] reconcile after task_not_found_or_expired failed for task ${taskId}:`,
-                err
-              )
+              logCaughtError('error', 'task_reconcile_failed', err, { taskId })
             }
             // Path A: still queued/processing \u2192 keep polling for the result,
             // don't mislabel it as a connection loss.
@@ -2394,10 +2686,15 @@ export class ChannelReader {
           resolveOnce()
         },
       })
+      armRunTimer()
       // Webhook-origin Slack/Teams requests can lose the terminal SSE while still
       // receiving normal tool progress. Keep webhook-origin chats backed up by polling;
       // Telegram keeps the narrower existing fallbacks below.
-      if (msg.channelType === 'slack' || msg.channelType === 'teams') {
+      if (
+        msg.channelType === 'slack' ||
+        msg.channelType === 'teams' ||
+        msg.channelType === 'telegram'
+      ) {
         startResultPollingFallback()
       }
     })
@@ -2535,7 +2832,7 @@ export class ChannelReader {
       }
     } catch (err) {
       // Silent — cron results are best-effort, don't break poll loop
-      console.error('[Main] Failed to poll cron results:', err)
+      logCaughtError('error', 'cron_poll_failed', err)
     }
   }
 
@@ -2593,7 +2890,7 @@ export class ChannelReader {
       )
       console.log(`[Main] Reply sent successfully`)
     } catch (err) {
-      console.error(`[Main] Failed to send reply:`, err)
+      logCaughtError('error', 'reply_send_failed', err)
     }
   }
 
@@ -2696,10 +2993,7 @@ export class ChannelReader {
         try {
           await this.restart()
         } catch (err) {
-          console.error(
-            '[Main] Restart failed (will retry on next cycle if CRD watch keeps needsRestart):',
-            err instanceof Error ? err.message : err
-          )
+          logCaughtError('error', 'reader_restart_failed', err)
         }
       }
 
@@ -2764,7 +3058,7 @@ async function main(): Promise<void> {
 
 if (require.main === module) {
   main().catch(error => {
-    console.error('[Main] Fatal error:', error)
+    logCaughtError('error', 'fatal', error)
     process.exit(1)
   })
 }

@@ -78,6 +78,12 @@ import {
 import { createGfscClient, inspectGfsToolScopes } from './internalTools/gfsClient'
 import { GfsDownloadStore } from './internalTools/gfsDownloadStore'
 import { HostWatcher, LlmHookWatcher, getHost, getLlmHook } from './k8sClient'
+import {
+  handleRuntimeCancel,
+  logRuntimeOwnershipMismatch,
+  runtimeCallerCanReadTask,
+  sourceMatchesRuntimeCaller,
+} from './lifecycle/runtimeCancel'
 import { StatelessHeartbeat } from './lifecycle/statelessHeartbeat'
 import { TaskLifecycle } from './lifecycle/taskLifecycle'
 import { isTerminal } from './lifecycle/types'
@@ -2390,74 +2396,6 @@ const prepareIncomingMessage = createIncomingAdmission({
   logger,
 })
 
-function sourceMatchesRuntimeCaller(
-  source: { channelType?: string | null; channelId?: string | null; sender?: string | null },
-  caller?: RuntimeCallerContext
-): boolean {
-  if (!caller) return false
-
-  if (caller.caller === 'rpc-proxy') {
-    return source.channelType === 'rpc' && !!caller.userId && source.sender === caller.userId
-  }
-
-  return (
-    source.channelType === caller.channelType &&
-    source.channelId === caller.channelId &&
-    source.sender === caller.sender
-  )
-}
-
-function logRuntimeOwnershipMismatch(
-  route: string,
-  taskId: string,
-  caller: RuntimeCallerContext,
-  source: { channelType?: string | null; channelId?: string | null; sender?: string | null }
-): void {
-  logger.warn(
-    {
-      event: 'runtime_task_ownership_mismatch',
-      route,
-      taskId,
-      caller: caller.caller,
-      callerUserId: caller.userId ?? null,
-      callerChannelType: caller.channelType ?? null,
-      callerChannelId: caller.channelId ?? null,
-      callerSender: caller.sender ?? null,
-      taskChannelType: source.channelType ?? null,
-      taskChannelId: source.channelId ?? null,
-      taskSender: source.sender ?? null,
-    },
-    'Host runtime event'
-  )
-}
-
-function runtimeCallerCanReadTask(
-  taskId: string,
-  caller: RuntimeCallerContext | undefined,
-  route: string
-): boolean {
-  if (!caller) return false
-
-  const pending = pendingTaskResults.get(taskId)
-  if (pending) {
-    const matches = sourceMatchesRuntimeCaller(pending.source, caller)
-    if (!matches) logRuntimeOwnershipMismatch(route, taskId, caller, pending.source)
-    return matches
-  }
-
-  const record = taskLifecycle?.get(taskId)
-  if (!record) return false
-
-  const source = {
-    channelType: record.submittedChannelType,
-    channelId: record.submittedChannelId,
-    sender: record.submittedBy,
-  }
-  const matches = sourceMatchesRuntimeCaller(source, caller)
-  if (!matches) logRuntimeOwnershipMismatch(route, taskId, caller, source)
-  return matches
-}
-
 /**
  * Handle task result polling from channel-reader (after approval flow).
  */
@@ -2465,7 +2403,14 @@ async function handleTaskResult(
   taskId: string,
   caller?: RuntimeCallerContext
 ): Promise<MessageResponse | null> {
-  if (!runtimeCallerCanReadTask(taskId, caller, 'task_result')) return null
+  if (
+    !runtimeCallerCanReadTask(taskId, caller, 'task_result', {
+      pendingSource: id => pendingTaskResults.get(id)?.source,
+      lifecycle: taskLifecycle,
+      logger,
+    })
+  )
+    return null
 
   const result = pendingTaskResults.get(taskId)
   if (result) {
@@ -2784,7 +2729,7 @@ function acknowledgeCronResult(taskId: string, caller?: RuntimeCallerContext): b
   if (!entry) return false
 
   if (!sourceMatchesRuntimeCaller(entry.origin, caller)) {
-    if (caller) logRuntimeOwnershipMismatch('cron_result_ack', taskId, caller, entry.origin)
+    if (caller) logRuntimeOwnershipMismatch(logger, 'cron_result_ack', taskId, caller, entry.origin)
     return false
   }
 
@@ -3180,7 +3125,14 @@ async function startRPCServer(): Promise<void> {
   // inside `handleCompactionRoute`.
   rpcServer.onCompaction(async req => agent!.compactSession(req))
   rpcServer.onProgressStream(async (taskId, onEvent, caller) => {
-    if (!runtimeCallerCanReadTask(taskId, caller, 'task_progress_stream')) return null
+    if (
+      !runtimeCallerCanReadTask(taskId, caller, 'task_progress_stream', {
+        pendingSource: id => pendingTaskResults.get(id)?.source,
+        lifecycle: taskLifecycle,
+        logger,
+      })
+    )
+      return null
 
     // Wait up to 3 minutes for the reporter to appear. Channel-origin tasks can
     // sit behind an LLM-bound queue item; ending early leaves the provider UI
@@ -3192,75 +3144,13 @@ async function startRPCServer(): Promise<void> {
     const unsubscribe = reporter.subscribe(onEvent)
     return { unsubscribe }
   })
-  rpcServer.onCancel((taskId, requesterUserId) => {
-    logger.info(
-      {
-        event: 'cancel_requested',
-        taskId,
-        requesterUserId: requesterUserId ?? null,
-        origin: 'user', // HTTP-initiated cancels are always user-originated. Shutdown drain logs 'system' from stateMachine.stop().
-      },
-      'Host runtime event'
-    )
-
-    // Ownership check: if the record carries a submittedBy identity AND the
-    // requester identity is provided, they must match.
-    // Fail-open when either side is absent for back-compat — internal tasks have no
-    // submitter, and older rpc-proxy versions didn't pass userId. New rpc-proxy always
-    // passes userId so this narrows over time.
-    const existing = taskLifecycle!.get(taskId)
-    if (
-      existing &&
-      existing.submittedBy &&
-      requesterUserId &&
-      existing.submittedBy !== requesterUserId
-    ) {
-      logger.warn(
-        {
-          event: 'cancel_ownership_mismatch',
-          taskId,
-          submittedBy: existing.submittedBy,
-          requester: requesterUserId,
-        },
-        'Host runtime event'
-      )
-      // Do NOT leak task existence to unauthorized requesters
-      return 'not_found'
-    }
-
-    const outcome = taskLifecycle!.transition(taskId, 'cancelled', 'user_requested')
-
-    if (outcome.kind === 'applied') {
-      logger.info(
-        {
-          event: 'cancel_applied',
-          taskId,
-          from_state: outcome.from,
-          reason: outcome.reason,
-        },
-        'Host runtime event'
-      )
-      return 'cancelled'
-    }
-    if (outcome.kind === 'already_terminal') {
-      logger.info(
-        {
-          event: 'already_terminal',
-          taskId,
-          current_state: outcome.state,
-          requested_transition: 'cancelled',
-        },
-        'Host runtime event'
-      )
-      return 'already_terminal'
-    }
-    if (outcome.kind === 'not_found') {
-      return 'not_found'
-    }
-    // kind === 'illegal' — should never happen for cancel
-    logger.error({ outcome: outcome }, '[cancel] illegal transition')
-    return 'not_found'
-  })
+  rpcServer.onCancel((taskId, requesterUserId, caller) =>
+    handleRuntimeCancel(taskId, requesterUserId, caller, {
+      pendingSource: id => pendingTaskResults.get(id)?.source,
+      lifecycle: taskLifecycle,
+      logger,
+    })
+  )
   await rpcServer.start()
 }
 

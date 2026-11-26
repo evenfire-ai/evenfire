@@ -83,7 +83,11 @@ export function formatProgressUpdate(steps: ProgressStep[]): string {
   return lines.join('\n')
 }
 
-export function formatFinalMessage(steps: ProgressStep[], response: string): string {
+export function formatFinalMessage(
+  steps: ProgressStep[],
+  response: string,
+  options?: { truncateAt?: number | null }
+): string {
   if (steps.length === 0) return response
 
   const errorCount = steps.filter(s => s.state === 'error').length
@@ -93,11 +97,11 @@ export function formatFinalMessage(steps: ProgressStep[], response: string): str
 
   const summary = `${icon} ${steps.length} tool${steps.length > 1 ? 's' : ''} used · ${toolNames} · ${formatDuration(totalDuration)}`
   const full = `${summary}\n\n${response}`
+  const limit = options?.truncateAt === undefined ? MAX_MESSAGE_LENGTH : options.truncateAt
+  if (limit == null || full.length <= limit) return full
 
-  if (full.length <= MAX_MESSAGE_LENGTH) return full
-
-  if (response.length > MAX_MESSAGE_LENGTH - 4) {
-    return response.substring(0, MAX_MESSAGE_LENGTH - 3) + '...'
+  if (response.length > limit - 4) {
+    return response.substring(0, limit - 3) + '...'
   }
   return response
 }

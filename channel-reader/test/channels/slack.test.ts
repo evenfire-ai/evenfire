@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { format } from 'node:util'
 // ── Import under test ─────────────────────────────────────────────────────────
 
 import { SlackAdapter } from '../../src/channels/slack.js'
@@ -128,6 +129,32 @@ describe('SlackAdapter — connect()', () => {
     // After a failed auth.test(), client is nullified → fetchMessages returns []
     const messages = await adapter.fetchMessages('general', new Set(['user1']))
     expect(messages).toEqual([])
+  })
+
+  it('logs a connect failure without the request headers', async () => {
+    const marker = 'xoxb-probe-marker-not-a-secret'
+    const transportError = Object.assign(new Error('connect ECONNREFUSED'), {
+      code: 'slack_webapi_request_error',
+      original: { request: { _header: `Authorization: Bearer ${marker}\r\n` } },
+    })
+    const { WebClient } = await import('@slack/web-api')
+    vi.mocked(WebClient).mockImplementationOnce(function () {
+      const instance = {
+        auth: { test: vi.fn().mockRejectedValue(transportError) },
+        conversations: { history: vi.fn(), list: vi.fn() },
+        users: { info: vi.fn() },
+        chat: { postMessage: vi.fn() },
+      }
+      slackState.instances.push(instance as never)
+      return instance as never
+    })
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const adapter = new SlackAdapter()
+    await adapter.connect({ slackBotToken: marker })
+    const printed = errorSpy.mock.calls.map(call => format(...call)).join('\n')
+    expect(printed).toContain('slack_webapi_request_error')
+    expect(printed).not.toContain(marker)
+    expect(printed).not.toMatch(/authorization:\s*bearer/i)
   })
 })
 
@@ -859,6 +886,28 @@ describe('SlackAdapter — sendMessage()', () => {
     })
   })
 
+  it('logs a Slack API error with the run id and rejects the edit', async () => {
+    const adapter = new SlackAdapter()
+    await adapter.connect({ slackBotToken: TEST_TOKEN })
+    const client = slackState.instances[0]!
+    client.chat.update.mockRejectedValueOnce(
+      Object.assign(new Error('msg_too_long'), { data: { error: 'msg_too_long' } })
+    )
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    try {
+      await expect(
+        adapter.editMessage('C12345', '1234567890.000001', 'x'.repeat(5000), { runId: 'task-long' })
+      ).rejects.toThrow('msg_too_long')
+      const logged = consoleError.mock.calls.map(call => String(call[0])).join('\n')
+      expect(logged).toContain('task-long')
+      expect(logged).toContain('msg_too_long')
+      expect(logged).toContain('chat.update')
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
   it('uploads workflow result documents to Slack files', async () => {
     const adapter = new SlackAdapter()
     await adapter.connect({ slackBotToken: TEST_TOKEN })
@@ -970,6 +1019,265 @@ describe('SlackAdapter — sendMessage()', () => {
       })
     )
     expect(client.files.uploadV2).not.toHaveBeenCalled()
+  })
+
+  it('throws when a run reply cannot be posted and stays soft without a run id', async () => {
+    const disconnected = new SlackAdapter()
+    await expect(
+      disconnected.sendMessage('C12345', 'hello', undefined, undefined, { runId: 'task-1' })
+    ).rejects.toThrow('slack_not_connected')
+    await expect(disconnected.sendMessage('C12345', 'hello')).resolves.toBeUndefined()
+
+    const adapter = new SlackAdapter()
+    await adapter.connect({ slackBotToken: TEST_TOKEN })
+    const client = slackState.instances[0]!
+    client.chat.postMessage.mockResolvedValueOnce({ ok: true })
+    await expect(
+      adapter.sendMessage('C12345', 'hello', undefined, undefined, { runId: 'task-1' })
+    ).rejects.toThrow('slack_post_failed')
+    client.chat.postMessage.mockResolvedValueOnce({ ok: true })
+    await expect(adapter.sendMessage('C12345', 'hello')).resolves.toBeUndefined()
+
+    await expect(
+      adapter.sendMessage('C12345', '   ', undefined, undefined, { runId: 'task-1' })
+    ).resolves.toBeUndefined()
+
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      await expect(
+        adapter.sendMessage('general', 'hello', undefined, undefined, { runId: 'task-1' })
+      ).rejects.toThrow('slack_channel_unresolved')
+      await expect(adapter.sendMessage('general', 'hello')).resolves.toBeUndefined()
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
+  it('retries a ratelimited Slack call and returns when the next attempt succeeds', async () => {
+    const adapter = new SlackAdapter()
+    await adapter.connect({ slackBotToken: TEST_TOKEN })
+    const client = slackState.instances[0]!
+    client.chat.update
+      .mockRejectedValueOnce(
+        Object.assign(new Error('ratelimited'), {
+          data: { error: 'ratelimited' },
+          retryAfter: 0,
+        })
+      )
+      .mockResolvedValueOnce({ ok: true, ts: '1234567890.000001' })
+
+    await expect(
+      adapter.editMessage('C12345', '1234567890.000001', 'hello', { runId: 'task-1' })
+    ).resolves.toBeUndefined()
+    expect(client.chat.update).toHaveBeenCalledTimes(2)
+  })
+
+  it('uploads a text snippet through files.uploadV2 and does not post it', async () => {
+    const adapter = new SlackAdapter()
+    await adapter.connect({ slackBotToken: TEST_TOKEN })
+    const client = slackState.instances[0]!
+    const fence = '```\n' + 'x'.repeat(5_000) + '\n```'
+
+    await adapter.uploadTextSnippet('C12345', fence, 'reply-part-1.txt', '170.0001', 'task-long')
+
+    expect(client.files.uploadV2).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel_id: 'C12345',
+        thread_ts: '170.0001',
+        file_uploads: [
+          expect.objectContaining({
+            filename: 'reply-part-1.txt',
+            title: 'reply-part-1.txt',
+            file: Buffer.from(fence, 'utf8'),
+          }),
+        ],
+      })
+    )
+    expect(client.chat.postMessage).not.toHaveBeenCalled()
+  })
+})
+
+describe('SlackAdapter — inlineSharedFiles()', () => {
+  const originalFetch = globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('inlines three Slack files, skips the fourth, and notes the count', async () => {
+    const adapter = new SlackAdapter()
+    await adapter.connect({ slackBotToken: TEST_TOKEN })
+    const fetched: string[] = []
+    const timeout = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockImplementation(() => new AbortController().signal)
+    globalThis.fetch = vi.fn(async (input: string | URL | Request) => {
+      fetched.push(String(input))
+      const index = fetched.length
+      return new Response(`body-${index}`, { status: 200 })
+    }) as typeof fetch
+
+    const files = [1, 2, 3, 4].map(index => ({
+      id: `F${index}`,
+      name: `note-${index}.txt`,
+      mimetype: 'text/plain',
+      size: 20,
+      urlPrivateDownload: `https://files.slack.com/files-pri/T/note-${index}.txt`,
+    }))
+    try {
+      const appendix = await adapter.inlineSharedFiles(files)
+
+      expect(fetched).toEqual([
+        'https://files.slack.com/files-pri/T/note-1.txt',
+        'https://files.slack.com/files-pri/T/note-2.txt',
+        'https://files.slack.com/files-pri/T/note-3.txt',
+      ])
+      expect(appendix).toContain('body-1')
+      expect(appendix).toContain('body-2')
+      expect(appendix).toContain('body-3')
+      expect(appendix).not.toContain('body-4')
+      expect(appendix).not.toContain('note-4.txt')
+      expect(appendix).toContain('[1 more attached file was not inlined.]')
+    } finally {
+      timeout.mockRestore()
+    }
+  })
+
+  it('does not follow a redirect or inline an HTML body', async () => {
+    const adapter = new SlackAdapter()
+    await adapter.connect({ slackBotToken: TEST_TOKEN })
+    const timeout = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockImplementation(() => new AbortController().signal)
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const href = String(input)
+      expect(init?.redirect).toBe('manual')
+      expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${TEST_TOKEN}`)
+      if (href.endsWith('/note.txt')) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'https://files.slack.com/files-pri/T/note-2.txt' },
+        })
+      }
+      if (href.endsWith('/offsite.txt')) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: 'https://evil.example/secret.txt' },
+        })
+      }
+      return new Response('patch body', { status: 200, headers: { 'content-type': 'text/plain' } })
+    })
+    globalThis.fetch = fetchMock as typeof fetch
+    try {
+      const followed = await adapter.inlineSharedFiles([
+        {
+          id: 'Fredirect',
+          name: 'note.txt',
+          mimetype: 'text/plain',
+          size: 20,
+          urlPrivateDownload: 'https://files.slack.com/files-pri/T/note.txt',
+        },
+      ])
+      expect(followed).toContain('patch body')
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+
+      const redirected = await adapter.inlineSharedFiles([
+        {
+          id: 'Foffsite',
+          name: 'offsite.txt',
+          mimetype: 'text/plain',
+          size: 20,
+          urlPrivateDownload: 'https://files.slack.com/files-pri/T/offsite.txt',
+        },
+      ])
+      expect(redirected).toContain('could not be read')
+      expect(fetchMock.mock.calls.some(call => String(call[0]).includes('evil.example'))).toBe(
+        false
+      )
+
+      fetchMock.mockResolvedValue(
+        new Response('<html>sign in</html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html' },
+        })
+      )
+      const html = await adapter.inlineSharedFiles([
+        {
+          id: 'Fhtml',
+          name: 'note.txt',
+          mimetype: 'text/plain',
+          size: 20,
+          urlPrivateDownload: 'https://files.slack.com/files-pri/T/page.txt',
+        },
+      ])
+      expect(html).toContain('could not be read')
+      expect(html).not.toContain('sign in')
+    } finally {
+      timeout.mockRestore()
+    }
+  })
+
+  it('wraps a file body in a fence longer than its backtick run', async () => {
+    const adapter = new SlackAdapter()
+    await adapter.connect({ slackBotToken: TEST_TOKEN })
+    const timeout = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockImplementation(() => new AbortController().signal)
+    globalThis.fetch = vi.fn(
+      async () => new Response('keep\n```\nsecret', { status: 200 })
+    ) as typeof fetch
+    try {
+      const appendix = await adapter.inlineSharedFiles([
+        {
+          id: 'Ffence',
+          name: 'note.txt',
+          mimetype: 'text/plain',
+          size: 20,
+          urlPrivateDownload: 'https://files.slack.com/files-pri/T/note.txt',
+        },
+      ])
+      expect(appendix).toContain('````')
+      expect(appendix).toContain('secret')
+    } finally {
+      timeout.mockRestore()
+    }
+  })
+
+  it('does not download a URL that is not https://files.slack.com', async () => {
+    const adapter = new SlackAdapter()
+    await adapter.connect({ slackBotToken: TEST_TOKEN })
+    const fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as typeof fetch
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    try {
+      const appendix = await adapter.inlineSharedFiles([
+        {
+          id: 'Fevil',
+          name: 'secret.txt',
+          mimetype: 'text/plain',
+          size: 20,
+          urlPrivateDownload: 'https://evil.example/secret.txt',
+        },
+        {
+          id: 'Flookalike',
+          name: 'lookalike.txt',
+          mimetype: 'text/plain',
+          size: 20,
+          urlPrivateDownload: 'https://files.slack.com.evil.example/secret.txt',
+        },
+      ])
+
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(appendix).toContain('[Attached secret.txt, but the file could not be read.]')
+      expect(appendix).toContain('[Attached lookalike.txt, but the file could not be read.]')
+      const logged = consoleError.mock.calls.map(call => String(call[0])).join('\n')
+      expect(logged).not.toContain('evil.example')
+      expect(logged).not.toContain('secret')
+      expect(logged).toContain('slack_file_url_rejected')
+    } finally {
+      consoleError.mockRestore()
+    }
   })
 })
 

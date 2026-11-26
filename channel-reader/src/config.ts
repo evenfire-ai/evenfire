@@ -1,6 +1,7 @@
 /**
  * Configuration settings loaded from environment variables.
  */
+import { logCaughtError } from './safeLog'
 import { CommunicationChannelSpec } from './types'
 
 export interface Config {
@@ -53,6 +54,16 @@ export interface Config {
   // provider signature verification. Empty token disables the listener.
   channelReaderHandoffPort: number
   channelReaderHandoffToken: string
+
+  /**
+   * Silence cap for one Slack, Telegram, or Teams progress run. It resets
+   * while mcp-host still reports the task pending or waiting for approval,
+   * and while progress events arrive. It does not cover email. When it fires,
+   * the reader edits the acknowledgement to an error and asks mcp-host to
+   * cancel. Cancel does not free the conversation if that executor never
+   * settles. Override with CLERUM_CHANNEL_RUN_TIMEOUT_MS. Default is 5 minutes.
+   */
+  channelRunTimeoutMs: number
 }
 
 function getEnv(key: string, defaultValue?: string): string | undefined {
@@ -85,6 +96,19 @@ function getEnvInt(key: string, defaultValue: number): number {
   return isNaN(parsed) ? defaultValue : parsed
 }
 
+function requireBoundedInt(key: string, defaultValue: number): number {
+  const raw = process.env[key]
+  if (raw === undefined) return defaultValue
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`${key} must be a positive integer up to 2147483647`)
+  }
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) {
+    throw new Error(`${key} must be a positive integer up to 2147483647`)
+  }
+  return value
+}
+
 /**
  * Parse CLERUM_CHANNEL JSON for dev mode.
  */
@@ -103,10 +127,7 @@ function parseDevChannelConfig(): CommunicationChannelSpec | undefined {
     console.log('[Config]   slack:', parsed.slack ? 'configured' : 'not set')
     return parsed
   } catch (error) {
-    console.error(
-      '[Config] Failed to parse CLERUM_CHANNEL:',
-      error instanceof Error ? error.message : error
-    )
+    logCaughtError('error', 'channel_config_parse_failed', error)
     console.error('[Config] Raw value (first 50 chars):', channelJson.substring(0, 50))
     return undefined
   }
@@ -169,4 +190,5 @@ export const config: Config = {
   attachmentMaxBytes: getEnvInt('CLERUM_ATTACHMENT_MAX_BYTES', 52_428_800),
   channelReaderHandoffPort: getEnvInt('CLERUM_CHANNEL_READER_HANDOFF_PORT', 8099),
   channelReaderHandoffToken: getEnv('CLERUM_CHANNEL_READER_HANDOFF_TOKEN', '')!,
+  channelRunTimeoutMs: requireBoundedInt('CLERUM_CHANNEL_RUN_TIMEOUT_MS', 5 * 60 * 1000),
 }

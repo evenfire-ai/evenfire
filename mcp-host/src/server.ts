@@ -682,7 +682,7 @@ export class RPCServer {
     this.app.post(
       '/v1/runtime/tasks/:taskId/cancel',
       runtimeEdgeGuard(
-        ['rpc-proxy'],
+        ['rpc-proxy', 'channel-reader'],
         ['task.manage'],
         HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/tasks/:taskId/cancel']
       ),
@@ -709,9 +709,9 @@ export class RPCServer {
           res.status(403).json({ error: 'Runtime edge action mismatch' })
           return
         }
-        const requesterUserId = caller?.caller === 'rpc-proxy' ? caller.userId : undefined
+        const requesterUserId = caller?.caller === 'rpc-proxy' ? caller.userId : caller?.sender
 
-        const result = await this.cancelHandler(taskId, requesterUserId)
+        const result = await this.cancelHandler(taskId, requesterUserId, caller)
 
         if (result === 'cancelled' || result === 'already_terminal') {
           res.status(204).end()

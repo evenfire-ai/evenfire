@@ -1,3 +1,5 @@
+import { logCaughtError } from '../safeLog'
+
 export type TelegramEntity = {
   type: string
   offset: number
@@ -142,10 +144,7 @@ export async function handleTelegramVerificationCommand(params: {
     )
     return result.ok
   } catch (err) {
-    console.warn(
-      '[Telegram] Verification challenge confirmation failed:',
-      err instanceof Error ? err.message : err
-    )
+    logCaughtError('warn', 'telegram_verification_challenge_failed', err)
     await params.sendReply('Verification failed. Check that the code is active and try again.')
     return false
   }

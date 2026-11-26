@@ -1241,7 +1241,7 @@ describe('async progress flow — SSE-driven approval', () => {
       '19:channel-1@thread.tacv2;messageid=root-post-1',
       'teams-status-1',
       'Approved. Processing...',
-      undefined
+      { runId: 'task-teams-button-1' }
     )
     streamCalls[0].fireTerminal({ taskId: 'task-teams-button-1', status: 'cancelled' })
   })

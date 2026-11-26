@@ -1,3 +1,4 @@
+import { logCaughtError } from '../safeLog'
 import type { ProviderTargetIdentity } from '../types'
 
 export type SlackVerificationClient = {
@@ -73,10 +74,7 @@ export async function handleSlackVerificationCommand(params: {
     )
     return result.ok
   } catch (err) {
-    console.warn(
-      '[Slack] Verification link-session confirmation failed:',
-      err instanceof Error ? err.message : err
-    )
+    logCaughtError('warn', 'slack_link_session_failed', err)
     await params.sendReply(
       'Slack verification failed. Check that the code is active and try again.'
     )

@@ -7,6 +7,7 @@ import type {
   NotificationDelivery,
   NotificationDeliveryMedium,
 } from './notificationDeliveryClient'
+import { logCaughtError } from './safeLog'
 import type { TraceContextV1 } from './traceContext'
 import { Message, ProviderIdentity } from './types'
 import type { Attachment, ProviderTargetIdentity } from './types'
@@ -237,7 +238,7 @@ export class RPCClient {
 
       return result
     } catch (error) {
-      console.error(`[RPC] Failed to send message:`, error)
+      logCaughtError('error', 'rpc_send_failed', error)
       return {
         success: false,
         error: {
@@ -247,6 +248,31 @@ export class RPCClient {
           provider: 'unknown',
         },
       }
+    }
+  }
+
+  async cancelTask(taskId: string, message: Message): Promise<void> {
+    try {
+      const response = await fetch(
+        `${this.baseUrl}/v1/runtime/tasks/${encodeURIComponent(taskId)}/cancel`,
+        {
+          method: 'POST',
+          headers: this.runtimeHeaders(message),
+          signal: AbortSignal.timeout(15_000),
+        }
+      )
+      if (response.status === 204 || response.status === 404) return
+      throw new Error(`HTTP ${response.status}`)
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          level: 'error',
+          msg: 'task_cancel_failed',
+          taskId,
+          code: error instanceof Error ? error.message : 'unknown',
+        })
+      )
+      throw error
     }
   }
 
@@ -271,10 +297,7 @@ export class RPCClient {
         ? { authorized: false, reason: body.reason }
         : { authorized: false }
     } catch (error) {
-      console.warn(
-        '[RPC] Provider message authorization failed closed:',
-        error instanceof Error ? error.message : error
-      )
+      logCaughtError('warn', 'provider_authorization_failed', error)
       return { authorized: false }
     }
   }
@@ -315,7 +338,7 @@ export class RPCClient {
       })
       return (await response.json()) as { success: boolean; error?: string }
     } catch (error) {
-      console.error(`[RPC] Failed to send approval:`, error)
+      logCaughtError('error', 'rpc_approval_failed', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
@@ -350,7 +373,7 @@ export class RPCClient {
       })
       return (await response.json()) as { success: boolean; error?: string }
     } catch (error) {
-      console.error(`[RPC] Failed to send denial:`, error)
+      logCaughtError('error', 'rpc_denial_failed', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
@@ -384,7 +407,7 @@ export class RPCClient {
       }
       return body
     } catch (error) {
-      console.error(`[RPC] Failed to send workflow approval decision:`, error)
+      logCaughtError('error', 'rpc_workflow_decision_failed', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Unknown error',
@@ -487,7 +510,7 @@ export class RPCClient {
       }
       return body
     } catch (error) {
-      console.error('[RPC] Failed to download workflow result:', error)
+      logCaughtError('error', 'rpc_workflow_download_failed', error)
       return {
         success: false,
         error: {

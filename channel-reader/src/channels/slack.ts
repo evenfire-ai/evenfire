@@ -4,6 +4,7 @@
 import { WebClient } from '@slack/web-api'
 import { config } from '../config'
 import { RPCClient } from '../rpcClient'
+import { logCaughtError } from '../safeLog'
 import {
   AdapterCredentials,
   Attachment,
@@ -14,6 +15,7 @@ import {
   SendMessageOptions,
 } from '../types'
 import { isAllowedSender, isInlineApprovalCommand, isWorkflowApprovalDecisionCommand } from './base'
+import { slackErrorCode } from './slackDelivery'
 import {
   type SlackVerificationClient,
   handleSlackVerificationCommand,
@@ -21,6 +23,44 @@ import {
   parseSlackVerifyCommand,
   redactSlackVerificationText,
 } from './slackVerification'
+
+export interface SlackSharedFileRef {
+  id: string
+  name: string
+  mimetype?: string
+  size?: number
+  urlPrivateDownload?: string
+}
+
+const SLACK_FILE_HOST = 'files.slack.com'
+const SLACK_INLINE_FILE_MAX_BYTES = 200_000
+const SLACK_INLINE_EXTENSIONS = new Set([
+  'patch',
+  'diff',
+  'txt',
+  'md',
+  'json',
+  'ts',
+  'tsx',
+  'js',
+  'jsx',
+  'py',
+  'go',
+  'rb',
+  'java',
+  'rs',
+  'yml',
+  'yaml',
+  'xml',
+  'html',
+  'css',
+  'sh',
+  'sql',
+  'toml',
+  'ini',
+  'cfg',
+  'log',
+])
 
 const SLACK_CONVERSATION_LIST_MAX_PAGES = 50
 const SLACK_CHANNEL_NAME_CACHE_MAX = 1000
@@ -152,6 +192,7 @@ export class SlackAdapter implements ChannelAdapter {
   private channelIdByNameCache: Map<string, string> = new Map()
   private verifiedSendersByChannel: Map<string, Set<string>> = new Map()
   private botUserId: string | null = null
+  private botToken: string | null = null
   private teamId: string | null = null
   private defaultProviderTarget: ProviderTargetIdentity | null = null
   private warnedReplyOnlyNoUserId = false
@@ -169,6 +210,7 @@ export class SlackAdapter implements ChannelAdapter {
   private resetConnectionState(): void {
     this.client = null
     this.botUserId = null
+    this.botToken = null
     this.teamId = null
     this.defaultProviderTarget = null
     this.warnedReplyOnlyNoUserId = false
@@ -210,6 +252,7 @@ export class SlackAdapter implements ChannelAdapter {
     }
 
     this.defaultProviderTarget = credentials?.providerTarget ?? null
+    this.botToken = token
     this.client = new WebClient(token)
 
     try {
@@ -218,9 +261,10 @@ export class SlackAdapter implements ChannelAdapter {
       this.teamId = typeof response.team_id === 'string' ? response.team_id : null
       console.log(`[Slack] Connected as @${response.user}`)
     } catch (error) {
-      console.error('[Slack] Failed to connect:', error)
+      logCaughtError('error', 'slack_connect_failed', error)
       this.client = null
       this.botUserId = null
+      this.botToken = null
       this.teamId = null
     }
   }
@@ -272,7 +316,7 @@ export class SlackAdapter implements ChannelAdapter {
 
         for (const msg of response.messages || []) {
           // Skip bot messages and non-user messages
-          if (msg.subtype || !msg.user) {
+          if ((msg.subtype && msg.subtype !== 'file_share') || !msg.user) {
             continue
           }
 
@@ -328,10 +372,7 @@ export class SlackAdapter implements ChannelAdapter {
                 }
               })
               .catch(err => {
-                console.error(
-                  '[Slack] Verification command handler failed:',
-                  err instanceof Error ? err.message : err
-                )
+                logCaughtError('error', 'slack_verification_failed', err)
               })
             console.log(
               `[Slack] Verification command received - channel: ${resolvedChannelId}, sender: ${userId}, text: "${logText.substring(0, 50)}..."`
@@ -416,7 +457,7 @@ export class SlackAdapter implements ChannelAdapter {
         }
       }
     } catch (error) {
-      console.error('[Slack] API error:', error)
+      logCaughtError('error', 'slack_history_failed', error)
     }
 
     return messages
@@ -600,6 +641,7 @@ export class SlackAdapter implements ChannelAdapter {
   ): Promise<string | undefined> {
     if (!this.client) {
       console.warn('[Slack] Not connected, cannot send message')
+      if (options?.runId) throw new Error('slack_not_connected')
       return undefined
     }
 
@@ -607,6 +649,7 @@ export class SlackAdapter implements ChannelAdapter {
       const resolvedChannelId = await this.resolveChannelId(channelId)
       if (!resolvedChannelId) {
         console.error(`[Slack] Could not resolve channel ${channelId}`)
+        if (options?.runId) throw new Error('slack_channel_unresolved')
         return undefined
       }
 
@@ -650,13 +693,20 @@ export class SlackAdapter implements ChannelAdapter {
         documentAttachments.length === 0 ||
         unsupportedAttachmentCount > 0
       ) {
-        const result = await this.client.chat.postMessage({
-          channel: resolvedChannelId,
-          text: hasText ? contentWithUnsupportedAttachmentNote : fallbackText,
-          thread_ts: replyToMessageId,
-          ...(hasBlocks ? { blocks: slackBlocks as never } : {}),
-        })
+        const result = await this.callSlack(
+          'chat.postMessage',
+          options?.runId,
+          replyToMessageId,
+          () =>
+            this.client!.chat.postMessage({
+              channel: resolvedChannelId,
+              text: hasText ? contentWithUnsupportedAttachmentNote : fallbackText,
+              thread_ts: replyToMessageId,
+              ...(hasBlocks ? { blocks: slackBlocks as never } : {}),
+            })
+        )
         messageTs = result.ts
+        if (options?.runId && !messageTs) throw new Error('slack_post_failed')
       }
 
       if (documentAttachments.length > 0) {
@@ -678,7 +728,9 @@ export class SlackAdapter implements ChannelAdapter {
               title: filename,
             })
           } catch (err) {
-            console.warn(`[Slack] Failed to decode document attachment ${attachment.id}:`, err)
+            logCaughtError('warn', 'slack_attachment_decode_failed', err, {
+              attachmentId: attachment.id,
+            })
           }
         }
 
@@ -694,32 +746,116 @@ export class SlackAdapter implements ChannelAdapter {
             )
             return messageTs
           } catch (err) {
-            console.warn('[Slack] Failed to deliver document attachments:', err)
+            logCaughtError('warn', 'slack_attachment_upload_failed', err)
           }
         }
 
         if (messageTs) {
-          await this.client.chat.postMessage({
-            channel: resolvedChannelId,
-            text: 'Generated document attachments could not be delivered.',
-            thread_ts: replyToMessageId,
-          })
+          await this.callSlack('chat.postMessage', options?.runId, replyToMessageId, () =>
+            this.client!.chat.postMessage({
+              channel: resolvedChannelId,
+              text: 'Generated document attachments could not be delivered.',
+              thread_ts: replyToMessageId,
+            })
+          )
           return messageTs
         }
-        const fallback = await this.client.chat.postMessage({
-          channel: resolvedChannelId,
-          text: 'Generated document attachments could not be delivered.',
-          thread_ts: replyToMessageId,
-        })
+        const fallback = await this.callSlack(
+          'chat.postMessage',
+          options?.runId,
+          replyToMessageId,
+          () =>
+            this.client!.chat.postMessage({
+              channel: resolvedChannelId,
+              text: 'Generated document attachments could not be delivered.',
+              thread_ts: replyToMessageId,
+            })
+        )
+        if (options?.runId && !fallback.ts) throw new Error('slack_post_failed')
         return fallback.ts
       }
 
       console.log(`[Slack] Sent reply to channel ${channelId}`)
       return messageTs
     } catch (err) {
-      console.error('[Slack] Failed to send message:', err)
       throw err
     }
+  }
+
+  /**
+   * Upload a reply piece that must stay intact, such as a fenced code block
+   * longer than `chat.update` allows.
+   */
+  async uploadTextSnippet(
+    channelId: string,
+    content: string,
+    filename: string,
+    threadTs?: string,
+    runId?: string
+  ): Promise<void> {
+    if (!this.client) throw new Error('slack_not_connected')
+    const resolvedChannelId = await this.resolveChannelId(channelId)
+    if (!resolvedChannelId) throw new Error('slack_channel_unresolved')
+    await this.callSlack('files.upload', runId, threadTs, () =>
+      this.client!.files.uploadV2({
+        channel_id: resolvedChannelId,
+        ...(threadTs ? { thread_ts: threadTs } : {}),
+        file_uploads: [
+          {
+            file: Buffer.from(content, 'utf8'),
+            filename,
+            title: filename,
+          },
+        ],
+      })
+    )
+  }
+
+  /**
+   * Read small text files a user attached in Slack and return a prompt appendix.
+   * Download failures stay in the appendix so the message is still answered.
+   */
+  async inlineSharedFiles(files: SlackSharedFileRef[]): Promise<string> {
+    const notes: string[] = []
+    const inlineLimit = 3
+    for (const file of files.slice(0, inlineLimit)) {
+      const name = file.name.trim() || file.id
+      if (!this.botToken || !file.urlPrivateDownload) {
+        notes.push(`[Attached ${name}, but the file contents were not available.]`)
+        continue
+      }
+      if (!isInlineableSlackFile(file)) {
+        notes.push(`[Attached ${name}, which is not inlined.]`)
+        continue
+      }
+      if ((file.size ?? 0) > SLACK_INLINE_FILE_MAX_BYTES) {
+        notes.push(`[Attached ${name}, which is too large to inline.]`)
+        continue
+      }
+      try {
+        const body = await downloadSlackFile(file.urlPrivateDownload, this.botToken, file.mimetype)
+        notes.push(fencedAttachment(name, body))
+      } catch (err) {
+        console.error(
+          JSON.stringify({
+            level: 'error',
+            msg: 'slack_file_download_failed',
+            fileId: file.id,
+            code: err instanceof Error ? err.message : 'unknown',
+          })
+        )
+        notes.push(`[Attached ${name}, but the file could not be read.]`)
+      }
+    }
+    const omitted = files.length - inlineLimit
+    if (omitted > 0) {
+      notes.push(
+        omitted === 1
+          ? '[1 more attached file was not inlined.]'
+          : `[${omitted} more attached files were not inlined.]`
+      )
+    }
+    return notes.join('\n\n')
   }
 
   async editMessage(
@@ -728,29 +864,51 @@ export class SlackAdapter implements ChannelAdapter {
     content: string,
     options?: SendMessageOptions
   ): Promise<void> {
-    if (!this.client) {
-      console.warn('[Slack] Not connected, cannot edit message')
-      return
-    }
+    if (!this.client) throw new Error('slack_not_connected')
 
-    try {
-      const resolvedChannelId = await this.resolveChannelId(channelId)
-      if (!resolvedChannelId) {
-        console.error(`[Slack] Could not resolve channel ${channelId}`)
-        return
-      }
+    const resolvedChannelId = await this.resolveChannelId(channelId)
+    if (!resolvedChannelId) throw new Error('slack_channel_unresolved')
 
-      await this.client.chat.update({
+    await this.callSlack('chat.update', options?.runId, messageId, () =>
+      this.client!.chat.update({
         channel: resolvedChannelId,
         ts: messageId,
         text: content,
         blocks: (options?.slackBlocks ?? []) as never,
       })
-    } catch (err) {
-      console.error(
-        `[Slack] Failed to edit message ${messageId}:`,
-        err instanceof Error ? err.message : String(err)
-      )
+    )
+  }
+
+  private async callSlack<T>(
+    op: 'chat.update' | 'chat.postMessage' | 'files.upload',
+    runId: string | undefined,
+    messageTs: string | undefined,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    let attempt = 0
+    for (;;) {
+      try {
+        return await fn()
+      } catch (err) {
+        const code = slackErrorCode(err)
+        const delayMs = rateLimitDelayMs(err)
+        if ((code === 'ratelimited' || delayMs !== null) && attempt < 3) {
+          attempt += 1
+          await new Promise(resolve => setTimeout(resolve, delayMs ?? slackRetryAfterMs(err)))
+          continue
+        }
+        console.error(
+          JSON.stringify({
+            level: 'error',
+            msg: 'slack_api_error',
+            taskId: runId ?? null,
+            op,
+            messageTs: messageTs ?? null,
+            code,
+          })
+        )
+        throw err
+      }
     }
   }
 
@@ -770,4 +928,118 @@ export class SlackAdapter implements ChannelAdapter {
       )
     }
   }
+}
+
+function rateLimitDelayMs(err: unknown): number | null {
+  const candidates = [err]
+  if (err && typeof err === 'object' && 'originalError' in err) {
+    candidates.push((err as { originalError?: unknown }).originalError)
+  }
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue
+    const retryAfter = (candidate as { retryAfter?: unknown }).retryAfter
+    if (typeof retryAfter === 'number' && Number.isFinite(retryAfter)) {
+      return Math.min(5_000, Math.max(0, retryAfter * 1_000))
+    }
+    if (slackErrorCode(candidate) === 'ratelimited') return slackRetryAfterMs(candidate)
+  }
+  return null
+}
+
+function fencedAttachment(name: string, body: string): string {
+  const safeName = name.replace(/`/g, "'")
+  let longestRun = 0
+  let run = 0
+  for (const char of body) {
+    if (char === '`') {
+      run += 1
+      if (run > longestRun) longestRun = run
+    } else {
+      run = 0
+    }
+  }
+  const fence = '`'.repeat(Math.max(3, longestRun + 1))
+  return `Attached file \`${safeName}\`:\n\n${fence}\n${body}\n${fence}`
+}
+
+function slackRetryAfterMs(err: unknown): number {
+  if (
+    err &&
+    typeof err === 'object' &&
+    typeof (err as { retryAfter?: unknown }).retryAfter === 'number'
+  ) {
+    return Math.min(5_000, Math.max(0, (err as { retryAfter: number }).retryAfter) * 1_000)
+  }
+  return 1_000
+}
+
+function isInlineableSlackFile(file: SlackSharedFileRef): boolean {
+  const mime = (file.mimetype || '').split(';', 1)[0]?.trim().toLowerCase() || ''
+  if (mime.startsWith('text/')) return true
+  const extension = file.name.includes('.')
+    ? file.name.slice(file.name.lastIndexOf('.') + 1).toLowerCase()
+    : ''
+  return SLACK_INLINE_EXTENSIONS.has(extension)
+}
+
+function isSlackFileDownloadUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && url.hostname === SLACK_FILE_HOST
+  } catch {
+    return false
+  }
+}
+
+async function downloadSlackFile(
+  url: string,
+  token: string,
+  declaredMime?: string,
+  redirects = 0
+): Promise<string> {
+  if (redirects === 0 && !isSlackFileDownloadUrl(url)) throw new Error('slack_file_url_rejected')
+  const response = await fetch(url, {
+    redirect: 'manual',
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(15_000),
+  })
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.get('location')
+    if (!location || redirects >= 1) throw new Error('slack_file_redirect')
+    const next = new URL(location, url)
+    if (next.protocol !== 'https:' || next.hostname !== SLACK_FILE_HOST) {
+      throw new Error('slack_file_redirect')
+    }
+    return downloadSlackFile(next.toString(), token, declaredMime, redirects + 1)
+  }
+  if (!response.ok) throw new Error(`slack_file_http_${response.status}`)
+  const contentType =
+    response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? ''
+  const declared = (declaredMime ?? '').split(';')[0]?.trim().toLowerCase() ?? ''
+  if (contentType === 'text/html' && declared !== 'text/html') throw new Error('slack_file_html')
+  const bytes = await readBodyUpTo(response, SLACK_INLINE_FILE_MAX_BYTES)
+  if (bytes.includes(0)) throw new Error('slack_file_binary')
+  return bytes.toString('utf8')
+}
+
+async function readBodyUpTo(response: Response, maxBytes: number): Promise<Buffer> {
+  const reader = response.body?.getReader()
+  if (!reader) {
+    const bytes = Buffer.from(await response.arrayBuffer())
+    if (bytes.length > maxBytes) throw new Error('slack_file_too_large')
+    return bytes
+  }
+  const chunks: Buffer[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > maxBytes) {
+      await reader.cancel()
+      throw new Error('slack_file_too_large')
+    }
+    chunks.push(Buffer.from(value))
+  }
+  return Buffer.concat(chunks)
 }

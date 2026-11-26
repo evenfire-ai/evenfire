@@ -161,6 +161,14 @@ export interface Message {
   threadId?: string
   providerIdentity?: ProviderIdentity
   rawData?: Record<string, unknown>
+  /** Present on a Slack handoff until the sender is authorized. Bytes are not downloaded before that. */
+  slackFiles?: Array<{
+    id: string
+    name: string
+    mimetype?: string
+    size?: number
+    urlPrivateDownload?: string
+  }>
 }
 
 export interface TelegramInlineKeyboardButton {
@@ -227,6 +235,8 @@ export interface SendMessageOptions {
   parseMode?: 'telegram-html'
   telegramInlineKeyboard?: TelegramInlineKeyboardButton[][]
   slackBlocks?: SlackBlock[]
+  /** Task id stamped on Slack API error logs. */
+  runId?: string
   teamsActions?: Array<{
     title: string
     value: string
