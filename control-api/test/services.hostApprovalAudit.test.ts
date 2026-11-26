@@ -3,6 +3,7 @@ import { Writable } from 'node:stream'
 import pino from 'pino'
 import { rootLogger } from '../src/observability/logger.js'
 import {
+  type HostApprovalChange,
   MAX_TOOL_KEYS,
   MAX_TOOL_NAME_LENGTH,
   MAX_VALUE_LENGTH,
@@ -386,6 +387,42 @@ describe('buildHostApprovalChange', () => {
         expect(parsed.fieldCount).toBe(11)
       }
     )
+
+    // L1254: FIELD_ENUMS is read with Object.hasOwn. A field whose key is an
+    // Object.prototype member is no enum field (serializeApprovalChangeSummary
+    // takes any change, though buildHostApprovalChange makes no such key).
+    const prototypeKeyChange = (others: number): HostApprovalChange => ({
+      fields: {
+        toString: { old: 'a'.repeat(3000), new: 'b'.repeat(3000) },
+        ...Object.fromEntries(
+          Array.from({ length: others }, (_, i) => [
+            `channels.c${String(i).padStart(3, '0')}.enabled`,
+            { old: true, new: false },
+          ])
+        ),
+      },
+      tools: [],
+      toolsTruncated: 0,
+      approvers: {},
+      blockRemoved: false,
+      inheritedBefore: false,
+    })
+
+    it('a field named like an Object.prototype member is shortened as a plain string (L1254)', () => {
+      const parsed = JSON.parse(serializeApprovalChangeSummary(prototypeKeyChange(0))) as Parsed
+      expect(parsed.truncated).toBeUndefined()
+      expect(parsed.valuesShortened).toBe(true)
+      expect(parsed.fields.toString).toEqual({ old: '(value too long)', new: '(value too long)' })
+    })
+
+    it('a field named like an Object.prototype member is not kept beside the counts (L1254)', () => {
+      const text = serializeApprovalChangeSummary(prototypeKeyChange(200))
+      expect(text.length).toBeLessThanOrEqual(4096)
+      const parsed = JSON.parse(text) as Partial<Parsed> & { fieldCount: number }
+      expect(parsed.truncated).toBe(true)
+      expect(parsed.fieldCount).toBe(201)
+      expect(parsed.fields).toBeUndefined()
+    })
 
     it('the not-a-policy marker survives the shortening', () => {
       const names = [...MCP_HOST_NATIVE_TOOL_NAMES].slice(0, 46)

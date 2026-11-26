@@ -344,7 +344,7 @@ export function serializeApprovalChangeSummary(
   const shorten = (field: string, value: Leaf): Leaf => {
     if (typeof value !== 'string') return value
     if (value === VALUE_TOO_LONG || value === NOT_A_POLICY_VALUE) return value
-    if (FIELD_ENUMS[field]?.includes(value)) return value
+    if (Object.hasOwn(FIELD_ENUMS, field) && FIELD_ENUMS[field].includes(value)) return value
     // Judged on the escaped form, the form the cap is checked on.
     if (encode(value).length <= TOO_LONG_ESCAPED_LENGTH) return value
     valuesShortened = true
@@ -370,7 +370,7 @@ export function serializeApprovalChangeSummary(
   // who (modeCeiling, defaultPolicy) keep their old and new beside the counts.
   const counts = Object.values(change.approvers)
   const keyFields = Object.fromEntries(
-    Object.entries(shortFields).filter(([key]) => key in FIELD_ENUMS)
+    Object.entries(shortFields).filter(([key]) => Object.hasOwn(FIELD_ENUMS, key))
   )
   const countsOnly = (tools: HostApprovalToolChange[], cut: number): Record<string, unknown> => ({
     truncated: true,
