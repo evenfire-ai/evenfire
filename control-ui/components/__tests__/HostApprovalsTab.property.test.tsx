@@ -225,6 +225,12 @@ type Press = {
   base: BaseCapture | null
   /** The labels of the loosening dialog confirmed for this call; null when none was. */
   labels: string[] | null
+  /**
+   * The policy the suite chose in the first-save dialog it answered for this
+   * save; absent when no such dialog showed. The oracle's first-save policy
+   * is this, never the section's own input.
+   */
+  firstSavePolicy?: FirstSavePolicy
 }
 
 type View = {
@@ -1364,7 +1370,7 @@ function ownedKeys(w: World, owner: Owner): Set<string> {
   for (const name of new Set([...Object.keys(base), ...Object.keys(draft)])) {
     if (base[name] !== draft[name]) keys.add(`approval.tools.${name}`)
   }
-  if (save.input.firstSavePolicy !== undefined) {
+  if (save.press.firstSavePolicy !== undefined) {
     keys.add('approval')
     keys.add('approval.defaultPolicy')
   }
@@ -1481,7 +1487,7 @@ function checkS3(w: World): void {
           `save #${save.id} reported saved on tools ${JSON.stringify(effectiveTools(stored))}, not its draft ${JSON.stringify(save.press.draft)}`
         )
       }
-      const policy = save.input.firstSavePolicy
+      const policy = save.press.firstSavePolicy
       if (
         policy !== undefined &&
         !sameJson(
@@ -1610,7 +1616,7 @@ function countLegacyRefusals(w: World): void {
 /** S7: every loosening item of a logged per-tool write was in a dialog confirmed for that save. */
 function checkS7(w: World): void {
   for (const save of w.saves) {
-    const firstSave = save.input.firstSavePolicy !== undefined
+    const firstSave = save.press.firstSavePolicy !== undefined
     const reads = ownedReads(w, { kind: 'save', id: save.id })
     for (const put of savePuts(w, save)) {
       const read = reads.find(
@@ -1947,6 +1953,8 @@ async function answerFirstSave(w: World, press: Press, policy: FirstSavePolicy):
   })
   const save = button(dialog, 'Save')
   if (!save) throw harnessError('the first-save dialog has no Save')
+  // The answer stays on the press: a loosening dialog that follows confirms it.
+  press.firstSavePolicy = policy
   w.press = press
   try {
     await interact(w, () => fireEvent.click(save))
@@ -3120,6 +3128,13 @@ const EXAMPLES: Example[] = [
       new Navigate('approval-settings'),
       new Step(10),
     ],
+  ],
+  // S3 on a first save: the admin chooses "Nobody (Desktop only)" in the
+  // first-save dialog; the save stores that policy with the draft.
+  [
+    scriptedScheduler(),
+    { crd: 'current', start: 'alpha', blocks: { alpha: null, beta: null }, random: 15 },
+    [new Step(4), new SaveDraft([[2, 'required']], 'cli_only', true, false)],
   ],
 ]
 
