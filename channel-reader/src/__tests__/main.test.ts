@@ -1640,7 +1640,7 @@ describe('ChannelReader progress-flow failure after an accepted POST', () => {
     expect(statusSend).toHaveBeenCalledOnce()
     await expect(statusSend.mock.results[0]?.value).rejects.toThrow('status message failed')
     expect(
-      errorLog.mock.calls.some(([line]) => String(line).includes('Progress flow failed'))
+      errorLog.mock.calls.some(([line]) => String(line).includes('progress_flow_failed'))
     ).toBe(true)
     expect(rpc.sendMessage).toHaveBeenCalledTimes(2)
     expect(vi.mocked(rpc.sendMessage).mock.calls[0]?.[1]).toMatchObject({ async: true })

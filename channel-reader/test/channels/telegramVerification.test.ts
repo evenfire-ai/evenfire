@@ -231,9 +231,9 @@ describe('TelegramAdapter verification command', () => {
       'Verification failed. Check that the code is active and try again.'
     )
     expect(warnSpy).toHaveBeenCalledWith(
-      '[Telegram] Verification challenge confirmation failed:',
-      'control-api unavailable'
+      expect.stringContaining('telegram_verification_challenge_failed')
     )
+    expect(String(warnSpy.mock.calls[0]?.[0])).toContain('control-api unavailable')
     warnSpy.mockRestore()
   })
 
