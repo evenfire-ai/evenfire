@@ -50,11 +50,11 @@ produces from the same conversation.
 ### Approve tool actions before execution
 
 Configure which tool actions require approval, then review a request before
-allowing it to proceed. In Desktop, Approve and Deny controls let you make that
-decision in the conversation.
+allowing it to proceed. In Desktop, review and approve or deny each request
+directly in the conversation.
 
 <p align="center">
-  <img src="docs/assets/readme/02-human-approvals.png" alt="Marketing agent awaiting approval for an Airtable tool action, with Approve and Deny controls" width="100%">
+  <img src="docs/assets/readme/02-human-approvals.png" alt="Marketing agent awaiting approval for an Airtable tool action, with Approve, Always approve and Deny controls" width="100%">
 </p>
 
 [Configure approval policies](docs/how-to/configure-approvals.md).
