@@ -1,5 +1,6 @@
 import { CronScheduler } from '../../agent/cronScheduler'
 import type { CronJob } from '../../agent/types'
+import { type CronJobRecord, validateCronRecord } from '../../db/cronJobs'
 import type { IncomingMessage } from '../../server'
 import {
   STATELESS_ALLOW_CRON_MANAGE_ENV,
@@ -21,6 +22,15 @@ export const STATELESS_CRON_NOTICE =
 export const STATELESS_CRON_FORBIDDEN_MESSAGE = `cron_manage create/enable is disabled on stateless hosts by default. Set ${STATELESS_ALLOW_CRON_MANAGE_ENV}=true only for hosts that require persistent schedules.`
 
 const STATELESS_FORBIDDEN_ACTIONS = new Set(['create', 'enable'])
+
+/**
+ * A store-backed scheduler method returns a Promise while its declared type
+ * stays synchronous. Promise.resolve waits for that worker acknowledgement.
+ * A memory scheduler returns the value itself.
+ */
+function acknowledged<T>(value: T): Promise<T> {
+  return Promise.resolve(value)
+}
 
 /**
  * Native tool for managing cron jobs.
@@ -94,11 +104,10 @@ export class CronManageTool implements Tool {
   }
 
   /**
-   * Ownership (F4): a caller owns a job when the job's `origin` matches the
-   * caller's (sender, channelType) — the same (person, channel) identity used
-   * for workspace isolation. A source-less (system/cron/internal) caller owns
-   * only origin-less jobs. Non-owned jobs are reported as "not found" so the
-   * tool is not an existence oracle for other users' jobs.
+   * Ownership for a valid row is sender, channelType, and channelId.
+   * A source-less caller owns only origin-less jobs. Invalid loaded rows are
+   * not owned; a source-less caller can still see them.
+   * Non-owned jobs are reported as "not found".
    */
   private owns(job: CronJob): boolean {
     const origin = job.origin
@@ -106,8 +115,14 @@ export class CronManageTool implements Tool {
     return (
       !!origin &&
       origin.sender === this.sourceMessage.sender &&
-      origin.channelType === this.sourceMessage.channelType
+      origin.channelType === this.sourceMessage.channelType &&
+      origin.channelId === this.sourceMessage.channelId
     )
+  }
+
+  private visible(job: CronJob): boolean {
+    if (this.scheduler.isInvalidJob(job.id)) return !this.sourceMessage
+    return this.owns(job)
   }
 
   async execute(params: Record<string, unknown>): Promise<ToolOutput> {
@@ -122,7 +137,7 @@ export class CronManageTool implements Tool {
       switch (action) {
         case 'list':
           return this.success(
-            this.scheduler.getAllJobs().filter(j => this.owns(j)),
+            this.scheduler.getAllJobs().filter(j => this.visible(j)),
             startTime
           )
 
@@ -130,19 +145,19 @@ export class CronManageTool implements Tool {
           return this.handleGet(params, startTime)
 
         case 'create':
-          return this.handleCreate(params, startTime)
+          return await this.handleCreate(params, startTime)
 
         case 'delete':
-          return this.handleDelete(params, startTime)
+          return await this.handleDelete(params, startTime)
 
         case 'enable':
-          return this.handleToggle(params, true, startTime)
+          return await this.handleToggle(params, true, startTime)
 
         case 'disable':
-          return this.handleToggle(params, false, startTime)
+          return await this.handleToggle(params, false, startTime)
 
         case 'trigger':
-          return this.handleTrigger(params, startTime)
+          return await this.handleTrigger(params, startTime)
 
         default:
           return this.error(`Unknown action: ${action}`, startTime)
@@ -157,12 +172,15 @@ export class CronManageTool implements Tool {
     if (!jobId) return this.error('Missing required parameter: jobId', startTime)
 
     const job = this.scheduler.getJob(jobId)
-    if (!job || !this.owns(job)) return this.error(`Job not found: ${jobId}`, startTime)
+    if (!job || !this.visible(job)) return this.error(`Job not found: ${jobId}`, startTime)
 
     return this.success(job, startTime)
   }
 
-  private handleCreate(params: Record<string, unknown>, startTime: number): ToolOutput {
+  private async handleCreate(
+    params: Record<string, unknown>,
+    startTime: number
+  ): Promise<ToolOutput> {
     const name = params.name as string
     const schedule = params.schedule as string
     const task = params.task as string
@@ -171,60 +189,129 @@ export class CronManageTool implements Tool {
     if (!schedule) return this.error('Missing required parameter: schedule', startTime)
     if (!task) return this.error('Missing required parameter: task', startTime)
 
-    const origin = this.sourceMessage
-      ? {
-          channelType: this.sourceMessage.channelType,
-          channelId: this.sourceMessage.channelId,
-          sender: this.sourceMessage.sender,
-        }
-      : undefined
-
-    const job = this.scheduler.createJob(name, schedule, task, undefined, origin)
+    const origin = this.originFromSource()
+    const providerIdentity = this.validatedProviderIdentity(origin)
+    const job = await acknowledged(
+      this.scheduler.createJob(name, schedule, task, undefined, origin, providerIdentity)
+    )
     if (!job) return this.error(`Invalid cron schedule: ${schedule}`, startTime)
 
     return this.success(job, startTime)
   }
 
-  private handleDelete(params: Record<string, unknown>, startTime: number): ToolOutput {
+  private async handleDelete(
+    params: Record<string, unknown>,
+    startTime: number
+  ): Promise<ToolOutput> {
     const jobId = params.jobId as string
     if (!jobId) return this.error('Missing required parameter: jobId', startTime)
 
     const job = this.scheduler.getJob(jobId)
-    if (!job || !this.owns(job)) return this.error(`Job not found: ${jobId}`, startTime)
+    if (!job || !this.visible(job)) return this.error(`Job not found: ${jobId}`, startTime)
 
-    this.scheduler.deleteJob(jobId)
+    await acknowledged(this.scheduler.deleteJob(jobId))
     return this.success({ deleted: true, jobId }, startTime)
   }
 
-  private handleToggle(
+  private async handleToggle(
     params: Record<string, unknown>,
     enable: boolean,
     startTime: number
-  ): ToolOutput {
+  ): Promise<ToolOutput> {
     const jobId = params.jobId as string
     if (!jobId) return this.error('Missing required parameter: jobId', startTime)
 
     const job = this.scheduler.getJob(jobId)
-    if (!job || !this.owns(job)) return this.error(`Job not found: ${jobId}`, startTime)
+    if (!job || !this.visible(job)) return this.error(`Job not found: ${jobId}`, startTime)
 
-    const ok = enable ? this.scheduler.enableJob(jobId) : this.scheduler.disableJob(jobId)
+    const ok = await acknowledged(
+      enable ? this.scheduler.enableJob(jobId) : this.scheduler.disableJob(jobId)
+    )
 
-    if (!ok) return this.error(`Job not found: ${jobId}`, startTime)
+    if (!ok) {
+      if (enable && this.scheduler.isInvalidJob(jobId)) {
+        return this.error(`Invalid cron job: ${jobId}`, startTime)
+      }
+      return this.error(`Job not found: ${jobId}`, startTime)
+    }
 
     return this.success({ jobId, enabled: enable }, startTime)
   }
 
-  private handleTrigger(params: Record<string, unknown>, startTime: number): ToolOutput {
+  private async handleTrigger(
+    params: Record<string, unknown>,
+    startTime: number
+  ): Promise<ToolOutput> {
     const jobId = params.jobId as string
     if (!jobId) return this.error('Missing required parameter: jobId', startTime)
 
     const job = this.scheduler.getJob(jobId)
-    if (!job || !this.owns(job)) return this.error(`Job not found: ${jobId}`, startTime)
+    if (!job || !this.visible(job)) return this.error(`Job not found: ${jobId}`, startTime)
+    if (!job.enabled) return this.error(`Job is disabled: ${jobId}`, startTime)
 
-    const task = this.scheduler.triggerJob(jobId)
-    if (!task) return this.error(`Job not found: ${jobId}`, startTime)
+    const task = await acknowledged(this.scheduler.triggerJob(jobId))
+    if (!task) return this.error(`Cannot trigger job: ${jobId}`, startTime)
 
     return this.success({ triggered: true, jobId, taskId: task.id }, startTime)
+  }
+
+  private originFromSource(): CronJob['origin'] | undefined {
+    const source = this.sourceMessage
+    if (!source) return undefined
+    const origin: NonNullable<CronJob['origin']> = {
+      channelType: source.channelType,
+      channelId: source.channelId,
+      sender: source.sender,
+    }
+    if (typeof source.threadId === 'string' && source.threadId.trim() !== '') {
+      origin.threadId = source.threadId
+    }
+    return origin
+  }
+
+  /** Copies a valid provider identity and drops providerEventId. */
+  private validatedProviderIdentity(
+    origin: CronJob['origin'] | undefined
+  ): CronJob['providerIdentity'] | undefined {
+    const source = this.sourceMessage
+    const identity = source?.providerIdentity
+    if (!source || !origin || !identity || identity.medium !== source.channelType) return undefined
+    const probe: CronJobRecord = {
+      id: 'probe',
+      name: 'probe',
+      schedule: '0 * * * *',
+      task: 'probe',
+      enabled: false,
+      nextRunAt: null,
+      lastRunAt: null,
+      createdAt: 0,
+      createdBy: null,
+      origin: {
+        channelType: origin.channelType,
+        channelId: origin.channelId,
+        sender: origin.sender,
+        threadId: origin.threadId ?? null,
+      },
+      provider: {
+        medium: identity.medium,
+        providerUserId: identity.providerUserId,
+        providerWorkspaceId: identity.providerWorkspaceId ?? null,
+        providerChannelId: identity.providerChannelId,
+        providerChannelType: identity.providerChannelType ?? null,
+        providerTarget: identity.providerTarget
+          ? {
+              hostRef: identity.providerTarget.hostRef,
+              communicationChannelNamespace: identity.providerTarget.communicationChannelNamespace,
+              communicationChannelName: identity.providerTarget.communicationChannelName,
+              providerBotId: identity.providerTarget.providerBotId ?? null,
+              providerBotUsername: identity.providerTarget.providerBotUsername ?? null,
+            }
+          : null,
+      },
+    }
+    const result = validateCronRecord(probe)
+    if (!result.valid || !result.job.providerIdentity) return undefined
+    return result.job.providerIdentity
   }
 
   private success(data: unknown, startTime: number): ToolOutput {

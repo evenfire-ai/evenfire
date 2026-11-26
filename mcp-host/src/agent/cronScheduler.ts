@@ -39,6 +39,89 @@ function isPromise(value: unknown): value is Promise<unknown> {
   )
 }
 
+/**
+ * Memory callers keep a synchronous return. A configured store returns a
+ * Promise that resolves only after the worker acknowledgement. The public
+ * signature stays synchronous so a scheduler with no store does not have to
+ * be awaited.
+ */
+function durableResult<T>(pending: Promise<T>): T {
+  return pending as unknown as T
+}
+
+function storedProviderIdentity(
+  identity: CronJob['providerIdentity']
+): CronJob['providerIdentity'] | undefined {
+  if (!identity) return undefined
+  const stored: NonNullable<CronJob['providerIdentity']> = {
+    medium: identity.medium,
+    providerUserId: identity.providerUserId,
+    providerChannelId: identity.providerChannelId,
+  }
+  if (identity.providerWorkspaceId !== undefined) {
+    stored.providerWorkspaceId = identity.providerWorkspaceId
+  }
+  if (identity.providerChannelType !== undefined) {
+    stored.providerChannelType = identity.providerChannelType
+  }
+  if (identity.providerTarget) {
+    stored.providerTarget = {
+      hostRef: identity.providerTarget.hostRef,
+      communicationChannelNamespace: identity.providerTarget.communicationChannelNamespace,
+      communicationChannelName: identity.providerTarget.communicationChannelName,
+    }
+    if (identity.providerTarget.providerBotId !== undefined) {
+      stored.providerTarget.providerBotId = identity.providerTarget.providerBotId
+    }
+    if (identity.providerTarget.providerBotUsername !== undefined) {
+      stored.providerTarget.providerBotUsername = identity.providerTarget.providerBotUsername
+    }
+  }
+  return stored
+}
+
+function jobToRecord(job: CronJob): CronJobRecord {
+  const identity = job.providerIdentity
+  const target = identity?.providerTarget
+  return {
+    id: job.id,
+    name: job.name,
+    schedule: job.schedule,
+    task: job.task,
+    enabled: job.enabled,
+    nextRunAt: job.nextRun ? unixSeconds(job.nextRun.getTime()) : null,
+    lastRunAt: job.lastRun ? unixSeconds(job.lastRun.getTime()) : null,
+    createdAt: unixSeconds(job.createdAt.getTime()),
+    createdBy: job.createdBy ?? null,
+    origin: job.origin
+      ? {
+          channelType: job.origin.channelType,
+          channelId: job.origin.channelId,
+          sender: job.origin.sender,
+          threadId: job.origin.threadId ?? null,
+        }
+      : null,
+    provider: identity
+      ? {
+          medium: identity.medium,
+          providerUserId: identity.providerUserId,
+          providerWorkspaceId: identity.providerWorkspaceId ?? null,
+          providerChannelId: identity.providerChannelId,
+          providerChannelType: identity.providerChannelType ?? null,
+          providerTarget: target
+            ? {
+                hostRef: target.hostRef,
+                communicationChannelNamespace: target.communicationChannelNamespace,
+                communicationChannelName: target.communicationChannelName,
+                providerBotId: target.providerBotId ?? null,
+                providerBotUsername: target.providerBotUsername ?? null,
+              }
+            : null,
+        }
+      : null,
+  }
+}
+
 export class CronScheduler extends EventEmitter {
   private jobs: Map<string, CronJob> = new Map()
   private timers: Map<string, ReturnType<typeof setTimeout>> = new Map()
@@ -49,6 +132,7 @@ export class CronScheduler extends EventEmitter {
   private readonly allowEnabledJobs: boolean
   private readonly store: CronDurableStore | undefined
   private readonly now: () => number
+  private readonly invalidJobIds = new Set<string>()
 
   constructor(
     queue: MessageQueue,
@@ -86,7 +170,10 @@ export class CronScheduler extends EventEmitter {
         if (!wrote) return
         job.enabled = false
         job.nextRun = undefined
+        this.invalidJobIds.add(job.id)
         logger.info({ jobId: job.id, component: 'Cron' }, 'Disabled invalid cron job')
+      } else {
+        this.invalidJobIds.delete(job.id)
       }
       this.jobs.set(job.id, job)
     }
@@ -139,16 +226,18 @@ export class CronScheduler extends EventEmitter {
 
   /**
    * Create a new cron job.
+   * With a store, the returned promise resolves after the insert acknowledgement.
    */
   createJob(
     name: string,
     schedule: string,
     task: string,
     createdBy?: string,
-    origin?: CronJob['origin']
+    origin?: CronJob['origin'],
+    providerIdentity?: CronJob['providerIdentity']
   ): CronJob | null {
-    // Validate schedule
-    const nextRun = parseNextRun(schedule)
+    const createdAt = new Date(this.now())
+    const nextRun = parseNextRun(schedule, createdAt)
     if (!nextRun) {
       logger.error({ schedule, component: 'Cron' }, 'Invalid cron schedule')
       return null
@@ -161,32 +250,27 @@ export class CronScheduler extends EventEmitter {
       task,
       enabled: this.allowEnabledJobs,
       nextRun,
-      createdAt: new Date(),
+      createdAt,
       createdBy,
       origin,
     }
+    const identity = storedProviderIdentity(providerIdentity)
+    if (identity) job.providerIdentity = identity
 
-    this.jobs.set(job.id, job)
-    logger.info({ jobId: job.id, name, schedule, component: 'Cron' }, 'Created cron job')
-    logger.info(
-      { jobId: job.id, nextRun: nextRun.toISOString(), component: 'Cron' },
-      'Computed next cron run'
-    )
-
-    if (this.isRunning) {
-      if (job.enabled) {
-        this.scheduleJob(job)
-      } else {
-        logger.info({ jobId: job.id, name, component: 'Cron' }, 'Policy kept cron job disabled')
-      }
+    if (!this.store) {
+      this.installCreated(job)
+      return job
     }
-
-    this.emit('cron:created', job)
-    return job
+    return durableResult(this.persistCreate(job))
   }
 
   getJob(jobId: string): CronJob | null {
     return this.jobs.get(jobId) || null
+  }
+
+  /** Rows that failed load validation. Channel callers do not own these. */
+  isInvalidJob(jobId: string): boolean {
+    return this.invalidJobIds.has(jobId)
   }
 
   getAllJobs(): CronJob[] {
@@ -196,42 +280,43 @@ export class CronScheduler extends EventEmitter {
   enableJob(jobId: string): boolean {
     const job = this.jobs.get(jobId)
     if (!job) return false
+    if (this.invalidJobIds.has(jobId)) return false
 
     if (!this.allowEnabledJobs) {
       this.disableJobForPolicy(job)
       return false
     }
 
-    job.enabled = true
-    if (this.isRunning) {
-      this.scheduleJob(job)
+    if (!this.store) {
+      job.enabled = true
+      if (this.isRunning) this.scheduleJob(job)
+      logger.info({ jobId, name: job.name, component: 'Cron' }, 'Enabled cron job')
+      return true
     }
 
-    logger.info({ jobId, name: job.name, component: 'Cron' }, 'Enabled cron job')
-    return true
+    const nextRun = parseNextRun(job.schedule, new Date(this.now()))
+    if (!nextRun) return false
+    return durableResult(this.persistEnable(job, nextRun))
   }
 
   disableJob(jobId: string): boolean {
     const job = this.jobs.get(jobId)
     if (!job) return false
-
-    job.enabled = false
-    this.clearTimer(jobId)
-
-    logger.info({ jobId, name: job.name, component: 'Cron' }, 'Disabled cron job')
-    return true
+    if (!this.store) {
+      this.finishDisable(job)
+      return true
+    }
+    return durableResult(this.persistDisable(job))
   }
 
   deleteJob(jobId: string): boolean {
     const job = this.jobs.get(jobId)
     if (!job) return false
-
-    this.clearTimer(jobId)
-    this.jobs.delete(jobId)
-    logger.info({ jobId, name: job.name, component: 'Cron' }, 'Deleted cron job')
-
-    this.emit('cron:deleted', job)
-    return true
+    if (!this.store) {
+      this.finishDelete(job)
+      return true
+    }
+    return durableResult(this.persistDelete(job))
   }
 
   private disableJobForPolicy(job: CronJob): void {
@@ -275,10 +360,127 @@ export class CronScheduler extends EventEmitter {
 
   triggerJob(jobId: string): Task | null {
     const job = this.jobs.get(jobId)
-    if (!job) return null
+    if (!job || !job.enabled || !this.allowEnabledJobs) return null
+    if (!this.store) {
+      logger.info({ jobId, name: job.name, component: 'Cron' }, 'Manually triggering cron job')
+      return this.executeJob(job)
+    }
+    return durableResult(this.persistTrigger(job))
+  }
 
-    logger.info({ jobId, name: job.name, component: 'Cron' }, 'Manually triggering cron job')
-    return this.executeJob(job)
+  private installCreated(job: CronJob): void {
+    this.jobs.set(job.id, job)
+    logger.info(
+      { jobId: job.id, name: job.name, schedule: job.schedule, component: 'Cron' },
+      'Created cron job'
+    )
+    logger.info(
+      { jobId: job.id, nextRun: job.nextRun?.toISOString(), component: 'Cron' },
+      'Computed next cron run'
+    )
+
+    if (this.isRunning) {
+      if (job.enabled) {
+        this.scheduleJob(job)
+      } else {
+        logger.info(
+          { jobId: job.id, name: job.name, component: 'Cron' },
+          'Policy kept cron job disabled'
+        )
+      }
+    }
+
+    this.emit('cron:created', job)
+  }
+
+  private async persistCreate(job: CronJob): Promise<CronJob | null> {
+    try {
+      await this.store!.insert(jobToRecord(job))
+    } catch (error) {
+      logger.error({ err: error, jobId: job.id, component: 'Cron' }, 'Cron job insert failed')
+      throw error
+    }
+    this.installCreated(job)
+    return job
+  }
+
+  private finishEnable(job: CronJob, nextRun: Date): void {
+    job.enabled = true
+    job.nextRun = nextRun
+    if (this.isRunning && !this.terminal) this.scheduleJob(job)
+    logger.info({ jobId: job.id, name: job.name, component: 'Cron' }, 'Enabled cron job')
+  }
+
+  private async persistEnable(job: CronJob, nextRun: Date): Promise<boolean> {
+    try {
+      await this.store!.setSchedule(job.id, true, unixSeconds(nextRun.getTime()))
+    } catch (error) {
+      logger.error({ err: error, jobId: job.id, component: 'Cron' }, 'Cron job enable failed')
+      throw error
+    }
+    const current = this.jobs.get(job.id)
+    if (!current) return false
+    this.finishEnable(current, nextRun)
+    return true
+  }
+
+  private finishDisable(job: CronJob): void {
+    job.enabled = false
+    this.clearTimer(job.id)
+    logger.info({ jobId: job.id, name: job.name, component: 'Cron' }, 'Disabled cron job')
+  }
+
+  private async persistDisable(job: CronJob): Promise<boolean> {
+    const nextRunAt = job.nextRun ? unixSeconds(job.nextRun.getTime()) : null
+    try {
+      await this.store!.setSchedule(job.id, false, nextRunAt)
+    } catch (error) {
+      logger.error({ err: error, jobId: job.id, component: 'Cron' }, 'Cron job disable failed')
+      throw error
+    }
+    const current = this.jobs.get(job.id)
+    if (!current) return true
+    this.finishDisable(current)
+    return true
+  }
+
+  private finishDelete(job: CronJob): void {
+    this.clearTimer(job.id)
+    this.jobs.delete(job.id)
+    this.invalidJobIds.delete(job.id)
+    logger.info({ jobId: job.id, name: job.name, component: 'Cron' }, 'Deleted cron job')
+    this.emit('cron:deleted', job)
+  }
+
+  private async persistDelete(job: CronJob): Promise<boolean> {
+    try {
+      await this.store!.delete(job.id)
+    } catch (error) {
+      logger.error({ err: error, jobId: job.id, component: 'Cron' }, 'Cron job delete failed')
+      throw error
+    }
+    const current = this.jobs.get(job.id)
+    if (!current) return true
+    this.finishDelete(current)
+    return true
+  }
+
+  private async persistTrigger(job: CronJob): Promise<Task | null> {
+    const nowMs = this.now()
+    try {
+      await this.store!.setLastRun(job.id, unixSeconds(nowMs))
+    } catch (error) {
+      logger.error({ err: error, jobId: job.id, component: 'Cron' }, 'Cron trigger write failed')
+      throw error
+    }
+    if (this.terminal) return null
+    const current = this.jobs.get(job.id)
+    if (!current || !current.enabled || !this.allowEnabledJobs) return null
+    logger.info(
+      { jobId: job.id, name: current.name, component: 'Cron' },
+      'Manually triggering cron job'
+    )
+    return this.executeJob(current, nowMs)
   }
 
   private scheduleJob(job: CronJob): void {
@@ -522,9 +724,9 @@ export class CronScheduler extends EventEmitter {
     }
   }
 
-  private executeJob(job: CronJob): Task {
+  private executeJob(job: CronJob, atMs: number = this.now()): Task {
     logger.info({ jobId: job.id, name: job.name, component: 'Cron' }, 'Executing cron job')
-    job.lastRun = new Date(this.now())
+    job.lastRun = new Date(atMs)
 
     const task = this.queue.createTaskFromCron(job.id, job.task, job.origin, 'normal')
     this.queue.enqueue(task)
