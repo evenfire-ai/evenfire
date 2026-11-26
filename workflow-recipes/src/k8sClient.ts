@@ -13,7 +13,7 @@
  */
 import * as k8s from '@kubernetes/client-node'
 import type { Pool } from 'pg'
-import { loadConfig } from './config'
+import { type DbConfig, type OperatorConfig, loadConfig } from './config'
 import { createGrantUpdateListenerPool, getPool, initDb } from './db'
 import {
   type GovernedTraceReporter,
@@ -27,6 +27,7 @@ import {
   type ChildRecipeCreator,
   type ChildRecipeExistenceChecker,
   type DbRunProcessor,
+  type DbRunProcessorOptions,
   type DbRunRow,
   createDbRunProcessor,
 } from './reconciler/dbRunProcessor'
@@ -64,6 +65,7 @@ import {
   CODEX_CONNECTION_REF_ANNOTATION,
   SUBSCRIPTION_CONNECTION_REF_ANNOTATION,
 } from './workflow/llmAllowedModelsSnapshot'
+import { enqueueSignal } from './workflow/signalStore'
 import { networkPolicyConditionsChanged } from './workflow/workflowReconciler'
 
 function grantIdentityFingerprint(
@@ -679,6 +681,51 @@ export async function rotateBrokerTokensOnce(
   }
 }
 
+/**
+ * Queues the runtime cancel signal of a database run under its child recipe
+ * name, the name the run's coordinator polls. The requestId names the run, so
+ * the runtime accepts it only in that run's pod.
+ */
+export function deliverRunCancelSignal(childRecipeName: string, runId: string): void {
+  enqueueSignal(childRecipeName, {
+    type: 'cancel',
+    requestId: `cancel:${runId}`,
+    receivedAt: new Date().toISOString(),
+  })
+}
+
+/** The processor hooks that need the watcher (K8s clients, trace reporter). */
+export type DbRunProcessorHooks = Pick<
+  DbRunProcessorOptions,
+  | 'createChildRecipe'
+  | 'checkpointAuthority'
+  | 'childRecipeExists'
+  | 'onRunStarted'
+  | 'onRunTerminal'
+>
+
+/**
+ * Options of the production run processor: identity and poll interval from
+ * the database config, the duration cap from the operator config, and cancel
+ * delivery into the signal store.
+ */
+export function buildDbRunProcessorOptions(
+  config: Pick<OperatorConfig, 'workflowMaxRunDurationSeconds'> & {
+    db: Pick<DbConfig, 'instanceId' | 'runPollMs'>
+  },
+  pool: Pool,
+  hooks: DbRunProcessorHooks
+): DbRunProcessorOptions {
+  return {
+    instanceId: config.db.instanceId,
+    pool,
+    runPollMs: config.db.runPollMs,
+    maxRunDurationCapSeconds: config.workflowMaxRunDurationSeconds,
+    deliverCancelSignal: deliverRunCancelSignal,
+    ...hooks,
+  }
+}
+
 // JWT TTL=600s, refresh-before window=300s in the reconciler. 60s ticks give
 // 5 chances to refresh before expiry and keep per-recipe load to one secret
 // read + (rare) one write per minute.
@@ -751,32 +798,38 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     })
 
     if (pool && this.config.db) {
-      this.dbRunProcessor = createDbRunProcessor({
-        instanceId: this.config.db.instanceId,
-        pool,
-        runPollMs: this.config.db.runPollMs,
-        createChildRecipe: this.makeChildRecipeCreator(),
-        checkpointAuthority: createWorkflowRunAuthorityCheckpointer(),
-        childRecipeExists: this.makeChildRecipeExists(),
-        onRunStarted: runId => {
-          this.traceReporter?.enqueueWorkflowLifecycle({
-            sourceEventId: `workflow-run:${runId}:start`,
-            occurredAt: new Date().toISOString(),
-            runId,
-            eventType: 'run_start',
-            payload: { phase: 'Running' },
-          })
-        },
-        onRunTerminal: (runId, phase) => {
-          this.traceReporter?.enqueueWorkflowLifecycle({
-            sourceEventId: `workflow-run:${runId}:terminal`,
-            occurredAt: new Date().toISOString(),
-            runId,
-            eventType: 'run_end',
-            payload: { phase },
-          })
-        },
-      })
+      this.dbRunProcessor = createDbRunProcessor(
+        buildDbRunProcessorOptions(
+          {
+            db: this.config.db,
+            workflowMaxRunDurationSeconds: this.config.workflowMaxRunDurationSeconds,
+          },
+          pool,
+          {
+            createChildRecipe: this.makeChildRecipeCreator(),
+            checkpointAuthority: createWorkflowRunAuthorityCheckpointer(),
+            childRecipeExists: this.makeChildRecipeExists(),
+            onRunStarted: runId => {
+              this.traceReporter?.enqueueWorkflowLifecycle({
+                sourceEventId: `workflow-run:${runId}:start`,
+                occurredAt: new Date().toISOString(),
+                runId,
+                eventType: 'run_start',
+                payload: { phase: 'Running' },
+              })
+            },
+            onRunTerminal: (runId, phase) => {
+              this.traceReporter?.enqueueWorkflowLifecycle({
+                sourceEventId: `workflow-run:${runId}:terminal`,
+                occurredAt: new Date().toISOString(),
+                runId,
+                eventType: 'run_end',
+                payload: { phase },
+              })
+            },
+          }
+        )
+      )
       // issue #375 (P3): on a grant-update NOTIFY, force-reconcile the affected
       // recipe through the SAME path the 30s watchdog uses. The dispatch body is
       // a named method so it is unit-testable without standing up a DB.

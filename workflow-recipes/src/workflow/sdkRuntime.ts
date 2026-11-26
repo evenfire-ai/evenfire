@@ -142,6 +142,7 @@ export async function runWorkflowFromEnvironment(): Promise<RuntimeResult> {
     workflowName: config.workflowName,
     tokenProvider: config.tokenProvider,
     intervalMs: config.signalPollIntervalMs,
+    runId: process.env.CLERUM_WORKFLOW_RUN_ID?.trim() || undefined,
   })
   const status = new StatusReporter({
     wrcUrl: config.wrcUrl,

@@ -1082,6 +1082,37 @@ describe('postStepStatus — workflow-level update (no stepId)', () => {
     })
   })
 
+  it('accepts a cancelled report over an authorization_paused projection and patches the phase', async () => {
+    const pausedExecution = {
+      phase: 'authorization_paused',
+      attempt: 1,
+      startedAt: '2026-01-01T00:00:00Z',
+    }
+    const api = makeCustomApi({
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: childMetadata('run-paused-cancel'),
+        spec: { steps: [{ id: 's1' }] },
+        status: { phase: 'active', workflowExecution: pausedExecution, steps: [] },
+      }),
+    })
+    const handlers = createWorkflowEndpointHandlers(api, 'sandbox-recipes')
+
+    const result = await handlers.postStepStatus('my-recipe', makeClaims(), {
+      workflowPhase: 'cancelled',
+    } as never)
+
+    // The recipe store was read with the paused projection before the patch.
+    expect(api.getNamespacedCustomObject).toHaveBeenCalledOnce()
+    expect(result).toEqual({ status: 200, body: { accepted: true } })
+    expect(api.patchNamespacedCustomObjectStatus).toHaveBeenCalledOnce()
+    const patchArg = (api.patchNamespacedCustomObjectStatus as ReturnType<typeof vi.fn>).mock
+      .calls[0][0]
+    expect(patchArg.body.status).toMatchObject({
+      phase: 'failed',
+      workflowExecution: { phase: 'cancelled', attempt: 1, completedAt: expect.any(String) },
+    })
+  })
+
   it('rejects stale non-terminal workflow updates after a terminal phase', async () => {
     const api = makeCustomApi({
       getNamespacedCustomObject: vi.fn().mockResolvedValue({
