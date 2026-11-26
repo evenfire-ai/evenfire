@@ -1073,7 +1073,7 @@ describe('inbound attachments webhook normalization & handoff (X7 / X8)', () => 
         kind: 'teams.attachment-message.v1',
         content: 'please review this channel file',
         providerThreadRootId: '1001',
-        attachmentErrors: [
+        attachmentIngestErrors: [
           expect.objectContaining({
             filename: 'channel-doc.pdf',
             code: 'provider_scope_unsupported',

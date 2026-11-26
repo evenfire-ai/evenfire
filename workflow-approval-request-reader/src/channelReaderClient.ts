@@ -177,7 +177,7 @@ export async function handoffTeamsMessageToChannelReader(
     providerMessageId: command.providerMessageTs,
     serviceUrl: command.serviceUrl ?? '',
     ...(hasAttachments ? { attachments: command.attachments } : {}),
-    ...(hasAttachmentErrors ? { attachmentErrors: command.attachmentErrors } : {}),
+    ...(hasAttachmentErrors ? { attachmentIngestErrors: command.attachmentErrors } : {}),
     providerTarget: {
       hostRef: target.hostRef,
       communicationChannelNamespace: channelRef.namespace,
