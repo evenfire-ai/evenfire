@@ -1899,3 +1899,236 @@ describe('browser sign-in link acceptance, redeem and install', () => {
     }
   })
 })
+
+/** The legacy profiles' shared host (T0-5): one profile stores it bare, the other with a slash. */
+const LEGACY_REST_HOST = 'api-x.example.test'
+
+type LegacyAttempt = Readonly<{
+  harness: BrowserSignInHarness
+  runtimeConfig: RuntimeConfigModule
+  slashId: string
+  /** The REST URL the bare profile stores, which the attempt is bound to. */
+  boundRestUrl: string
+  generation: number
+  attemptId: number
+  state: string
+}>
+
+/**
+ * G2-7's setup: the profiles index the pre-`55331a9eb` saver wrote, with its REST-only bare
+ * profile active, and a waiting attempt started on it.
+ */
+async function startOnLegacyBareProfile(): Promise<LegacyAttempt> {
+  const harness = await createBrowserSignInHarness({
+    legacyDuplicateProfiles: true,
+    linksAvailable: true,
+  })
+  const runtimeConfig = await import('../config.js')
+  const [slash, bare] = harness.service
+    .getRuntimeConfigState()
+    .options.filter(option => new URL(option.externalRestApiBaseUrl).host === LEGACY_REST_HOST)
+  if (!slash || !bare) throw new Error('the legacy profiles were not loaded')
+  expect(runtimeConfig.getActiveRuntimeConfigOptionId()).toBe(bare.id)
+  expect(bare.rpcProxyBaseUrl).toBe('')
+  const { attemptId, state } = await startAttempt(harness)
+  return {
+    harness,
+    runtimeConfig,
+    slashId: slash.id,
+    boundRestUrl: bare.externalRestApiBaseUrl,
+    generation: harness.service.getSessionGeneration(),
+    attemptId,
+    state,
+  }
+}
+
+/** X5: a signed-out discovery commit that makes the slash profile active with no bump (T0-5). */
+async function switchLegacyProfileWithNoBump(legacy: LegacyAttempt): Promise<void> {
+  await legacy.harness.service.getDependenciesHealth()
+  expect(legacy.runtimeConfig.getActiveRuntimeConfigOptionId()).toBe(legacy.slashId)
+  expect(legacy.harness.service.getSessionGeneration()).toBe(legacy.generation)
+}
+
+type EnvironmentVariant = readonly [
+  accepted: string,
+  refused: string,
+  acceptedEnvironment: (bound: URL) => string,
+  refusedEnvironment: (bound: URL) => string,
+]
+
+/**
+ * A3-30: a `code` link's environment that differs from the bound REST URL only by a trailing
+ * slash, a root dot or host case is the same environment; another scheme, port or path is not.
+ * Each row pairs one accepted spelling with one refused one. Every value is built from the bound
+ * URL and goes through PR 2's link builder, which takes only `http:` and `https:` (A-8).
+ */
+const ENVIRONMENT_VARIANTS: ReadonlyArray<EnvironmentVariant> = [
+  [
+    'a trailing slash',
+    'http: against the bound https:',
+    bound => `${bound.origin}/`,
+    bound => `http://${bound.host}`,
+  ],
+  [
+    'a root dot',
+    'another port',
+    bound => `${bound.protocol}//${bound.hostname}.`,
+    bound => `${bound.protocol}//${bound.hostname}:8443`,
+  ],
+  [
+    'host case',
+    'another path',
+    bound => `${bound.protocol}//${bound.hostname.toUpperCase()}`,
+    bound => `${bound.origin}/other-edge`,
+  ],
+]
+
+describe('the binding and the deadline at acceptance', () => {
+  it('G2-7 fails, without redeeming, when the profile changed with no bump', async () => {
+    // Case 1: the profile id changes while the attempt waits.
+    const waiting = await startOnLegacyBareProfile()
+    await switchLegacyProfileWithNoBump(waiting)
+    // Nothing ended the attempt: D6's hook runs only on a generation advance.
+    expect(endStatesOf(waiting.harness, waiting.attemptId)).toEqual([])
+
+    expect(
+      waiting.harness.service.acceptDesktopLoginLink(codeLink(waiting.state, waiting.boundRestUrl))
+    ).toBe(true)
+    await waiting.harness.drain()
+
+    expect(snapshotsOf(waiting.harness, waiting.attemptId).at(-1)).toEqual({
+      attemptId: waiting.attemptId,
+      phase: 'ended',
+      outcome: 'failed',
+      reason: 'environment_changed',
+    })
+    expect(redeemFetches(waiting.harness)).toHaveLength(0)
+
+    // Case 2: the profile id changes while the attempt redeems (A3-60). The code is spent; the
+    // install op discards the answer.
+    await cleanupBrowserSignInHarness()
+    const redeeming = await startOnLegacyBareProfile()
+    const redeem = redeeming.harness.hold('redeem')
+    expect(
+      redeeming.harness.service.acceptDesktopLoginLink(
+        codeLink(redeeming.state, redeeming.boundRestUrl)
+      )
+    ).toBe(true)
+    await until(redeeming.harness, () => redeem.reached, 'the redeem fetch')
+    await switchLegacyProfileWithNoBump(redeeming)
+    redeem.release(edgeResponse(readEdgeRecord(REDEEM_SIGNED_IN)))
+    await redeeming.harness.drain()
+
+    expect(redeemFetches(redeeming.harness).map(record => record.value.url)).toEqual([
+      `${redeeming.boundRestUrl}${REDEEM_PATH}`,
+    ])
+    expect(endStatesOf(redeeming.harness, redeeming.attemptId)).toEqual(['failed'])
+    expect(snapshotsOf(redeeming.harness, redeeming.attemptId).at(-1)).toEqual({
+      attemptId: redeeming.attemptId,
+      phase: 'ended',
+      outcome: 'failed',
+      reason: 'environment_changed',
+    })
+    expect(redeeming.harness.service.getSessionPresence()).toEqual({
+      hasToken: false,
+      hasMe: false,
+    })
+    expect(redeeming.harness.tokenWrites).toEqual([])
+  })
+
+  it('G2-12b stops the deadline at acceptance', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs, clock } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    const link = codeLink(state, envs.A.restBaseUrl)
+    const redeem = harness.hold('redeem')
+    // 14:59 on the wall clock and on the timers' schedule: the deadline timer, due at 15:00, is
+    // armed and has not fired.
+    clock.advance(BROWSER_SIGN_IN_DEADLINE_MS - 1_000, 'timers')
+    expect(clock.pendingTimers()).toBe(1)
+    expect(endStatesOf(harness, attemptId)).toEqual([])
+
+    expect(service.acceptDesktopLoginLink(link)).toBe(true)
+    await until(harness, () => redeem.reached, 'the redeem fetch')
+    // Past 15:00 on both: a deadline timer still armed would fire here.
+    clock.advance(2_000, 'timers')
+    // The handoff page's second delivery reaches the pre-match, which applies the deadline on
+    // the wall clock (D12) to a waiting attempt only; this one redeems.
+    expect(service.acceptDesktopLoginLink(link)).toBe(false)
+    redeem.release(edgeResponse(readEdgeRecord(REDEEM_SIGNED_IN)))
+    await harness.drain()
+
+    expect(endStatesOf(harness, attemptId)).toEqual(['signed_in'])
+    expect(redeemFetches(harness)).toHaveLength(1)
+    expect(service.getSessionPresence()).toEqual({ hasToken: true, hasMe: true })
+  })
+
+  it.each(ENVIRONMENT_VARIANTS)(
+    'accepts %s and refuses %s',
+    async (_accepted, _refused, acceptedEnvironment, refusedEnvironment) => {
+      const harness = await createBrowserSignInHarness({ linksAvailable: true })
+      const { service, envs } = harness
+      const bound = new URL(envs.A.restBaseUrl)
+      // The rows' premise: the bound URL is an `https:` origin, with no port and no path.
+      expect(envs.A.restBaseUrl).toBe(`https://${bound.hostname}`)
+      const refusedUrl = refusedEnvironment(bound)
+      const acceptedUrl = acceptedEnvironment(bound)
+      expect([refusedUrl, acceptedUrl]).not.toContain(envs.A.restBaseUrl)
+
+      // The refused spelling first: once signed in, a second start would be refused.
+      const refused = await startAttempt(harness)
+      expect(service.acceptDesktopLoginLink(codeLink(refused.state, refusedUrl))).toBe(true)
+      await harness.drain()
+      expect(snapshotsOf(harness, refused.attemptId).at(-1)).toEqual({
+        attemptId: refused.attemptId,
+        phase: 'ended',
+        outcome: 'failed',
+        reason: 'different_environment',
+      })
+      expect(redeemFetches(harness)).toHaveLength(0)
+
+      const accepted = await startAttempt(harness)
+      expect(service.acceptDesktopLoginLink(codeLink(accepted.state, acceptedUrl))).toBe(true)
+      await harness.drain()
+      expect(endStatesOf(harness, accepted.attemptId)).toEqual(['signed_in'])
+      expect(redeemFetches(harness).map(record => record.value.url)).toEqual([
+        `${envs.A.restBaseUrl}${REDEEM_PATH}`,
+      ])
+    }
+  )
+
+  it('ends timed_out and redeems nothing for a link after the deadline, before any timer or resume', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs, clock } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    // A sleep the timer did not count: the wall clock passes the deadline, the timer stays
+    // armed, and no resume or state read runs.
+    clock.advance(BROWSER_SIGN_IN_DEADLINE_MS + 1_000, 'wallOnly')
+    expect(clock.pendingTimers()).toBe(1)
+    expect(endStatesOf(harness, attemptId)).toEqual([])
+
+    // The pre-match applies the deadline, so the link raises no window.
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(false)
+    await harness.drain()
+
+    expect(endStatesOf(harness, attemptId)).toEqual(['timed_out'])
+    expect(redeemFetches(harness)).toHaveLength(0)
+    expect(clock.pendingTimers()).toBe(0)
+  })
+
+  it('ends timed_out and redeems nothing when the deadline passes before the acceptance op runs', async () => {
+    const harness = await createBrowserSignInHarness({ linksAvailable: true })
+    const { service, envs, clock } = harness
+    const { attemptId, state } = await startAttempt(harness)
+    clock.advance(BROWSER_SIGN_IN_DEADLINE_MS - 1_000, 'wallOnly')
+
+    // 14:59: the pre-match matches and queues the acceptance op in the auth owner.
+    expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
+    // The op waits for the owner and has not run yet; the wall clock passes 15:00 first.
+    clock.advance(2_000, 'wallOnly')
+    await harness.drain()
+
+    expect(endStatesOf(harness, attemptId)).toEqual(['timed_out'])
+    expect(redeemFetches(harness)).toHaveLength(0)
+  })
+})
