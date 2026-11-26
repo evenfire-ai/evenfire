@@ -4,11 +4,7 @@ import express from 'express'
 import request from 'supertest'
 import { config } from '../config.js'
 import { apiErrorHandler } from '../errorHandler.js'
-import {
-  createRpcRouter,
-  respondControlApiHostAccessRejection,
-  respondUpstreamUnavailable,
-} from '../routes/rpc.js'
+import { createRpcRouter, respondUpstreamUnavailable } from '../routes/rpc.js'
 
 // ── Issue #791 §11.4/§11.5 — extend wake-and-hold to the remaining finite
 // Desktop routes, and prove terminal-response (duplicate-write) safety in the
@@ -40,15 +36,6 @@ const serviceMock = vi.hoisted(() => ({
   },
 }))
 const controlApiMock = vi.hoisted(() => ({
-  ControlApiHostAccessRejectedError: class extends Error {
-    constructor(
-      readonly status: number,
-      readonly denialCode: string | null = null
-    ) {
-      super(`Control API rejected host access (${status})`)
-      this.name = 'ControlApiHostAccessRejectedError'
-    }
-  },
   fetchUserAllowedServersFromControlApi: vi.fn(),
   fetchHostConnectionFromControlApi: vi.fn(),
   requestHostWakeFromControlApi: vi.fn(),
@@ -630,29 +617,5 @@ describe('§11.5 route outer-catch responders guard headersSent (one-shot settle
     respondUpstreamUnavailable(res as unknown as ExpressResponse, new Error('boom'))
     expect(res.statusCode).toBe(502)
     expect(res.body).toEqual({ error: 'Upstream host unavailable' })
-  })
-
-  it('respondControlApiHostAccessRejection is a no-op once the response is committed', () => {
-    const res = makeRes(true)
-    expect(() =>
-      respondControlApiHostAccessRejection(res as unknown as ExpressResponse, {
-        status: 403,
-        code: 'host_access_revoked',
-      })
-    ).not.toThrow()
-    expect(res.statusCode).toBe(0)
-  })
-
-  it('respondControlApiHostAccessRejection writes the 403 with its denial code when uncommitted', () => {
-    const res = makeRes(false)
-    respondControlApiHostAccessRejection(res as unknown as ExpressResponse, {
-      status: 403,
-      code: 'host_access_revoked',
-    })
-    expect(res.statusCode).toBe(403)
-    expect(res.body).toEqual({
-      error: 'Forbidden: user cannot access this host',
-      code: 'host_access_revoked',
-    })
   })
 })

@@ -38,15 +38,6 @@ const serviceMock = vi.hoisted(() => ({
 }))
 
 const controlApiMock = vi.hoisted(() => ({
-  ControlApiHostAccessRejectedError: class extends Error {
-    constructor(
-      readonly status: number,
-      readonly denialCode: string | null = null
-    ) {
-      super(`Control API rejected host access (${status})`)
-      this.name = 'ControlApiHostAccessRejectedError'
-    }
-  },
   fetchUserAllowedServersFromControlApi: vi.fn(),
   fetchHostConnectionFromControlApi: vi.fn(),
   // Stage 5 wake-and-hold consults the control-api wake endpoint whenever an
