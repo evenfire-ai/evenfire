@@ -36,12 +36,11 @@ work and the Control UI to manage agents, connectors, access and usage.
 ### Work with agents in Evenfire Desktop
 
 Start a conversation with an agent, give it a task, and follow its progress as
-it calls the tools you have enabled. Keep the request, tool activity and response
-in the same conversation.
+it calls the tools you have enabled. Review its response and open the files it
+produces from the same conversation.
 
-<!-- Final image: docs/assets/readme/01-desktop-conversation.png -->
 <p align="center">
-  <img src="docs/assets/readme/mockup-1.png" alt="Evenfire Desktop marketing agent awaiting approval, shown in a branded frame" width="100%">
+  <img src="docs/assets/readme/01-desktop-conversation.png" alt="Marketing agent in Evenfire Desktop with a downloadable draft campaign brief" width="100%">
 </p>
 
 ### Approve tool actions before execution
@@ -50,9 +49,8 @@ Configure which tool actions require approval, then review a request before
 allowing it to proceed. In Desktop, Approve and Deny controls let you make that
 decision in the conversation.
 
-<!-- Final image: docs/assets/readme/02-human-approvals.png -->
 <p align="center">
-  <img src="docs/assets/readme/mockup-1.png" alt="Evenfire Desktop marketing agent awaiting approval, shown in a branded frame" width="100%">
+  <img src="docs/assets/readme/02-human-approvals.png" alt="Marketing agent awaiting approval for an Airtable tool action, with Approve and Deny controls" width="100%">
 </p>
 
 [Configure approval policies](docs/how-to/configure-approvals.md).
@@ -63,9 +61,8 @@ Choose an agent's model and instructions in the Control UI, assign its
 connectors, and manage which teams can use it. Give each agent the capabilities
 and access it needs for its role.
 
-<!-- Final image: docs/assets/readme/03-agent-configuration.png -->
 <p align="center">
-  <img src="docs/assets/readme/mockup-1.png" alt="Evenfire Desktop marketing agent awaiting approval, shown in a branded frame" width="100%">
+  <img src="docs/assets/readme/03-agent-configuration.png" alt="Control UI agent overview showing its model, assigned connectors, members and teams" width="100%">
 </p>
 
 ### Extend agents with connectors and plugins
@@ -74,19 +71,18 @@ Browse the Marketplace to discover and install connectors and plugins.
 Connectors expose tools through MCP; plugins can add workflows and their own
 interfaces. Manage installed capabilities in the Control UI.
 
-<!-- Final image: docs/assets/readme/04-marketplace.png -->
 <p align="center">
-  <img src="docs/assets/readme/mockup-1.png" alt="Evenfire Desktop marketing agent awaiting approval, shown in a branded frame" width="100%">
+  <img src="docs/assets/readme/04-marketplace.png" alt="Evenfire Marketplace listing connectors including Figma, Firecrawl, GitHub and Google Sheets" width="100%">
 </p>
 
-### Work with shared files in EvenDrive
+### Share files with your team and agents
 
-Organize files in EvenDrive and make them available to the people and agents
-that need them. File access is checked and audited by the platform.
+Share files and folders with people, teams and agents in EvenDrive. Give your
+agents access to the documents they need so they can work with you on shared
+material. File access is checked and audited by the platform.
 
-<!-- Final image: docs/assets/readme/05-evendrive.png -->
 <p align="center">
-  <img src="docs/assets/readme/mockup-1.png" alt="Evenfire Desktop marketing agent awaiting approval, shown in a branded frame" width="100%">
+  <img src="docs/assets/readme/05-evendrive.png" alt="EvenDrive folder sharing with people, a team and an agent, with an Editor access selector" width="100%">
 </p>
 
 ### Monitor usage, costs and budgets
@@ -95,9 +91,8 @@ See token usage across agents, teams, providers and models. Configure model
 prices to track costs, and set scoped budgets to warn or block new work when
 budget enforcement is enabled.
 
-<!-- Final image: docs/assets/readme/06-cost-and-usage.png -->
 <p align="center">
-  <img src="docs/assets/readme/mockup-1.png" alt="Evenfire Desktop marketing agent awaiting approval, shown in a branded frame" width="100%">
+  <img src="docs/assets/readme/06-cost-and-usage.png" alt="Control UI token usage dashboard with request totals and usage broken down by team" width="100%">
 </p>
 
 [Track usage and configure budgets](docs/how-to/token-budgets-and-usage.md) ·
