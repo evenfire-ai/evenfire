@@ -1578,6 +1578,72 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
 
   // ── S22 · resume ────────────────────────────────────────────────────────
 
+  /** The run's phase and how many continuation bindings it holds. */
+  async function continuationOf(runId: string) {
+    const result = await databasePool.query<{ phase: string; continuation_count: number }>(
+      `SELECT phase,
+              (SELECT COUNT(*)::int
+                 FROM workflow_authority_bindings
+                WHERE binding_kind = 'run_management'
+                  AND entity_type = 'workflow_run'
+                  AND entity_id = run_id::text) AS continuation_count
+         FROM workflow_runs
+        WHERE run_id = $1`,
+      [runId]
+    )
+    expect(result.rows).toHaveLength(1)
+    return result.rows[0]!
+  }
+
+  /**
+   * Runs `work` with every `databasePool` client recording the run's
+   * continuation binding inserts (the resume passes `databasePool` as its
+   * transaction pool).
+   */
+  async function recordingBindingInserts<T>(runId: string, work: () => Promise<T>) {
+    const inserts: unknown[][] = []
+    const connect = databasePool.connect.bind(databasePool) as (
+      ...args: unknown[]
+    ) => Promise<PoolClient> | undefined
+    const spy = vi.spyOn(databasePool, 'connect').mockImplementation(((...args: unknown[]) => {
+      // `Pool.query` checks out its client through the callback form; those
+      // statements run outside any transaction and are not wrapped.
+      if (typeof args[0] === 'function') return connect(...args)
+      return wrapped()
+    }) as unknown as typeof databasePool.connect)
+    async function wrapped() {
+      const client = (await connect())!
+      return new Proxy(client, {
+        get(target, prop) {
+          if (prop === 'query') {
+            return (...args: unknown[]) => {
+              const values = Array.isArray(args[1]) ? (args[1] as unknown[]) : undefined
+              if (
+                /^\s*INSERT INTO workflow_authority_bindings\b/.test(queryText(args[0])) &&
+                values?.[0] === 'run_management' &&
+                values?.[2] === runId
+              ) {
+                inserts.push(values)
+              }
+              return (target.query as (...a: unknown[]) => unknown)(...args)
+            }
+          }
+          const value = Reflect.get(target, prop, target)
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
+    }
+    try {
+      const outcome = await work().then(
+        value => ({ value, error: undefined as unknown }),
+        (error: unknown) => ({ value: undefined, error })
+      )
+      return { ...outcome, inserts }
+    } finally {
+      spy.mockRestore()
+    }
+  }
+
   it('cancel then resume, and resume then cancel', async () => {
     for (const withChild of [false, true]) {
       // Cancel first.
@@ -1588,7 +1654,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
       const afterCancel = await readRun(first.runId)
       expect(afterCancel.cancel_requested_at).toBeInstanceOf(Date)
       expect(afterCancel.phase).toBe(withChild ? 'AuthorizationPaused' : 'Canceled')
-      await expect(
+      const refused = await recordingBindingInserts(first.runId, () =>
         resumeWorkflowRun({
           runId: first.runId,
           recipeNamespace: ns,
@@ -1596,7 +1662,20 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
           authority: firstAuthority,
           db: databasePool,
         })
-      ).rejects.toMatchObject({ status: 409, code: 'workflow_run_not_paused' })
+      )
+      expect(refused.error).toMatchObject({ status: 409, code: 'workflow_run_not_paused' })
+      // Witness: with a child the paused run reaches the binding insert inside
+      // the resume transaction; without one the run is already Canceled and the
+      // resume stops at the phase check.
+      expect({ withChild, inserts: refused.inserts.length }).toEqual({
+        withChild,
+        inserts: withChild ? 1 : 0,
+      })
+      // The refused resume leaves no continuation binding: its insert rolled back.
+      expect(await continuationOf(first.runId)).toEqual({
+        phase: withChild ? 'AuthorizationPaused' : 'Canceled',
+        continuation_count: 0,
+      })
       expect(await readRun(first.runId)).toMatchObject({
         phase: withChild ? 'AuthorizationPaused' : 'Canceled',
         canceled_by: L.id,
@@ -1614,6 +1693,8 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
         db: databasePool,
       })
       expect(resumed.phase).toBe(withChild ? 'Running' : 'Pending')
+      // The accepted resume commits its continuation binding.
+      expect((await continuationOf(second.runId)).continuation_count).toBe(1)
       expect((await cancel(second.token, second.runId, cancelRecipe)).status).toBe(200)
       const afterResume = await readRun(second.runId)
       expect(afterResume.cancel_requested_at).toBeInstanceOf(Date)
