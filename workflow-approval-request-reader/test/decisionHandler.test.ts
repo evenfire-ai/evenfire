@@ -432,20 +432,29 @@ describe('decisionHandler', () => {
   })
 
   it('still ignores Slack message edits', () => {
+    const event = {
+      type: 'message',
+      subtype: 'message_changed',
+      user: 'U123',
+      channel: 'D123',
+      text: 'edited',
+      ts: '1710000000.000010',
+    }
     expect(
       normalizeProviderMessage('slack', {
         type: 'event_callback',
         team_id: 'T123',
-        event: {
-          type: 'message',
-          subtype: 'message_changed',
-          user: 'U123',
-          channel: 'D123',
-          text: 'edited',
-          ts: '1710000000.000010',
-        },
+        event,
       })
     ).toBeNull()
+    const { subtype: _subtype, ...withoutSubtype } = event
+    expect(
+      normalizeProviderMessage('slack', {
+        type: 'event_callback',
+        team_id: 'T123',
+        event: withoutSubtype,
+      })
+    ).toMatchObject({ content: 'edited', providerChannelId: 'D123' })
   })
 
   it('normalizes Slack workflow result button clicks as download messages', () => {

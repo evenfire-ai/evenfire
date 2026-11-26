@@ -997,7 +997,7 @@ async function downloadSlackFile(
   declaredMime?: string,
   redirects = 0
 ): Promise<string> {
-  if (!isSlackFileDownloadUrl(url)) throw new Error('slack_file_url_rejected')
+  if (redirects === 0 && !isSlackFileDownloadUrl(url)) throw new Error('slack_file_url_rejected')
   const response = await fetch(url, {
     redirect: 'manual',
     headers: { Authorization: `Bearer ${token}` },

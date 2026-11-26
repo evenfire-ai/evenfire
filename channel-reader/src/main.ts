@@ -2164,7 +2164,6 @@ export class ChannelReader {
       const closeStream = () => stream?.close()
       const streamSteps = () => stream?.steps ?? []
       let runTimer: ReturnType<typeof setTimeout> | undefined
-      let pollPaused = false
       let pollIntervalMs = RESULT_POLL_FALLBACK_INTERVAL_MS
       let pollDeadline = Date.now() + RESULT_POLL_FALLBACK_TIMEOUT_MS
 
@@ -2188,8 +2187,8 @@ export class ChannelReader {
         resetPollDeadline()
         return true
       }
-      // A pending or waiting_approval result slows or resumes the poll. It does
-      // not move the poll deadline. That deadline is fixed when polling starts.
+      // A pending or waiting_approval result only changes how often we poll.
+      // Progress events and an approval decision move the deadline.
       const noteHostStillRunning = (status: string) => {
         if (status === 'waiting_approval') pollIntervalMs = 30_000
         else pollIntervalMs = RESULT_POLL_FALLBACK_INTERVAL_MS
@@ -2203,6 +2202,18 @@ export class ChannelReader {
           if (delivered) return
         } catch (err) {
           logCaughtError('error', 'result_poll_failed', err, { taskId })
+          // The host was unreachable. Keep polling until the deadline so a
+          // later completed answer can replace the apology.
+          if (Date.now() < pollDeadline) {
+            clearRunTimer()
+            const text = channelRunErrorText(reason)
+            try {
+              await editStatus(text, true)
+            } catch {
+              // The poll will try the answer again.
+            }
+            return
+          }
         }
         if (finalDelivered || terminalDeliveryStarted || completionAnnounced) return
         finalDelivered = true
@@ -2274,7 +2285,6 @@ export class ChannelReader {
           ...lastingGrantState(params),
           startResultPollingFallback,
           updateStatusAfterDecision: content => {
-            pollPaused = false
             pollIntervalMs = RESULT_POLL_FALLBACK_INTERVAL_MS
             resetPollDeadline()
             acceptProgressUpdates = true
@@ -2282,7 +2292,6 @@ export class ChannelReader {
             return editStatus(content)
           },
         })
-        pollPaused = true
         clearRunTimer()
         const notification = withShellCardNotice(params.notification, params.shellCard)
         await editStatus(

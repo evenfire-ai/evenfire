@@ -66,6 +66,46 @@ function telegramMessage(overrides: Partial<Message> = {}): Message {
   }
 }
 
+describe('ChannelReader Slack file handoff', () => {
+  it('adds the attached file note before forwarding the message', async () => {
+    const rpc = rpcClient()
+    rpc.authorizeProviderMessage = vi.fn(async () => ({ authorized: true }))
+    const adapter: ChannelAdapter = {
+      channelType: 'slack',
+      connect: vi.fn(async () => undefined),
+      disconnect: vi.fn(async () => undefined),
+      fetchMessages: vi.fn(async () => []),
+      sendMessage: vi.fn(async () => '1'),
+      editMessage: vi.fn(async () => undefined),
+    }
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      notificationDeliveryClient: null,
+      adapters: new Map([['slack', adapter]]),
+    })
+
+    await reader.handleSlackHandoff({
+      kind: 'slack.message',
+      content: 'Review this patch',
+      providerUserId: 'U123',
+      providerWorkspaceId: 'T123',
+      providerChannelId: 'D123',
+      providerEventId: 'slack:T123:D123:1.1',
+      providerMessageTs: '1.1',
+      providerTarget: {
+        hostRef: 'chatllm',
+        communicationChannelNamespace: 'channels',
+        communicationChannelName: 'pr-reviewer-slack',
+      },
+      slackFiles: [{ id: 'F123', name: 'fix.patch' }],
+    })
+
+    const forwarded = vi.mocked(rpc.sendMessage).mock.calls[0]?.[0]
+    expect(forwarded?.content).toContain('fix.patch')
+    expect(forwarded?.content).toContain('not available')
+  })
+})
+
 describe('ChannelReader provider event idempotency', () => {
   it('does not forward a provider message when current access is denied', async () => {
     const rpc = rpcClient()
