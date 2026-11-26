@@ -586,7 +586,7 @@ describe('McpServerTable — saved marketplace identity', () => {
     )
     expect(
       screen.getAllByText('evenfire-mcp-airtable')[0].closest('tr')?.querySelector('img')
-    ).toBeNull()
+    ).toHaveAttribute('src', '/connector-icons/modelcontextprotocol.svg')
   })
 
   it('searches display names, instance names and original legacy IDs, and sorts the friendly-name column', () => {
@@ -657,4 +657,15 @@ describe('McpServerTable — legacy catalog icon mappings', () => {
       '/connector-icons/modelcontextprotocol.svg'
     )
   })
+})
+
+it('shows the generic MCP icon for an unlinked connector without guessing a marketplace identity', () => {
+  render(<McpServerTable items={[makeItem({ name: 'duckduckgo' })]} />)
+  const identity = screen.getByTitle('duckduckgo')
+  expect(identity).toHaveTextContent('duckduckgo')
+  expect(identity.querySelector('img')).toHaveAttribute(
+    'src',
+    '/connector-icons/modelcontextprotocol.svg'
+  )
+  expect(screen.queryByText('DuckDuckGo')).not.toBeInTheDocument()
 })

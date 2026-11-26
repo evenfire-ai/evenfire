@@ -338,11 +338,7 @@ export function McpServerTable({
                     onNavigate={onOpen ? () => onOpen({ namespace, name }) : undefined}
                   >
                     <td>
-                      {catalogId ? (
-                        <ConnectorIdentity name={catalogId} instanceName={name} />
-                      ) : (
-                        <span title={name}>{name}</span>
-                      )}
+                      <ConnectorIdentity name={catalogId ?? name} instanceName={name} />
                     </td>
                     <td className="cu-registry-description">
                       <TruncatedText value={spec.description} />
