@@ -156,8 +156,13 @@ export async function pushedBrowserSignInSnapshots(): Promise<BrowserSignInSnaps
  *
  * With `realTokenStore`, the two token-store holds sit on the mocked `keytar` call inside the
  * real `TokenStore`, so its admission runs around them: `restoreTokenRead` on the next
- * `keytar.getPassword` that no `holdKeychainRead` claims, `installTokenWrite` on the next
- * `keytar.setPassword` of a token that is not a team switch's.
+ * `keytar.getPassword` of the active environment's own account (`session-token::<active env
+ * key>`, the first read of the restore's `getSessionToken`) that no `holdKeychainRead` claims,
+ * `installTokenWrite` on the next `keytar.setPassword` of a token that is not a team switch's.
+ * The store's other reads never take `restoreTokenRead`: a read of another environment's
+ * account, and the fallbacks a read that finds no token goes on to, the legacy env keys' accounts
+ * and the global `session-token` slot (`tokenStore.ts` `migrateLegacyEnvToken`,
+ * `migrateLegacyGlobalToken`).
  *
  * The two chat-store holds match by user id, not by call site. `restoreChatBind` takes the next
  * bind of the restore driver's user, and `installChatBind` the next bind of the redeem answer's
@@ -745,6 +750,8 @@ export async function createBrowserSignInHarness(
     // The real token store reads it once `keytar` has no token (`tokenStore.ts:289`).
     ...(options.realTokenStore ? { safeStorage: { isEncryptionAvailable: () => false } } : {}),
   }))
+  /** The active environment's keychain account, once `config.ts` is loaded (`realTokenStore`). */
+  let activeKeychainAccount: () => string | null = () => null
   if (options.realTokenStore) {
     const recordKeychainCall = (method: KeychainCall['method'], account: string) => {
       keychainCalls.push({ seq: nextSeq(), value: { method, account } })
@@ -753,7 +760,8 @@ export async function createBrowserSignInHarness(
       getPassword: (_service: string, account: string) => {
         recordKeychainCall('getPassword', account)
         const pending =
-          keychainReadHolds.get(account)?.shift() ?? holds.get('restoreTokenRead')?.shift()
+          keychainReadHolds.get(account)?.shift() ??
+          (account === activeKeychainAccount() ? holds.get('restoreTokenRead')?.shift() : undefined)
         return passThroughHold(pending, 'keytar.getPassword', held => {
           refuseResponse('restoreTokenRead')(held)
           return keychain.get(account) ?? null
@@ -802,6 +810,7 @@ export async function createBrowserSignInHarness(
     import('../src/config.js'),
     import('../src/tokenStore.js'),
   ])
+  activeKeychainAccount = () => keychainAccount(runtimeConfig.getActiveEnvKey())
   const optionIdFor = (restBaseUrl: string) => {
     const option = runtimeConfig
       .getDesktopRuntimeConfigState()

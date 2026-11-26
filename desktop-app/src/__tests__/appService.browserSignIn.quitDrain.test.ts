@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import {
   type BrowserSignInHarness,
@@ -263,6 +263,36 @@ describe('the harness with the real token store', () => {
         Object.defineProperty(process, 'platform', host)
       }
     }
+  })
+
+  it("holds restoreTokenRead only on the active environment's own keychain read", async () => {
+    const harness = await createBrowserSignInHarness({ realTokenStore: true, keptToken: true })
+    const store = realStore(harness)
+    const hold = harness.hold('restoreTokenRead')
+
+    // Another environment's read finds no token and goes on to the store's fallbacks, the global
+    // legacy slot among them. None of its keychain reads takes the hold.
+    let settled = false
+    const other = store.store.getSessionToken(DEFERRING_ENV_KEY).finally(() => {
+      settled = true
+    })
+    await vi.waitFor(() => expect(settled || hold.reached).toBe(true), {
+      timeout: 5_000,
+      interval: 5,
+    })
+    expect(hold.reached).toBe(false)
+    await expect(other).resolves.toBeNull()
+    expect(keychainAccounts(store, 'getPassword')).toEqual([
+      accountOf(DEFERRING_ENV_KEY),
+      'session-token',
+    ])
+
+    // The restore's own read of the active environment's account takes it.
+    const restore = harness.service.getSessionState()
+    await until(harness, () => hold.reached, "the restore's keychain read")
+    expect(keychainAccounts(store, 'getPassword').at(-1)).toBe(accountOf(store.activeEnvKey))
+    hold.release()
+    await expect(restore).resolves.toMatchObject({ authenticated: true })
   })
 })
 
