@@ -30,6 +30,7 @@
  * neither the name nor the text.
  */
 import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
+import type { RetainedAttachmentByteLoader } from '../../internalTools/channelAttachmentHydration'
 import { decodeTextContent } from '../../internalTools/textContent'
 import type { IncomingMessage } from '../../server'
 import { AttachmentReadLedger, attachmentReadBudgets } from '../attachments/attachmentReadBudget'
@@ -40,10 +41,12 @@ import type {
   ToolTraceDescriptor,
 } from '../interfaces'
 import type { RedactionRange } from '../safety/safety'
-import type { ToolOutput, ToolResult } from '../types'
+import type { Attachment, ToolOutput, ToolResult } from '../types'
 
 export type AttachmentReadErrorCode =
   | 'attachment_not_found'
+  | 'attachment_integrity_failed'
+  | 'attachment_unavailable'
   | 'range_invalid'
   | 'measurement_unavailable'
 
@@ -54,6 +57,10 @@ export interface AttachmentReadToolOptions {
   ledger: AttachmentReadLedger
   /** The tool-output redaction rules, applied to the whole decoded text. */
   redactor: AttachmentReadRedactor
+  /** Issue #1640 — retained channel attachments hydrated from SQLite for this session. */
+  retainedAttachments?: readonly Attachment[]
+  /** Issue #1640 — per-read owner/pin/SHA-256-verified byte loader from ChannelAttachmentStore. */
+  loadRetainedBytes?: RetainedAttachmentByteLoader
 }
 
 export interface AttachmentReadRedactor {
@@ -104,7 +111,10 @@ export type AttachmentReadResult =
     }
 
 const ERROR_MESSAGES: Record<AttachmentReadErrorCode, string> = {
-  attachment_not_found: 'No file with this attachmentId is attached to the current message.',
+  attachment_not_found: 'No file with this attachmentId is attached to the current conversation.',
+  attachment_integrity_failed:
+    'The retained file failed integrity verification and cannot be read.',
+  attachment_unavailable: 'The retained file is no longer available in storage.',
   range_invalid:
     'offset must be an integer within the file on a character boundary, and maxBytes an integer from 1 to the per-call limit that covers at least one character.',
   measurement_unavailable:
@@ -223,11 +233,15 @@ export class AttachmentReadTool implements Tool {
     this.contextWindowTokens = options.contextWindowTokens
     this.ledger = options.ledger
     this.redactor = options.redactor
+    this.retainedAttachments = options.retainedAttachments ?? []
+    this.loadRetainedBytes = options.loadRetainedBytes
   }
 
   private readonly contextWindowTokens: number
   private readonly ledger: AttachmentReadLedger
   private readonly redactor: AttachmentReadRedactor
+  private readonly retainedAttachments: readonly Attachment[]
+  private readonly loadRetainedBytes?: RetainedAttachmentByteLoader
   private pending: PendingEmission | null = null
 
   name(): string {
@@ -296,12 +310,21 @@ export class AttachmentReadTool implements Tool {
 
   async execute(params: Record<string, unknown>, context?: ExecutionContext): Promise<ToolOutput> {
     const start = Date.now()
-    const attachment = this.sourceMessage.attachments?.find(
+    const inlineAttachment = this.sourceMessage.attachments?.find(
       candidate =>
         candidate.kind === 'file' &&
         candidate.id === params.attachmentId &&
         candidate.fileReference !== undefined
     )
+    const retainedAttachment = !inlineAttachment
+      ? this.retainedAttachments.find(
+          candidate =>
+            candidate.kind === 'file' &&
+            candidate.id === params.attachmentId &&
+            candidate.fileReference !== undefined
+        )
+      : undefined
+    const attachment = inlineAttachment ?? retainedAttachment
     const reference = attachment?.fileReference
     if (!attachment || !reference) {
       if (!this.ledger.beginRead())
@@ -317,15 +340,38 @@ export class AttachmentReadTool implements Tool {
     if (!this.ledger.beginRead())
       return this.beginReadExhausted(identity.attachmentId, identity.referenceId, params)
 
-    // #666 R4-M2 — a cold restart persists attachment metadata but never the
-    // inline bytes, so the tool answers honestly instead of crashing on
-    // Buffer.from(undefined).
+    let retainedBytes: Buffer | null = null
     if (typeof attachment.dataBase64 !== 'string') {
-      return this.ok(
-        { ...identity, kind: 'binary', reader: 'none', reason: 'bytes_unavailable_after_restart' },
-        start,
-        { identity, offset: 0, fileBytes: 0, unavailableReason: 'bytes_unavailable_after_restart' }
-      )
+      if (this.loadRetainedBytes) {
+        const loaded = await this.loadRetainedBytes(attachment.id)
+        if (!loaded.ok) {
+          return this.error(loaded.code, start, {
+            identity,
+            offset: 0,
+            fileBytes: 0,
+          })
+        }
+        retainedBytes = loaded.bytes
+      } else {
+        // #666 R4-M2 — a cold restart persists attachment metadata but never the
+        // inline bytes, so the tool answers honestly instead of crashing on
+        // Buffer.from(undefined).
+        return this.ok(
+          {
+            ...identity,
+            kind: 'binary',
+            reader: 'none',
+            reason: 'bytes_unavailable_after_restart',
+          },
+          start,
+          {
+            identity,
+            offset: 0,
+            fileBytes: 0,
+            unavailableReason: 'bytes_unavailable_after_restart',
+          }
+        )
+      }
     }
 
     const offset = params.offset ?? 0
@@ -342,7 +388,10 @@ export class AttachmentReadTool implements Tool {
       return this.error('range_invalid', start, {
         identity,
         offset: 0,
-        fileBytes: this.cachedBytes(attachment.id, attachment.dataBase64),
+        fileBytes:
+          retainedBytes !== null
+            ? retainedBytes.length
+            : this.cachedBytes(attachment.id, attachment.dataBase64),
       })
     }
 
@@ -372,13 +421,19 @@ export class AttachmentReadTool implements Tool {
         {
           identity,
           offset,
-          fileBytes: this.cachedBytes(attachment.id, attachment.dataBase64),
+          fileBytes:
+            retainedBytes !== null
+              ? retainedBytes.length
+              : this.cachedBytes(attachment.id, attachment.dataBase64),
           unavailableReason: 'no_reader_for_class',
         }
       )
     }
 
-    const { bytes, isText } = this.decode(attachment.id, attachment.dataBase64)
+    const { bytes, isText } =
+      retainedBytes !== null
+        ? this.decodeBuffer(attachment.id, retainedBytes)
+        : this.decode(attachment.id, attachment.dataBase64)
     if (!isText) {
       return this.ok(
         { ...identity, kind: 'binary', reader: 'none', reason: 'text_decode_rejected' },
@@ -554,6 +609,12 @@ export class AttachmentReadTool implements Tool {
     const cached = this.decoded.get(attachmentId)
     if (cached) return cached
     const bytes = Buffer.from(dataBase64, 'base64')
+    const entry = { bytes, isText: decodeTextContent(bytes) !== null }
+    this.decoded.set(attachmentId, entry)
+    return entry
+  }
+
+  private decodeBuffer(attachmentId: string, bytes: Buffer): { bytes: Buffer; isText: boolean } {
     const entry = { bytes, isText: decodeTextContent(bytes) !== null }
     this.decoded.set(attachmentId, entry)
     return entry

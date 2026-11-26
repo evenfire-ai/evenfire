@@ -24,6 +24,7 @@
  */
 import { createHash } from 'node:crypto'
 import { extname } from 'node:path'
+import type { RetainedAttachmentByteLoader } from '../../../internalTools/channelAttachmentHydration'
 import type { IncomingMessage } from '../../../server'
 import { AttachmentReadLedger, attachmentReadBudgets } from '../../attachments/attachmentReadBudget'
 import type {
@@ -68,16 +69,25 @@ export interface DocumentReadToolOptions {
   redactor: AttachmentReadRedactor
   runJob: RunDocumentJob
   limits: DocumentReadLimits
+  /** Issue #1640 — retained channel attachments hydrated from SQLite for this session. */
+  retainedAttachments?: readonly Attachment[]
+  /** Issue #1640 — per-read owner/pin/SHA-256-verified byte loader from ChannelAttachmentStore. */
+  loadRetainedBytes?: RetainedAttachmentByteLoader
 }
 
 export type DocumentReadAccessErrorCode =
   | 'attachment_not_found'
+  | 'attachment_integrity_failed'
+  | 'attachment_unavailable'
   | 'not_a_document'
   | 'bytes_unavailable_after_restart'
   | 'measurement_unavailable'
 
 const ACCESS_ERROR_MESSAGES: Record<DocumentReadAccessErrorCode, string> = {
   attachment_not_found: 'No file with this attachmentId is attached to the current message.',
+  attachment_integrity_failed:
+    'The retained document failed integrity verification and cannot be read.',
+  attachment_unavailable: 'The retained document is no longer available in storage.',
   not_a_document:
     'This attached file is not one this tool reads (reader=pdf or reader=xlsx); use clerum__attachment_read for reader=text.',
   bytes_unavailable_after_restart:
@@ -240,6 +250,8 @@ export class DocumentReadTool implements Tool {
   private readonly redactor: AttachmentReadRedactor
   private readonly runJob: RunDocumentJob
   private readonly limits: DocumentReadLimits
+  private readonly retainedAttachments: readonly Attachment[]
+  private readonly loadRetainedBytes?: RetainedAttachmentByteLoader
   private pending: PendingEmission | null = null
 
   constructor(
@@ -264,6 +276,8 @@ export class DocumentReadTool implements Tool {
     this.redactor = options.redactor
     this.runJob = options.runJob
     this.limits = options.limits
+    this.retainedAttachments = options.retainedAttachments ?? []
+    this.loadRetainedBytes = options.loadRetainedBytes
   }
 
   name(): string {
@@ -342,12 +356,21 @@ export class DocumentReadTool implements Tool {
   async execute(params: Record<string, unknown>, context?: ExecutionContext): Promise<ToolOutput> {
     const start = Date.now()
     const cursorParam = typeof params.cursor === 'string' ? params.cursor : undefined
-    const attachment = this.sourceMessage.attachments?.find(
+    const inlineAttachment = this.sourceMessage.attachments?.find(
       candidate =>
         candidate.kind === 'file' &&
         candidate.id === params.attachmentId &&
         candidate.fileReference !== undefined
     )
+    const retainedAttachment = !inlineAttachment
+      ? this.retainedAttachments.find(
+          candidate =>
+            candidate.kind === 'file' &&
+            candidate.id === params.attachmentId &&
+            candidate.fileReference !== undefined
+        )
+      : undefined
+    const attachment = inlineAttachment ?? retainedAttachment
     const reference = attachment?.fileReference
     if (!attachment || !reference) {
       const attachmentId = typeof params.attachmentId === 'string' ? params.attachmentId : ''
@@ -376,8 +399,19 @@ export class DocumentReadTool implements Tool {
         const named = value === undefined ? undefined : DECLARED_DOCUMENT_FORMAT.get(value)
         return named !== undefined && named !== format
       })
-    if (typeof attachment.dataBase64 !== 'string')
+
+    let bytes: Buffer
+    if (typeof attachment.dataBase64 === 'string') {
+      bytes = Buffer.from(attachment.dataBase64, 'base64')
+    } else if (this.loadRetainedBytes) {
+      const loaded = await this.loadRetainedBytes(attachment.id)
+      if (!loaded.ok) {
+        return this.accessError(loaded.code, start, identity)
+      }
+      bytes = loaded.bytes
+    } else {
       return this.accessError('bytes_unavailable_after_restart', start, identity)
+    }
 
     const { mode, pages, sheet, cursor } = params
     if (
@@ -400,7 +434,6 @@ export class DocumentReadTool implements Tool {
       return this.failure(identity, { ok: false, reason: 'invalid_range' }, start)
     }
 
-    const bytes = Buffer.from(attachment.dataBase64, 'base64')
     if (bytes.length > this.limits.maxSourceBytes) {
       return this.failure(
         identity,

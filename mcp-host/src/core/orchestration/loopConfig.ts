@@ -140,6 +140,14 @@ export interface LoopConfig {
    * `TaskExecutor.taskId`.
    */
   taskId?: string
+  /**
+   * Issue #1640 (R68) — `(linkedUserId, sessionKey)` scope recorded on spilled
+   * blobs and enforced on `clerum__spillover_read`.
+   */
+  spilloverScope?: {
+    linkedUserId?: string | null
+    sessionKey?: string | null
+  }
 
   /**
    * F3 (dynamic-tool-loading) — context the `clerum__tool_call` bridge intercept

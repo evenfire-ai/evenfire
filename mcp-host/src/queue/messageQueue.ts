@@ -23,6 +23,7 @@ import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { TransitionEvent } from '../lifecycle/types'
 import { logger } from '../logger'
 import { IncomingMessage } from '../server'
+import { isExternalChannelType } from '../workflow/channelIdentity'
 import {
   AdmissionOutcome,
   QueueEvent,
@@ -121,6 +122,9 @@ export class MessageQueue extends EventEmitter {
       ],
       createdAt: new Date(),
       responseCallback,
+      ...(message.admittedLinkedUserId
+        ? { admittedLinkedUserId: message.admittedLinkedUserId }
+        : {}),
     }
     this.taskInstanceIndex.set(task.id, task)
     return task
@@ -207,6 +211,9 @@ export class MessageQueue extends EventEmitter {
     if (!msg) return null
     const messageId = msg.messageId?.trim()
     if (!messageId) return null
+    if (isExternalChannelType(msg.channelType) && msg.admittedLinkedUserId?.trim()) {
+      return `${msg.channelType}:${msg.channelId}:${msg.sender}:${msg.admittedLinkedUserId.trim()}:${messageId}`
+    }
     return `${msg.channelType}:${msg.channelId}:${msg.sender}:${messageId}`
   }
 
@@ -423,6 +430,25 @@ export class MessageQueue extends EventEmitter {
    */
   getTask(taskId: string): Task | null {
     return this.taskInstanceIndex.get(taskId) ?? null
+  }
+
+  /**
+   * Immediately purge a task from `pendingQueue`, `taskInstanceIndex`,
+   * `deliveryIndex`, and `deliveryKeyByTaskId` (`X11`, `R82`, `R88`).
+   */
+  purgeTask(taskId: string): void {
+    const idx = this.pendingQueue.findIndex(t => t.id === taskId)
+    if (idx >= 0) {
+      this.pendingQueue.splice(idx, 1)
+    }
+    this.taskInstanceIndex.delete(taskId)
+    const deliveryKey = this.deliveryKeyByTaskId.get(taskId)
+    if (deliveryKey !== undefined) {
+      this.deliveryKeyByTaskId.delete(taskId)
+      if (this.deliveryIndex.get(deliveryKey) === taskId) {
+        this.deliveryIndex.delete(deliveryKey)
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------

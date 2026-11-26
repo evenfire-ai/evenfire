@@ -316,10 +316,11 @@ export class ConversationManager {
     // A new user message starts a new task: plain session-scoped approvals end here.
     conversation.task_approved_tools?.clear()
 
-    // Materialize the auto-title (spec 15) in RAM before persisting so the
-    // dual-store projection and the durable COALESCE write agree. `??=` keeps
-    // any title already set.
-    if (autoTitle !== undefined) conversation.title ??= autoTitle
+    // Materialize the auto-title (spec 15 / issue #1640 R32) in RAM before
+    // persisting so the dual-store projection and the durable COALESCE write
+    // agree. Only apply when the conversation has no title yet (never clobber).
+    const appliedAutoTitle = conversation.title == null ? autoTitle : undefined
+    if (appliedAutoTitle !== undefined) conversation.title = appliedAutoTitle
 
     const turn: Turn = {
       number: conversation.turns.length + 1,
@@ -330,7 +331,7 @@ export class ConversationManager {
 
     conversation.turns.push(turn)
     try {
-      await Promise.resolve(this.store.persistTurnStart(conversation, userInput))
+      await Promise.resolve(this.store.persistTurnStart(conversation, userInput, appliedAutoTitle))
     } catch (err) {
       // Roll back the in-RAM mutation so the cached conversation is not left
       // poisoned in Processing — the next startTurn would otherwise throw

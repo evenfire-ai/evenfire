@@ -29,6 +29,11 @@ export interface SessionSearchArgs {
   since?: string
   /** Max results (post-clamp). Hard ceiling enforced by callers (50). */
   limit: number
+  /**
+   * Issue #1640 (R68) — verified Clerum linked user ID for external channel
+   * searches. Restricts FTS rows strictly to sessions with matching `linked_user_id`.
+   */
+  linkedUserId?: string
 }
 
 export interface SessionSearchResultItem {

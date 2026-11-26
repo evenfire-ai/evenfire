@@ -166,6 +166,7 @@ export type AgentEventType =
   | 'tool:approval_needed'
   | 'tool:approval_granted'
   | 'tool:approval_denied'
+  | 'tool:approval_revoked'
   | 'cron:created'
   | 'cron:triggered'
   | 'cron:deleted'

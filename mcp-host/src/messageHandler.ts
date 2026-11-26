@@ -9,8 +9,14 @@ import { MessageQueue, Task, TaskResponsePayload } from './queue'
 import type { TaskError } from './queue'
 import { ResultStore } from './resultStore'
 import type { IncomingMessage, MessageResponse } from './server'
+import type { ProviderIdentity } from './server/types'
 import { parseBackgroundPrefix, resolveCanonicalSessionKey } from './session'
 import type { SessionProcessor } from './session'
+import {
+  allowlistProviderIdentity,
+  isExternalChannelType,
+  workspaceOrTargetKeyForIdentity,
+} from './workflow/channelIdentity'
 
 export interface PendingTaskEntry {
   status: 'completed' | 'waiting_approval' | 'failed'
@@ -44,6 +50,11 @@ export interface PendingTaskEntry {
     channelId: string
     sender: string
   }
+  /** Issue #1640 (X11) — verified linked user ID & scoped provider identity for ALL-status polling checks. */
+  linkedUserId?: string
+  workspaceOrTargetKey?: string
+  providerChannelId?: string
+  providerIdentity?: ProviderIdentity
   approval?: {
     requestId: string
     userId: string
@@ -151,6 +162,26 @@ export class IncomingMessageHandler {
   private onApprovalConsumed: ((event: { data: unknown }) => void) | null = null
   private onComplete: ((event: { task?: Task }) => void) | null = null
   private onFail: ((event: { task?: Task }) => void) | null = null
+  private onCancel: ((event: { task?: Task }) => void) | null = null
+
+  private channelIdentityFields(): Pick<
+    PendingTaskEntry,
+    'linkedUserId' | 'workspaceOrTargetKey' | 'providerChannelId' | 'providerIdentity'
+  > {
+    const linkedUserId =
+      this.task.admittedLinkedUserId?.trim() ||
+      this.message.admittedLinkedUserId?.trim() ||
+      undefined
+    const providerIdentity = allowlistProviderIdentity(this.message.providerIdentity)
+    const workspaceOrTargetKey = workspaceOrTargetKeyForIdentity(providerIdentity)
+    const providerChannelId = providerIdentity?.providerChannelId
+    return {
+      ...(linkedUserId ? { linkedUserId } : {}),
+      ...(workspaceOrTargetKey ? { workspaceOrTargetKey } : {}),
+      ...(providerChannelId ? { providerChannelId } : {}),
+      ...(providerIdentity ? { providerIdentity } : {}),
+    }
+  }
 
   constructor(
     private readonly message: IncomingMessage,
@@ -252,6 +283,7 @@ export class IncomingMessageHandler {
           channelId: this.message.channelId,
           sender: this.message.sender,
         },
+        ...this.channelIdentityFields(),
       })
     }
 
@@ -270,6 +302,7 @@ export class IncomingMessageHandler {
             channelId: this.message.channelId,
             sender: this.message.sender,
           },
+          ...this.channelIdentityFields(),
           approval: {
             requestId: data.requestId as string,
             userId: data.userId as string,
@@ -281,11 +314,7 @@ export class IncomingMessageHandler {
       this.deps.agent.on('tool:approval_needed', onApproval)
 
       // Listener that clears the stored waiting_approval entry once the
-      // approval is granted or denied. Without this, GET /tasks/:id/result
-      // keeps returning the obsolete notification (with the now-consumed
-      // requestId) until either a *new* approval fires (overwriting the entry)
-      // or the task fully completes — which makes channel-reader's poll loop
-      // believe the same approval is still needed and re-prompt the user.
+      // approval is granted, denied, or revoked (`X11`, `R63`).
       const onApprovalConsumed = (event: { data: unknown }) => {
         const data = event.data as Record<string, unknown>
         if (data.taskId !== this.task.id) return
@@ -297,15 +326,18 @@ export class IncomingMessageHandler {
       }
       this.deps.agent.on('tool:approval_granted', onApprovalConsumed)
       this.deps.agent.on('tool:approval_denied', onApprovalConsumed)
+      this.deps.agent.on('tool:approval_revoked', onApprovalConsumed)
 
-      // Clean up listeners when task completes or fails
+      // Clean up listeners when task completes, fails, or is cancelled
       const cleanup = (event: { task?: { id: string; error?: TaskError } }) => {
         if (event.task?.id !== this.task.id) return
         this.deps.agent?.removeListener('tool:approval_needed', onApproval)
         this.deps.agent?.removeListener('tool:approval_granted', onApprovalConsumed)
         this.deps.agent?.removeListener('tool:approval_denied', onApprovalConsumed)
+        this.deps.agent?.removeListener('tool:approval_revoked', onApprovalConsumed)
         this.deps.messageQueue.off('task:completed', cleanup)
         this.deps.messageQueue.off('task:failed', onFinalFailure)
+        this.deps.messageQueue.off('task:cancelled', onCancelled)
       }
       // Delivery is handled by the overridden responseCallback above — this handler
       // only cleans up the event listeners so we don't leak them after the task ends.
@@ -313,8 +345,13 @@ export class IncomingMessageHandler {
         if (event.task?.id !== this.task.id) return
         cleanup(event)
       }
+      const onCancelled = (event: { task?: { id: string } }) => {
+        if (event.task?.id !== this.task.id) return
+        cleanup(event)
+      }
       this.deps.messageQueue.on('task:completed', cleanup)
       this.deps.messageQueue.on('task:failed', onFinalFailure)
+      this.deps.messageQueue.on('task:cancelled', onCancelled)
     }
 
     logger.info({ taskId: this.task.id }, 'Message queued asynchronously')
@@ -350,6 +387,35 @@ export class IncomingMessageHandler {
   }): MessageResponse {
     const { reason, priorTaskId, prior } = admission
     const priorStatus = prior.status
+
+    // Issue #1640 (R82): defense-in-depth — never replay a prior external-channel
+    // TaskRecord belonging to a different linkedUserId.
+    if (isExternalChannelType(this.message.channelType)) {
+      const currentLinkedUserId =
+        this.task.admittedLinkedUserId?.trim() || this.message.admittedLinkedUserId?.trim() || null
+      const priorLinkedUserId = prior.linkedUserId?.trim() || null
+      if (
+        (currentLinkedUserId !== null || priorLinkedUserId !== null) &&
+        currentLinkedUserId !== priorLinkedUserId
+      ) {
+        logger.warn(
+          { taskId: this.task.id, reason, priorTaskId, priorStatus },
+          'Refused cross-user duplicate replay on external channel'
+        )
+        return {
+          success: false,
+          status: 'completed',
+          error: {
+            code: 'approval_identity_mismatch',
+            message: 'Your channel account link changed. Please resend your message.',
+            retryable: false,
+            provider: 'unknown',
+          },
+          model: this.deps.getModel(),
+        }
+      }
+    }
+
     logger.warn(
       { taskId: this.task.id, reason, priorTaskId, priorStatus },
       'Duplicate delivery suppressed'
@@ -437,6 +503,7 @@ export class IncomingMessageHandler {
           channelId: this.message.channelId,
           sender: this.message.sender,
         },
+        ...this.channelIdentityFields(),
       })
       if (payload.error) {
         this.resolve({
@@ -472,6 +539,7 @@ export class IncomingMessageHandler {
           channelId: this.message.channelId,
           sender: this.message.sender,
         },
+        ...this.channelIdentityFields(),
       })
     }
   }
@@ -511,6 +579,7 @@ export class IncomingMessageHandler {
             channelId: this.message.channelId,
             sender: this.message.sender,
           },
+          ...this.channelIdentityFields(),
           approval: {
             requestId: data.requestId as string,
             userId: data.userId as string,
@@ -539,6 +608,7 @@ export class IncomingMessageHandler {
     if (this.deps.agent) {
       this.deps.agent.on('tool:approval_granted', this.onApprovalConsumed)
       this.deps.agent.on('tool:approval_denied', this.onApprovalConsumed)
+      this.deps.agent.on('tool:approval_revoked', this.onApprovalConsumed)
     }
 
     // Completion listener
@@ -564,8 +634,27 @@ export class IncomingMessageHandler {
       }
     }
 
+    // Cancellation listener (cleans up listeners on revoked/cancelled approval)
+    this.onCancel = (event: { task?: Task }) => {
+      if (event.task?.id !== this.task.id) return
+      this.dispose()
+      if (!this.resolved) {
+        this.resolved = true
+        this.resolve({
+          success: false,
+          error: {
+            code: 'TASK_CANCELLED',
+            message: 'Task cancelled',
+            retryable: false,
+            provider: 'unknown',
+          },
+        })
+      }
+    }
+
     this.deps.messageQueue.on('task:completed', this.onComplete)
     this.deps.messageQueue.on('task:failed', this.onFail)
+    this.deps.messageQueue.on('task:cancelled', this.onCancel)
   }
 
   private startTimeout(): void {
@@ -599,6 +688,7 @@ export class IncomingMessageHandler {
     if (this.onApprovalConsumed) {
       this.deps.agent?.removeListener('tool:approval_granted', this.onApprovalConsumed)
       this.deps.agent?.removeListener('tool:approval_denied', this.onApprovalConsumed)
+      this.deps.agent?.removeListener('tool:approval_revoked', this.onApprovalConsumed)
       this.onApprovalConsumed = null
     }
     if (this.onComplete) {
@@ -608,6 +698,10 @@ export class IncomingMessageHandler {
     if (this.onFail) {
       this.deps.messageQueue.off('task:failed', this.onFail)
       this.onFail = null
+    }
+    if (this.onCancel) {
+      this.deps.messageQueue.off('task:cancelled', this.onCancel)
+      this.onCancel = null
     }
   }
 }

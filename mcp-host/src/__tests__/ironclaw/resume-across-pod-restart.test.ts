@@ -209,6 +209,10 @@ describe('IronClaw invariant #3: resume across Pod restart', () => {
       channelType: 'telegram',
       channelId: 'chat-1',
     })
+    agent.setChannelCallerContextResolver(async () => ({
+      targetUserId: 'linked-alice',
+      conversationId: 'chat-1',
+    }))
     await seedRehydratedApproval({
       requestId: 'req-bound',
       taskId: 'task-bound',
@@ -217,6 +221,12 @@ describe('IronClaw invariant #3: resume across Pod restart', () => {
         sender: 'alice',
         channelType: 'telegram',
         channelId: 'chat-1',
+        linkedUserId: 'linked-alice',
+        providerIdentity: {
+          medium: 'telegram',
+          providerUserId: 'alice',
+          providerChannelId: 'chat-1',
+        },
       },
     })
 
@@ -247,6 +257,10 @@ describe('IronClaw invariant #3: resume across Pod restart', () => {
         channelType: 'telegram',
         channelId: 'chat-1',
       })
+      agent.setChannelCallerContextResolver(async () => ({
+        targetUserId: 'linked-alice',
+        conversationId: 'chat-1',
+      }))
       await seedRehydratedApproval({
         requestId: 'req-expiring',
         taskId: 'task-expiring',
@@ -255,6 +269,12 @@ describe('IronClaw invariant #3: resume across Pod restart', () => {
           sender: 'alice',
           channelType: 'telegram',
           channelId: 'chat-1',
+          linkedUserId: 'linked-alice',
+          providerIdentity: {
+            medium: 'telegram',
+            providerUserId: 'alice',
+            providerChannelId: 'chat-1',
+          },
         },
         expiresAt: now.getTime() + 1_000,
       })
@@ -270,6 +290,31 @@ describe('IronClaw invariant #3: resume across Pod restart', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('reaps legacy pre-migration-020 external channel approvals missing linkedUserId or providerIdentity on boot', async () => {
+    const sessionKey = serializeSessionKey({
+      userId: 'alice',
+      channelType: 'telegram',
+      channelId: 'chat-legacy',
+    })
+    await seedRehydratedApproval({
+      requestId: 'req-legacy',
+      taskId: 'task-legacy',
+      sessionKey,
+      sourceMessage: {
+        sender: 'alice',
+        channelType: 'telegram',
+        channelId: 'chat-legacy',
+      },
+    })
+
+    await expect(
+      agent.handleApproval('alice', 'req-legacy', false, 'telegram', 'chat-legacy')
+    ).resolves.toMatchObject({
+      success: false,
+      error: 'No pending approval for request req-legacy',
+    })
   })
 
   it.todo(

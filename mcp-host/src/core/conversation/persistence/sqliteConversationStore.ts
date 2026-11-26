@@ -736,7 +736,7 @@ export class SqliteConversationStore implements ConversationStore {
    * the replay anchor, and a torn start (message without `active_task_id`, or
    * vice versa) is impossible by construction.
    */
-  async persistTurnStart(conv: Conversation, userInput: string): Promise<void> {
+  async persistTurnStart(conv: Conversation, userInput: string, autoTitle?: string): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (!sessionKey) return
     this.reconcilePinning(sessionKey, conv)
@@ -767,10 +767,11 @@ export class SqliteConversationStore implements ConversationStore {
         // D.1 — mirror the in-RAM activeTaskId (set by startTurn) to the column.
         activeTaskId: conv.activeTaskId ?? null,
         activeTraceContext: conv.traceContext ? JSON.stringify(conv.traceContext) : null,
-        // Auto-title (spec 15): materialize only on turn 1, gated on the durable
-        // `turnNumber` (not `turns.length`, which is RAM-fragile). The dispatcher
-        // runs a COALESCE write so a retried turn 1 is idempotent.
-        title: turnNumber === 1 ? (conv.title ?? undefined) : undefined,
+        // Auto-title (spec 15 / #1640 R32): materialize on turn 1 OR on the
+        // first subsequent non-empty user text turn when `title` was skipped
+        // (e.g. attachment-only turn 1). The dispatcher runs COALESCE so an
+        // already-persisted title or rename is never overwritten.
+        title: autoTitle ?? (turnNumber === 1 ? (conv.title ?? undefined) : undefined),
       },
       sessionKey
     )

@@ -10,6 +10,7 @@
  */
 import type { Attachment, TraceContextV1 } from '../core/types'
 import type { TaskError } from '../queue/types'
+import type { ProviderIdentity } from '../server/types'
 
 export type TaskStatus =
   | 'pending'
@@ -27,6 +28,8 @@ export type CanonicalReason =
   | 'approval_timeout' // reserved — see spec §3.4
   | 'natural'
   | 'denied_by_user'
+  | 'identity_revoked'
+  | 'identity_changed'
   | `error:${string}` // e.g. 'error:LLM_INSUFFICIENT_QUOTA'
 
 export const TERMINAL_STATES: ReadonlySet<TaskStatus> = new Set([
@@ -72,6 +75,11 @@ export interface TaskRecord {
   submittedBy: string | null
   submittedChannelType: string | null
   submittedChannelId: string | null
+  /** Issue #1640 (X11) — verified linked user ID & scoped provider identity for external channels. */
+  linkedUserId?: string | null
+  workspaceOrTargetKey?: string | null
+  providerChannelId?: string | null
+  providerIdentity?: ProviderIdentity | null
   /**
    * Ids of the incoming attachments admitted with this task (#666). A replayed
    * delivery answers with them, exactly like the first response did.

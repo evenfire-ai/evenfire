@@ -388,9 +388,14 @@ export type ActivityStreamHandler = (onEvent: (event: HostActivityEvent) => void
 export type ActivityStreamCheckpointHandler = (
   binding: AuthorityBindingV2
 ) => Promise<'allowed' | 'denied' | 'unavailable'>
-export type ApprovalHandler = (
-  decision: ApprovalDecision
-) => Promise<{ success: boolean; error?: string; code?: 'denial_not_saved' }>
+export type ApprovalHandler = (decision: ApprovalDecision) => Promise<{
+  success: boolean
+  status?: number
+  cancelled?: boolean
+  retryable?: boolean
+  error?: string
+  code?: 'denial_not_saved'
+}>
 export interface ProviderWorkflowApprovalDecision {
   approvalRequestId: string
   decision: 'approve' | 'deny'

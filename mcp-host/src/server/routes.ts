@@ -702,7 +702,9 @@ export async function handleMessageRoute(
     // async branch can return a Promise; without this await `json()` would
     // `JSON.stringify` a Promise to `{}` and drop `taskId`.
     const response = await handlers.messageHandler(message, isAsync ? { async: true } : undefined)
-    json(res, 200, response)
+    const statusCode =
+      !response.success && response.error?.code === 'CHANNEL_IDENTITY_CHECK_UNAVAILABLE' ? 503 : 200
+    json(res, statusCode, response)
   } catch (error) {
     logger.error({ err: error }, '[Server] Error processing message')
     if (isSessionOwnershipError(error)) {
@@ -1101,7 +1103,8 @@ export async function handleApprovalRoute(
       '[Server] from for request'
     )
     const result = await handlers.approvalHandler(decision)
-    json(res, 200, result)
+    const { status, ...body } = result
+    json(res, typeof status === 'number' ? status : 200, body)
   } catch (error) {
     logger.error(
       { detail: approved ? 'approval' : 'denial', err: error },

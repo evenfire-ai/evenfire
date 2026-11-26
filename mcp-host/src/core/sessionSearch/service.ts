@@ -127,6 +127,7 @@ export class SessionSearchService {
         channelType: args.channelType,
         since: args.since,
         limit: args.limit,
+        ...(args.linkedUserId !== undefined ? { linkedUserId: args.linkedUserId } : {}),
       })
       const results: SessionSearchResultItem[] = rows.map(row => ({
         snippet: row.snippet,

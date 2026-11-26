@@ -221,10 +221,15 @@ export type ResumeSourceMessage = Pick<
   | 'fileReferenceResolutions'
   | 'locationReferenceResolutions'
   | 'authorityV2'
+  | 'channelAttachmentIds'
 > & {
   /** Only the team scope survives; the channel's raw payload is not persisted. */
   metadata?: { teamId: string }
   attachments?: ResumeFileAttachment[]
+  /** Issue #1640 (X11) — originating verified linked user ID for warm/cold approval verification. */
+  linkedUserId?: string
+  /** Issue #1640 (X11) — minimal allowlisted provider identity for live re-verification on resume. */
+  providerIdentity?: HostIncomingMessage['providerIdentity']
 }
 
 // ─── Completion Types ───────────────────────────────────────
@@ -838,6 +843,7 @@ export type AgentEventType =
   | 'tool:approval_needed'
   | 'tool:approval_granted'
   | 'tool:approval_denied'
+  | 'tool:approval_revoked'
   | 'loop:iteration'
   | 'loop:completed'
   | 'llm:completed'

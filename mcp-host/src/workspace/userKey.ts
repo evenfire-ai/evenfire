@@ -48,6 +48,22 @@ export function deriveUserKey(
 }
 
 /**
+ * Derive a linked-user-scoped workspace key (`X10`, `R73`):
+ * `sha256("linked:" + linkedUserId).slice(0, 16)`.
+ * Ensures unlink->relink on an external channel isolates `daily/` compaction
+ * logs, `MEMORY.md`, and `GfsDownloadStore` per verified Clerum `linkedUserId`
+ * rather than raw provider `(channelType, sender)`.
+ */
+export function deriveLinkedUserKey(linkedUserId: string | null | undefined): string {
+  const normalized = (linkedUserId ?? '').trim()
+  if (normalized.length === 0) return SYSTEM_USER_KEY
+  return createHash('sha256')
+    .update(`linked:${normalized}`, 'utf8')
+    .digest('hex')
+    .slice(0, KEY_HEX_LENGTH)
+}
+
+/**
  * Derive the user key from a task's source message. Cron/system/internal tasks
  * carry no `sourceMessage` → {@link SYSTEM_USER_KEY}.
  */

@@ -43,6 +43,7 @@ import { BasicSafety } from '../core/safety/safety'
 import type { SessionSearchService } from '../core/sessionSearch'
 import type { SpilloverStorage } from '../core/spillover'
 import { createTokenCounter } from '../core/tokenizer'
+import type { WorkflowCallerContext } from '../core/tools/workflowShared'
 import type {
   Attachment,
   Conversation,
@@ -50,6 +51,7 @@ import type {
   PendingApproval,
 } from '../core/types'
 import type { ReapedSession } from '../db/worker/protocol'
+import type { ChannelAttachmentStore } from '../internalTools/channelAttachmentStore'
 import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import { isTerminal } from '../lifecycle/types'
@@ -59,15 +61,30 @@ import type { PromptCache } from '../llm/promptCache'
 import { resolveContextWindow } from '../llm/registryCore'
 import { logger } from '../logger'
 import { McpManager } from '../mcp'
+import type { PendingTaskEntry } from '../messageHandler'
 import { ensureReporter } from '../progress/sseProgressReporter'
 import { MessageQueue, Task } from '../queue'
 import type { TaskError } from '../queue/types'
+import type { ResultStore } from '../resultStore'
 import type { RuntimeActionCheckpoint } from '../runtime/actionAuthority'
+import type { IncomingMessage, ProviderIdentity } from '../server/types'
 import { SessionProcessor, resolveCanonicalSessionKey } from '../session'
 import { parseSessionKey } from '../session/types'
 import { ApprovalPromptHistoryClient } from '../usage/approvalPromptHistoryClient.js'
 import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
-import { resolveCallerRootBinding } from '../workspace/callerRootBinding'
+import {
+  type ChannelReconcileFilter,
+  allowlistProviderIdentity,
+  classifyAuthorizationFailureDetailed,
+  isExternalChannelType,
+  matchesChannelReconcileTarget,
+  workspaceOrTargetKeyForIdentity,
+} from '../workflow/channelIdentity'
+import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
+import {
+  resolveCallerRootBinding,
+  resolveLinkedUserCallerRootBinding,
+} from '../workspace/callerRootBinding'
 import type { ScopedWorkspaceProvider } from '../workspace/scopedWorkspace'
 import { APPROVAL_NOTIFICATION_PARAMETER_LIMIT } from './approvalNotificationLimit'
 import { CronScheduler } from './cronScheduler'
@@ -170,6 +187,19 @@ type ApprovalDecisionBinding = {
   channelType?: string
   channelId?: string
   sessionKey?: string
+  linkedUserId?: string
+  workspaceOrTargetKey?: string
+  providerChannelId?: string
+  providerIdentity?: ProviderIdentity
+}
+
+export interface ApprovalDecisionResult {
+  success: boolean
+  error?: string
+  status?: number
+  cancelled?: boolean
+  retryable?: boolean
+  code?: 'denial_not_saved'
 }
 
 /** Server-validated (provider, model) pair that a visual send is pinned to. */
@@ -272,6 +302,18 @@ export class AgentStateMachine extends EventEmitter {
   private workspaceProvider: ScopedWorkspaceProvider | undefined
   private gfsWorkspaceProvider: ScopedWorkspaceProvider | undefined
   private gfsDownloadStore: GfsDownloadStore | undefined
+  // Issue #1640 (X3/X10/X11) — Host-owned channel attachment store, live
+  // caller-context resolver, pending-task result cache for identity purge, and
+  // per-requestId approval decision serialization guard.
+  private channelAttachmentStore: ChannelAttachmentStore | undefined
+  private pendingTaskResults: ResultStore<PendingTaskEntry> | undefined
+  private resolveChannelCallerContext:
+    | ((
+        message: IncomingMessage,
+        traceContext?: Task['traceContext']
+      ) => Promise<WorkflowCallerContext | null>)
+    | undefined
+  private inFlightApprovalDecisions = new Set<string>()
 
   // T1.5 — Tool-result spillover store. Undefined when the feature flag is
   // off; populated from main.ts and propagated into each TaskExecutor.
@@ -479,6 +521,25 @@ export class AgentStateMachine extends EventEmitter {
 
   setGfsDownloadStore(store: GfsDownloadStore | undefined): void {
     this.gfsDownloadStore = store
+  }
+
+  setChannelAttachmentStore(store: ChannelAttachmentStore | undefined): void {
+    this.channelAttachmentStore = store
+  }
+
+  setPendingTaskResults(store: ResultStore<PendingTaskEntry> | undefined): void {
+    this.pendingTaskResults = store
+  }
+
+  setChannelCallerContextResolver(
+    resolver:
+      | ((
+          message: IncomingMessage,
+          traceContext?: Task['traceContext']
+        ) => Promise<WorkflowCallerContext | null>)
+      | undefined
+  ): void {
+    this.resolveChannelCallerContext = resolver
   }
 
   /**
@@ -747,14 +808,31 @@ export class AgentStateMachine extends EventEmitter {
 
   private buildApprovalBinding(
     sourceMessage: Task['sourceMessage'] | undefined,
-    sessionKey?: string
+    sessionKey?: string,
+    linkedUserId?: string
   ): ApprovalDecisionBinding {
     const parsed = sessionKey ? parseSessionKey(sessionKey) : null
+    const allowlistedIdentity = allowlistProviderIdentity(sourceMessage?.providerIdentity)
+    const rawPersistedLinkedUserId = (sourceMessage as { linkedUserId?: unknown } | undefined)
+      ?.linkedUserId
+    const resolvedLinkedUserId =
+      linkedUserId?.trim() ||
+      (typeof rawPersistedLinkedUserId === 'string' ? rawPersistedLinkedUserId.trim() : '') ||
+      sourceMessage?.admittedLinkedUserId?.trim() ||
+      undefined
     return {
       userId: sourceMessage?.sender ?? parsed?.userId,
       channelType: sourceMessage?.channelType ?? parsed?.channelType,
       channelId: sourceMessage?.channelId ?? parsed?.channelId,
       sessionKey,
+      ...(resolvedLinkedUserId ? { linkedUserId: resolvedLinkedUserId } : {}),
+      ...(allowlistedIdentity
+        ? {
+            workspaceOrTargetKey: workspaceOrTargetKeyForIdentity(allowlistedIdentity),
+            providerChannelId: allowlistedIdentity.providerChannelId,
+            providerIdentity: allowlistedIdentity,
+          }
+        : {}),
     }
   }
 
@@ -853,16 +931,61 @@ export class AgentStateMachine extends EventEmitter {
 
     // PHASE 2 — reconstruct live executors before SessionProcessor accepts work.
     const rehydrated = await this.coldStartLoader.loadPendingApprovals(now)
+    let rehydratedCount = 0
     for (const entry of rehydrated) {
       if (!entry.session_key) throw new Error('rehydrated approval is missing its session key')
       // The persisted message has no inline file bytes (ResumeSourceMessage).
       // Task carries the wider incoming type; the readers of file attachments
       // check `dataBase64` at runtime (attachmentRead.ts) instead of assuming it.
-      const sourceMessage = entry.source_message as Task['sourceMessage']
+      const sourceMessage = entry.source_message as
+        | (Task['sourceMessage'] & { linkedUserId?: string })
+        | undefined
+      const parsedKey = parseSessionKey(entry.session_key)
+      const effectiveChannelType = sourceMessage?.channelType ?? parsedKey?.channelType
+      const persistedLinkedUserId =
+        typeof sourceMessage?.linkedUserId === 'string' &&
+        sourceMessage.linkedUserId.trim().length > 0
+          ? sourceMessage.linkedUserId.trim()
+          : undefined
+      const persistedIdentity = allowlistProviderIdentity(sourceMessage?.providerIdentity)
+
+      // Issue #1640 (X9/R86): legacy pre-migration-020 external channel approvals
+      // lack `linkedUserId` or `providerIdentity` and cannot be live-verified on
+      // approve/deny. Fail closed on boot by atomically reaping the session and
+      // pending_approvals row, leaving Desktop `rpc` approvals untouched.
+      if (isExternalChannelType(effectiveChannelType)) {
+        if (!persistedLinkedUserId || !persistedIdentity) {
+          const store = this.conversationManager.getStore()
+          if (store.endObsoleteApprovalSession) {
+            await store.endObsoleteApprovalSession({
+              sessionKey: entry.session_key,
+              requestId: entry.request_id,
+              endReason: 'legacy_approval_reaped',
+            })
+          } else {
+            await this.conversationManager.clearPendingApproval(entry.session_key)
+          }
+          this.promptCache?.drop(entry.session_key)
+          logger.warn(
+            {
+              requestId: entry.request_id,
+              sessionKey: entry.session_key,
+              channelType: effectiveChannelType,
+            },
+            'Reaped legacy external-channel pending approval missing linkedUserId/providerIdentity on boot'
+          )
+          continue
+        }
+      }
+
       const task: Task = {
         id: entry.task_id,
         source: 'channel',
-        sourceMessage,
+        sourceMessage:
+          sourceMessage && persistedLinkedUserId
+            ? { ...sourceMessage, admittedLinkedUserId: persistedLinkedUserId }
+            : sourceMessage,
+        ...(persistedLinkedUserId ? { admittedLinkedUserId: persistedLinkedUserId } : {}),
         traceContext: entry.approval.traceContext ?? null,
         priority: 'normal',
         status: 'waiting_approval',
@@ -877,11 +1000,16 @@ export class AgentStateMachine extends EventEmitter {
         registeredAt: new Date(now),
         expiresAt: entry.expiresAt,
         timerId: this.makeApprovalTimeout(entry.request_id, entry.expiresAt, now),
-        binding: this.buildApprovalBinding(sourceMessage, entry.session_key),
+        binding: this.buildApprovalBinding(sourceMessage, entry.session_key, persistedLinkedUserId),
       })
+      // Issue #1640 (X9/R52): mark the session suspended on cold boot so new
+      // messages for the same session queue behind the rehydrated approval
+      // instead of racing it or triggering concurrent turns.
+      this.sessionProcessor?.markSuspended(entry.session_key)
+      rehydratedCount += 1
     }
-    if (rehydrated.length > 0)
-      logger.info({ count: rehydrated.length }, 'Pending approval executors rehydrated')
+    if (rehydratedCount > 0)
+      logger.info({ count: rehydratedCount }, 'Pending approval executors rehydrated')
   }
 
   /**
@@ -1004,7 +1132,9 @@ export class AgentStateMachine extends EventEmitter {
           compactContextWindow,
           appConfig.contextMaxTokens
         ).contextWindowTokens,
-        this.workspaceProvider?.forSessionKey(opts.sessionKey),
+        conv.linked_user_id
+          ? this.workspaceProvider?.forLinkedUser(conv.linked_user_id)
+          : this.workspaceProvider?.forSessionKey(opts.sessionKey),
         compactPort,
         tokenCounter,
         {
@@ -1094,12 +1224,18 @@ export class AgentStateMachine extends EventEmitter {
       this.config.approvalTimeout > 0 ? now + this.config.approvalTimeout : undefined
     const timerId = this.makeApprovalTimeout(requestId, expiresAt, now)
 
+    const sessionKey = resolveCanonicalSessionKey(task.sourceMessage)
+    const linkedUserId =
+      this.activeExecutors.get(taskId)?.linkedUserId ??
+      task.admittedLinkedUserId ??
+      task.sourceMessage?.admittedLinkedUserId
+
     this.approvalMap.set(requestId, {
       taskId,
       timerId,
       registeredAt: new Date(now),
       expiresAt,
-      binding: this.buildApprovalBinding(task.sourceMessage),
+      binding: this.buildApprovalBinding(task.sourceMessage, sessionKey, linkedUserId),
     })
     this.enqueueTaskTrace(
       task,
@@ -1190,6 +1326,290 @@ export class AgentStateMachine extends EventEmitter {
   }
 
   /**
+   * Issue #1640 (X11, R39/R47/R48/R54/R63/R64): live-verify external channel
+   * approval identity against the originating `linkedUserId` before consuming
+   * or resuming a suspended approval.
+   */
+  private async verifyExternalApprovalIdentity(
+    entry: {
+      taskId: string
+      binding: ApprovalDecisionBinding
+    },
+    executor: TaskExecutor
+  ): Promise<
+    | { outcome: 'skip' }
+    | { outcome: 'matched'; liveContext: WorkflowCallerContext }
+    | { outcome: 'transient_error' }
+    | {
+        outcome: 'revoked' | 'mismatch'
+        error: 'approval_identity_revoked' | 'approval_identity_mismatch'
+        endReason: 'identity_revoked' | 'identity_changed'
+      }
+  > {
+    if (!isExternalChannelType(entry.binding.channelType)) {
+      return { outcome: 'skip' }
+    }
+    const expectedLinkedUserId =
+      entry.binding.linkedUserId ??
+      executor.linkedUserId ??
+      executor.sourceTask.admittedLinkedUserId ??
+      executor.sourceTask.sourceMessage?.admittedLinkedUserId
+    const providerIdentity =
+      entry.binding.providerIdentity ??
+      allowlistProviderIdentity(executor.sourceTask.sourceMessage?.providerIdentity)
+
+    // Legacy unit tests without providerIdentity or linkedUserId keep their
+    // existing non-identity-bound approval path. Whenever either field exists
+    // (all real external channel traffic and rehydrated migration-020 rows),
+    // both are required and live verification is mandatory.
+    if (!expectedLinkedUserId && !providerIdentity) {
+      return { outcome: 'skip' }
+    }
+    if (!expectedLinkedUserId || !providerIdentity) {
+      return {
+        outcome: 'revoked',
+        error: 'approval_identity_revoked',
+        endReason: 'identity_revoked',
+      }
+    }
+
+    const src = executor.sourceTask.sourceMessage
+    const verifyMessage: IncomingMessage = {
+      content: '',
+      channelType: providerIdentity.medium,
+      channelId: src?.channelId ?? providerIdentity.providerChannelId,
+      sender: src?.sender ?? providerIdentity.providerUserId,
+      timestamp: new Date().toISOString(),
+      messageId: src?.messageId ?? `approval-verify-${entry.taskId}`,
+      hostRef: src?.hostRef ?? providerIdentity.providerTarget?.hostRef ?? '',
+      ...(src?.threadId !== undefined ? { threadId: src.threadId } : {}),
+      providerIdentity,
+    }
+    const resolver =
+      this.resolveChannelCallerContext ??
+      ((message: IncomingMessage, traceContext?: Task['traceContext']) =>
+        resolveProviderWorkflowCallerContext(message, key => process.env[key], traceContext))
+
+    try {
+      const liveContext = await resolver(verifyMessage, executor.sourceTask.traceContext)
+      const liveLinkedUserId = liveContext?.targetUserId?.trim() ?? ''
+      if (!liveLinkedUserId) {
+        return {
+          outcome: 'revoked',
+          error: 'approval_identity_revoked',
+          endReason: 'identity_revoked',
+        }
+      }
+      if (liveLinkedUserId !== expectedLinkedUserId) {
+        return {
+          outcome: 'mismatch',
+          error: 'approval_identity_mismatch',
+          endReason: 'identity_changed',
+        }
+      }
+      return { outcome: 'matched', liveContext: liveContext! }
+    } catch (err) {
+      const kind = classifyAuthorizationFailureDetailed(err)
+      if (kind === 'account_unresolved' || kind === 'channel_access_denied') {
+        return {
+          outcome: 'revoked',
+          error: 'approval_identity_revoked',
+          endReason: 'identity_revoked',
+        }
+      }
+      logger.warn(
+        {
+          taskId: entry.taskId,
+          channelType: entry.binding.channelType,
+          err,
+        },
+        'Transient error verifying external-channel approval identity'
+      )
+      return { outcome: 'transient_error' }
+    }
+  }
+
+  /**
+   * Issue #1640 (X11, R48/R54/R63/R75/R85): atomically retire an obsolete
+   * external-channel pending approval without disclosing approval metadata or
+   * emitting approved/denied trace events. Caller MUST have already cleared
+   * `entry.timerId` and deleted `requestId` from `this.approvalMap`.
+   */
+  private async cancelObsoleteApproval(
+    requestId: string,
+    entry: {
+      taskId: string
+      binding: ApprovalDecisionBinding
+    },
+    executor: TaskExecutor,
+    endReason: 'identity_revoked' | 'identity_changed'
+  ): Promise<void> {
+    this.activeExecutors.delete(entry.taskId)
+    const sessionKey =
+      entry.binding.sessionKey ?? resolveCanonicalSessionKey(executor.sourceTask.sourceMessage)
+    const store = this.conversationManager.getStore()
+    if (store.endObsoleteApprovalSession) {
+      await store.endObsoleteApprovalSession({
+        sessionKey,
+        requestId,
+        endReason,
+      })
+    } else {
+      await this.conversationManager.clearPendingApproval(sessionKey)
+    }
+    this.promptCache?.drop(sessionKey)
+    this.pendingTaskResults?.delete(entry.taskId)
+    this.emitEvent('tool:approval_revoked', {
+      taskId: entry.taskId,
+      requestId,
+    })
+    this.lifecycle.transition(entry.taskId, 'cancelled', endReason)
+    this.lifecycle.purgeRecord(entry.taskId)
+    this.queue.purgeTask(entry.taskId)
+    executor.abortForIdentity(endReason)
+    this.releaseSessionForTask(executor.sourceTask)
+  }
+
+  /**
+   * Issue #1640 (X11, R74/R80/R82/R85/R88): scoped reconciliation when a
+   * provider identity is unlinked (404 -> workspace/target-wide), loses access
+   * to one channel (403 -> channel-scoped), or relinks to a new linkedUserId.
+   *
+   * Strict non-dispatching order:
+   * 1. Purge matching queued tasks in SessionProcessor and non-active TaskLifecycle
+   *    records BEFORE unwinding active work (so releasing an active session
+   *    cannot dispatch a stale User A queued task).
+   * 2. Purge matching entries in `pendingTaskResults` (all statuses).
+   * 3. Cancel matching `approvalMap` entries via CAS + `cancelObsoleteApproval`.
+   * 4. Abort matching in-flight `processing` executors, await bounded unwind,
+   *    and commit `endObsoleteApprovalSession` AFTER unwind settles.
+   */
+  async reconcileChannelIdentity(filter: ChannelReconcileFilter): Promise<void> {
+    const endReason: 'identity_revoked' | 'identity_changed' =
+      filter.liveLinkedUserId === null ? 'identity_revoked' : 'identity_changed'
+
+    // Step 1: Purge matching queued tasks from SessionProcessor first (no dispatch).
+    if (this.sessionProcessor?.purgeMatchingTasks) {
+      const purgedTasks = this.sessionProcessor.purgeMatchingTasks(task => {
+        const msg = task.sourceMessage
+        if (!msg) return false
+        const identity = allowlistProviderIdentity(msg.providerIdentity)
+        return matchesChannelReconcileTarget(
+          {
+            medium: identity?.medium ?? msg.channelType,
+            providerUserId: identity?.providerUserId ?? msg.sender,
+            linkedUserId: task.admittedLinkedUserId ?? msg.admittedLinkedUserId,
+            workspaceOrTargetKey: workspaceOrTargetKeyForIdentity(identity),
+            providerChannelId: identity?.providerChannelId ?? msg.channelId,
+          },
+          filter
+        )
+      })
+      for (const task of purgedTasks) {
+        this.lifecycle.transition(task.id, 'cancelled', endReason)
+        this.lifecycle.purgeRecord(task.id)
+        this.queue.purgeTask(task.id)
+        this.pendingTaskResults?.delete(task.id)
+      }
+    }
+
+    // Purge matching pending/terminal lifecycle records (active processing /
+    // waiting_approval records are unwound in steps 3 and 4).
+    const purgedLifecycle = this.lifecycle.purgeMatchingRecords(
+      record =>
+        record.status !== 'processing' &&
+        record.status !== 'waiting_approval' &&
+        matchesChannelReconcileTarget(
+          {
+            medium: record.providerIdentity?.medium ?? record.submittedChannelType,
+            providerUserId: record.providerIdentity?.providerUserId ?? record.submittedBy,
+            linkedUserId: record.linkedUserId,
+            workspaceOrTargetKey: record.workspaceOrTargetKey,
+            providerChannelId: record.providerChannelId ?? record.submittedChannelId,
+          },
+          filter
+        ),
+      endReason
+    )
+    for (const record of purgedLifecycle) {
+      this.queue.purgeTask(record.id)
+      this.pendingTaskResults?.delete(record.id)
+    }
+
+    // Step 2: Purge matching entries in pendingTaskResults across all statuses.
+    if (this.pendingTaskResults) {
+      for (const [taskId, entry] of this.pendingTaskResults.entries()) {
+        if (
+          matchesChannelReconcileTarget(
+            {
+              medium: entry.providerIdentity?.medium ?? entry.source.channelType,
+              providerUserId: entry.providerIdentity?.providerUserId ?? entry.source.sender,
+              linkedUserId: entry.linkedUserId,
+              workspaceOrTargetKey: entry.workspaceOrTargetKey,
+              providerChannelId: entry.providerChannelId ?? entry.source.channelId,
+            },
+            filter
+          )
+        ) {
+          this.pendingTaskResults.delete(taskId)
+        }
+      }
+    }
+
+    // Step 3: Cancel matching waiting approvals via CAS.
+    for (const [requestId, entry] of Array.from(this.approvalMap.entries())) {
+      if (
+        !matchesChannelReconcileTarget(
+          {
+            medium: entry.binding.providerIdentity?.medium ?? entry.binding.channelType,
+            providerUserId: entry.binding.providerIdentity?.providerUserId ?? entry.binding.userId,
+            linkedUserId: entry.binding.linkedUserId,
+            workspaceOrTargetKey: entry.binding.workspaceOrTargetKey,
+            providerChannelId: entry.binding.providerChannelId ?? entry.binding.channelId,
+          },
+          filter
+        )
+      ) {
+        continue
+      }
+      if (this.approvalMap.get(requestId) !== entry) continue
+      const executor = this.activeExecutors.get(entry.taskId)
+      if (!executor || executor.executorState !== 'waiting_approval') continue
+      if (entry.timerId) clearTimeout(entry.timerId)
+      this.approvalMap.delete(requestId)
+      await this.cancelObsoleteApproval(requestId, entry, executor, endReason)
+    }
+
+    // Step 4: Abort matching in-flight processing executors, await unwind,
+    // and only then commit `endObsoleteApprovalSession`.
+    for (const [taskId, executor] of Array.from(this.activeExecutors.entries())) {
+      if (executor.executorState !== 'processing') continue
+      if (!matchesChannelReconcileTarget(executor.identityScope, filter)) continue
+      const sessionKey =
+        executor.sessionKey ?? resolveCanonicalSessionKey(executor.sourceTask.sourceMessage)
+      executor.abortForIdentity(endReason)
+      this.lifecycle.transition(taskId, 'cancelled', endReason)
+      await Promise.race([
+        executor.waitForCompletion(),
+        new Promise<void>(resolve => setTimeout(resolve, 5_000)),
+      ])
+      this.activeExecutors.delete(taskId)
+      this.pendingTaskResults?.delete(taskId)
+      this.lifecycle.purgeRecord(taskId)
+      this.queue.purgeTask(taskId)
+      this.promptCache?.drop(sessionKey)
+      this.releaseSessionForTask(executor.sourceTask)
+      const store = this.conversationManager.getStore()
+      if (store.endObsoleteApprovalSession) {
+        await store.endObsoleteApprovalSession({
+          sessionKey,
+          endReason,
+        })
+      }
+    }
+  }
+
+  /**
    * Phase 6: Handle an approval decision.
    * Looks up by requestId -> approvalMap -> activeExecutors.
    */
@@ -1200,7 +1620,10 @@ export class AgentStateMachine extends EventEmitter {
     channelType?: string,
     channelId?: string,
     shellAction?: ShellAction
-  ): Promise<{ success: boolean; error?: string }> {
+  ): Promise<ApprovalDecisionResult> {
+    if (this.inFlightApprovalDecisions.has(requestId)) {
+      return { success: false, status: 409, error: 'approval_decision_in_flight' }
+    }
     const entry = this.approvalMap.get(requestId)
     if (!entry) {
       return { success: false, error: `No pending approval for request ${requestId}` }
@@ -1225,9 +1648,54 @@ export class AgentStateMachine extends EventEmitter {
       return { success: false, error: bindingError }
     }
 
-    // Clear timeout
-    if (entry.timerId) clearTimeout(entry.timerId)
-    this.approvalMap.delete(requestId)
+    this.inFlightApprovalDecisions.add(requestId)
+    let verification: Awaited<ReturnType<AgentStateMachine['verifyExternalApprovalIdentity']>>
+    try {
+      verification = await this.verifyExternalApprovalIdentity(entry, executor)
+      if (verification.outcome === 'transient_error') {
+        return {
+          success: false,
+          status: 503,
+          retryable: true,
+          error: 'approval_identity_check_unavailable',
+        }
+      }
+
+      // Synchronous post-await CAS (`R75`): confirm the exact entry & executor
+      // are still waiting before taking ownership of the decision.
+      if (
+        this.approvalMap.get(requestId) !== entry ||
+        this.activeExecutors.get(entry.taskId) !== executor ||
+        executor.executorState !== 'waiting_approval'
+      ) {
+        return { success: false, status: 409, error: 'approval_no_longer_pending' }
+      }
+      if (entry.expiresAt !== undefined && entry.expiresAt <= Date.now()) {
+        this.handleApprovalTimeout(requestId)
+        return { success: false, error: 'Approval request has expired' }
+      }
+
+      // Clear timeout and consume approvalMap entry synchronously before any
+      // further awaits so concurrent approve/deny/timeout/reconcile races lose CAS.
+      if (entry.timerId) clearTimeout(entry.timerId)
+      this.approvalMap.delete(requestId)
+
+      if (verification.outcome === 'revoked' || verification.outcome === 'mismatch') {
+        await this.cancelObsoleteApproval(requestId, entry, executor, verification.endReason)
+        return {
+          success: false,
+          status: 403,
+          cancelled: true,
+          error: verification.error,
+        }
+      }
+
+      if (verification.outcome === 'matched') {
+        executor.resetCachedIdentityForResume(verification.liveContext)
+      }
+    } finally {
+      this.inFlightApprovalDecisions.delete(requestId)
+    }
 
     // Emit approval granted event via emitEvent so it reaches BOTH the Node
     // EventEmitter (where messageHandler.onApprovalConsumed subscribes to
@@ -1259,7 +1727,8 @@ export class AgentStateMachine extends EventEmitter {
     })
 
     // Resume execution (fire and forget).
-    // Session release happens in onComplete/onFail callbacks.
+    // Session release happens in onComplete/onFail callbacks and in the `.finally`
+    // safety net if resume unwinds after an identity abort (`R85`).
     // The effective mode is the live answer-time value, not the mode that
     // opened the card: a ceiling, switch or approver-policy change made while
     // the card waited applies. rpc is the desktop surface; every other channel
@@ -1282,6 +1751,15 @@ export class AgentStateMachine extends EventEmitter {
       .catch(err => {
         logger.error({ err: err }, `Resume after approval failed:`)
       })
+      .finally(() => {
+        if (
+          executor.executorState !== 'waiting_approval' &&
+          this.activeExecutors.get(entry.taskId) === executor
+        ) {
+          this.activeExecutors.delete(entry.taskId)
+          this.releaseSessionForTask(executor.sourceTask)
+        }
+      })
 
     return { success: true }
   }
@@ -1295,7 +1773,10 @@ export class AgentStateMachine extends EventEmitter {
     requestId: string,
     channelType?: string,
     channelId?: string
-  ): Promise<{ success: boolean; error?: string; code?: 'denial_not_saved' }> {
+  ): Promise<ApprovalDecisionResult> {
+    if (this.inFlightApprovalDecisions.has(requestId)) {
+      return { success: false, status: 409, error: 'approval_decision_in_flight' }
+    }
     const entry = this.approvalMap.get(requestId)
     if (!entry) {
       return { success: false, error: `No pending approval for request ${requestId}` }
@@ -1320,9 +1801,51 @@ export class AgentStateMachine extends EventEmitter {
       return { success: false, error: bindingError }
     }
 
-    // Clear timeout
-    if (entry.timerId) clearTimeout(entry.timerId)
-    this.approvalMap.delete(requestId)
+    this.inFlightApprovalDecisions.add(requestId)
+    try {
+      const verification = await this.verifyExternalApprovalIdentity(entry, executor)
+      if (verification.outcome === 'transient_error') {
+        return {
+          success: false,
+          status: 503,
+          retryable: true,
+          error: 'approval_identity_check_unavailable',
+        }
+      }
+
+      // Synchronous post-await CAS (`R75`).
+      if (
+        this.approvalMap.get(requestId) !== entry ||
+        this.activeExecutors.get(entry.taskId) !== executor ||
+        executor.executorState !== 'waiting_approval'
+      ) {
+        return { success: false, status: 409, error: 'approval_no_longer_pending' }
+      }
+      if (entry.expiresAt !== undefined && entry.expiresAt <= Date.now()) {
+        this.handleApprovalTimeout(requestId)
+        return { success: false, error: 'Approval request has expired' }
+      }
+
+      // Clear timeout and consume entry synchronously before any further awaits.
+      if (entry.timerId) clearTimeout(entry.timerId)
+      this.approvalMap.delete(requestId)
+
+      if (verification.outcome === 'revoked' || verification.outcome === 'mismatch') {
+        await this.cancelObsoleteApproval(requestId, entry, executor, verification.endReason)
+        return {
+          success: false,
+          status: 403,
+          cancelled: true,
+          error: verification.error,
+        }
+      }
+
+      if (verification.outcome === 'matched') {
+        executor.resetCachedIdentityForResume(verification.liveContext)
+      }
+    } finally {
+      this.inFlightApprovalDecisions.delete(requestId)
+    }
 
     const pendingApproval = executor.pendingApproval
     const toolName = pendingApproval?.tool_name || 'unknown'
@@ -1619,8 +2142,17 @@ export class AgentStateMachine extends EventEmitter {
   ): TaskExecutor {
     if (!this.llmProvider) throw new Error('LLM provider not initialized')
 
+    const admittedLinkedUserId =
+      task.admittedLinkedUserId?.trim() ||
+      task.sourceMessage?.admittedLinkedUserId?.trim() ||
+      undefined
+    const useLinkedUserBinding =
+      Boolean(admittedLinkedUserId) && isExternalChannelType(task.sourceMessage?.channelType)
+
     const gfsCallerRoot = this.gfsDownloadStore
-      ? resolveCallerRootBinding(this.gfsWorkspaceProvider, task.sourceMessage)
+      ? useLinkedUserBinding && admittedLinkedUserId
+        ? resolveLinkedUserCallerRootBinding(this.gfsWorkspaceProvider, admittedLinkedUserId)
+        : resolveCallerRootBinding(this.gfsWorkspaceProvider, task.sourceMessage)
       : {}
     if (gfsCallerRoot.failureCode) {
       logger.warn(
@@ -1638,9 +2170,16 @@ export class AgentStateMachine extends EventEmitter {
       conversationManager: this.conversationManager,
       llmProvider: effective?.provider ?? this.llmProvider,
       mcpManager: this.mcpManager,
-      workspaceService: this.workspaceProvider?.forSource(task.sourceMessage),
+      workspaceService:
+        useLinkedUserBinding && admittedLinkedUserId
+          ? this.workspaceProvider?.forLinkedUser(admittedLinkedUserId)
+          : this.workspaceProvider?.forSource(task.sourceMessage),
+      workspaceProvider: this.workspaceProvider,
+      gfsWorkspaceProvider: this.gfsWorkspaceProvider,
       gfsDownloadStore: this.gfsDownloadStore,
       gfsCallerWorkspacePath: gfsCallerRoot.root,
+      channelAttachmentStore: this.channelAttachmentStore,
+      resolveChannelCallerContext: this.resolveChannelCallerContext,
       config: this.config,
       modelName: effective?.model ?? this.modelName,
       contextWindowTokens: effective?.contextWindowTokens,
@@ -1814,6 +2353,12 @@ export class AgentStateMachine extends EventEmitter {
   private subscribeLifecycle(): void {
     this.lifecycle.on('transition', ev => {
       if (ev.to !== 'cancelled') return
+      // Issue #1640 (X11/R85): identity revocation/relink reconciliation owns
+      // its own unwind + `endObsoleteApprovalSession` boundary; do not run the
+      // generic `cancelTurnBySessionKey` / `clearPendingApproval` subscriber.
+      if (ev.reason === 'identity_revoked' || ev.reason === 'identity_changed') {
+        return
+      }
       const executor = this.activeExecutors.get(ev.taskId)
       if (!executor) return
 

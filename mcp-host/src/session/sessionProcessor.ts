@@ -242,6 +242,42 @@ export class SessionProcessor extends EventEmitter {
   }
 
   /**
+   * Mark a session as suspended (called during cold-boot approval rehydration
+   * in `AgentStateMachine.bootstrap()` so incoming messages queue behind the
+   * rehydrated approval instead of racing `ConversationManager.startTurn()`,
+   * `X9`, `R52`).
+   */
+  markSuspended(sessionKey: string): void {
+    this.suspendedSessions.add(sessionKey)
+  }
+
+  /**
+   * Synchronously remove queued tasks matching `predicate` across all session
+   * queues WITHOUT triggering dispatch (`tryProcessNext()`). Used by
+   * `AgentStateMachine.reconcileChannelIdentity` so obsolete queued User A
+   * tasks are purged BEFORE releasing `suspendedSessions` (`X11`, `R85`, `R88`).
+   */
+  purgeMatchingTasks(predicate: (task: Task, sessionKey: string) => boolean): Task[] {
+    const purged: Task[] = []
+    for (const [sessionKey, queue] of this.sessionQueues) {
+      const remaining: Task[] = []
+      for (const task of queue) {
+        if (predicate(task, sessionKey)) {
+          purged.push(task)
+        } else {
+          remaining.push(task)
+        }
+      }
+      if (remaining.length === 0) {
+        this.sessionQueues.delete(sessionKey)
+      } else if (remaining.length !== queue.length) {
+        this.sessionQueues.set(sessionKey, remaining)
+      }
+    }
+    return purged
+  }
+
+  /**
    * Pick the next session that has pending work and isn't active or suspended.
    */
   private pickNextReadySession(): string | undefined {

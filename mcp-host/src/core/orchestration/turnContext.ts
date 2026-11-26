@@ -54,6 +54,10 @@ export interface TurnContextAttachedFile {
   mismatch: boolean
   declaredMediaType: string | null
   detectedMediaType: string
+  /** Issue #1640 — true for prior-turn channel attachments (`retained_file`). */
+  retained?: boolean
+  /** Issue #1640 (R53) — true when PDF/XLSX exceeds `DEFAULT_DOCUMENT_READ_LIMITS.maxSourceBytes`. */
+  documentReadOverLimit?: boolean
 }
 
 export interface TurnContextAttachedImage {
@@ -62,6 +66,8 @@ export interface TurnContextAttachedImage {
   name: string
   mimeType: string
   byteLength: number
+  /** Issue #1640 — true for prior-turn channel images (`retained_image`). */
+  retained?: boolean
 }
 
 /**
@@ -114,6 +120,8 @@ export interface TurnContextInput {
   cron?: TurnContextCron
   attachedFiles?: TurnContextAttachedFile[]
   attachmentSave?: { images: TurnContextAttachedImage[] }
+  /** Issue #1640 — channel-retained images always listed even when gfs.write is absent. */
+  channelImages?: TurnContextAttachedImage[]
   referencedFiles?: TurnContextReferencedFile[]
   referencedFolders?: TurnContextReferencedFolder[]
   folderTools?: TurnContextFolderTools
@@ -226,7 +234,11 @@ function referencedFolderLine(folder: TurnContextReferencedFolder): string {
 }
 
 function attachedFileLine(file: TurnContextAttachedFile): string {
-  const line = `attached_file: id=${quotePromptValue(file.attachmentId)} name=${quotePromptValue(file.name)} class=${file.class} bytes=${file.byteLength} reader=${file.reader}`
+  const prefix = file.retained ? 'retained_file' : 'attached_file'
+  let line = `${prefix}: id=${quotePromptValue(file.attachmentId)} name=${quotePromptValue(file.name)} class=${file.class} bytes=${file.byteLength} reader=${file.reader}`
+  if (file.documentReadOverLimit) {
+    line += ' documentReadOverLimit=true'
+  }
   if (!file.mismatch) return line
   const declared =
     file.declaredMediaType === null ? '' : ` declared=${quotePromptValue(file.declaredMediaType)}`
@@ -234,7 +246,8 @@ function attachedFileLine(file: TurnContextAttachedFile): string {
 }
 
 function attachedImageLine(image: TurnContextAttachedImage): string {
-  return `attached_image: id=${quotePromptValue(image.attachmentId)} name=${quotePromptValue(image.name)} mime=${image.mimeType} bytes=${image.byteLength}`
+  const prefix = image.retained ? 'retained_image' : 'attached_image'
+  return `${prefix}: id=${quotePromptValue(image.attachmentId)} name=${quotePromptValue(image.name)} mime=${image.mimeType} bytes=${image.byteLength}`
 }
 
 /**
@@ -290,8 +303,18 @@ export function buildTurnContextBlock(input: TurnContextInput): string {
     lines.push(...input.attachedFiles.map(attachedFileLine))
     lines.push(ATTACHED_FILES_INSTRUCTION)
   }
+  const emittedImageIds = new Set<string>()
+  if (input.channelImages && input.channelImages.length > 0) {
+    for (const img of input.channelImages) {
+      lines.push(attachedImageLine(img))
+      emittedImageIds.add(img.attachmentId)
+    }
+  }
   if (input.attachmentSave) {
-    lines.push(...input.attachmentSave.images.map(attachedImageLine))
+    for (const img of input.attachmentSave.images) {
+      if (emittedImageIds.has(img.attachmentId)) continue
+      lines.push(attachedImageLine(img))
+    }
     lines.push(ATTACHMENT_SAVE_INSTRUCTION)
   }
   if (input.referencedFiles && input.referencedFiles.length > 0) {

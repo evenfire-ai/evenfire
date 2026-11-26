@@ -27,7 +27,8 @@ import { ToolOutput } from '../types'
 export class SessionSearchTool implements Tool {
   constructor(
     private readonly service: SessionSearchService,
-    private readonly sourceMessage: IncomingMessage | undefined
+    private readonly sourceMessage: IncomingMessage | undefined,
+    private readonly linkedUserId?: string
   ) {}
 
   name(): string {
@@ -130,6 +131,7 @@ export class SessionSearchTool implements Tool {
           channelType: effectiveChannelType,
           since,
           limit,
+          ...(this.linkedUserId !== undefined ? { linkedUserId: this.linkedUserId } : {}),
         },
         'llm'
       )

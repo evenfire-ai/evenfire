@@ -5,6 +5,10 @@ import { EventEmitter } from 'events'
 import { logger } from '../logger'
 import type { Task } from '../queue/types'
 import {
+  allowlistProviderIdentity,
+  workspaceOrTargetKeyForIdentity,
+} from '../workflow/channelIdentity'
+import {
   CanonicalReason,
   LEGAL_TRANSITIONS,
   MAX_HISTORY_PER_TASK,
@@ -63,6 +67,9 @@ export class TaskLifecycle extends EventEmitter {
       return
     }
     const now = new Date()
+    const providerIdentity = allowlistProviderIdentity(task.sourceMessage?.providerIdentity) ?? null
+    const linkedUserId =
+      task.admittedLinkedUserId ?? task.sourceMessage?.admittedLinkedUserId ?? null
     const record: TaskRecord = {
       id: task.id,
       status: 'pending',
@@ -71,6 +78,14 @@ export class TaskLifecycle extends EventEmitter {
       submittedBy: task.sourceMessage?.sender ?? null,
       submittedChannelType: task.sourceMessage?.channelType ?? null,
       submittedChannelId: task.sourceMessage?.channelId ?? null,
+      ...(linkedUserId !== null ? { linkedUserId } : {}),
+      ...(providerIdentity
+        ? {
+            providerIdentity,
+            workspaceOrTargetKey: workspaceOrTargetKeyForIdentity(providerIdentity) ?? null,
+            providerChannelId: providerIdentity.providerChannelId,
+          }
+        : {}),
       // Admission already replaced `attachments` with the validated list.
       acceptedAttachmentIds:
         task.sourceMessage?.attachments?.map(attachment => attachment.id) ?? [],
@@ -168,6 +183,40 @@ export class TaskLifecycle extends EventEmitter {
       }
     }
     return drained
+  }
+
+  /**
+   * Immediately remove a task record and emit `record:evicted` so subscribers
+   * (`MessageQueue`) purge `deliveryIndex` / `deliveryKeyByTaskId` /
+   * `taskInstanceIndex` (`X11`, `R82`, `R88`).
+   */
+  purgeRecord(taskId: string): boolean {
+    const existed = this.records.delete(taskId)
+    if (existed) {
+      this.emit('record:evicted', { taskId })
+    }
+    return existed
+  }
+
+  /**
+   * Cancel (if non-terminal) and purge all records matching `predicate`.
+   * Emits `transition` before evicting so SSE clients observe terminal cancel.
+   */
+  purgeMatchingRecords(
+    predicate: (record: TaskRecord) => boolean,
+    cancelReason: CanonicalReason
+  ): TaskRecord[] {
+    const matched: TaskRecord[] = []
+    for (const record of Array.from(this.records.values())) {
+      if (!predicate(record)) continue
+      matched.push(record)
+      if (!isTerminal(record.status)) {
+        this.transition(record.id, 'cancelled', cancelReason)
+      }
+      this.records.delete(record.id)
+      this.emit('record:evicted', { taskId: record.id })
+    }
+    return matched
   }
 
   get(taskId: string): TaskRecord | null {
