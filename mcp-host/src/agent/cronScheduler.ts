@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events'
 import { v4 as uuidv4 } from 'uuid'
+import { logger } from '../logger'
 import { MessageQueue, Task } from '../queue'
 import { statelessCronSchedulesAllowed, statelessLifecycleEnabled } from '../statelessCronPolicy'
 import { parseNextRun } from './cronExpression'
@@ -30,7 +31,7 @@ export class CronScheduler extends EventEmitter {
   start(): void {
     if (this.isRunning) return
 
-    console.log('[Cron] Starting scheduler')
+    logger.info({ component: 'Cron' }, 'Starting scheduler')
     this.isRunning = true
 
     for (const job of this.jobs.values()) {
@@ -44,7 +45,7 @@ export class CronScheduler extends EventEmitter {
   }
 
   stop(): void {
-    console.log('[Cron] Stopping scheduler')
+    logger.info({ component: 'Cron' }, 'Stopping scheduler')
     this.isRunning = false
 
     for (const timer of this.timers.values()) {
@@ -78,7 +79,7 @@ export class CronScheduler extends EventEmitter {
     // Validate schedule
     const nextRun = parseNextRun(schedule)
     if (!nextRun) {
-      console.error(`[Cron] Invalid schedule: ${schedule}`)
+      logger.error({ component: 'Cron', schedule }, 'Invalid schedule')
       return null
     }
 
@@ -95,14 +96,16 @@ export class CronScheduler extends EventEmitter {
     }
 
     this.jobs.set(job.id, job)
-    console.log(`[Cron] Created job: ${name} (${job.id}) - Schedule: ${schedule}`)
-    console.log(`[Cron]   Next run: ${nextRun.toISOString()}`)
+    logger.info(
+      { component: 'Cron', jobId: job.id, jobName: name, schedule, nextRun: nextRun.toISOString() },
+      'Created job'
+    )
 
     if (this.isRunning) {
       if (job.enabled) {
         this.scheduleJob(job)
       } else {
-        console.log(`[Cron] Policy kept job disabled: ${name} (${job.id})`)
+        logger.info({ component: 'Cron', jobId: job.id, jobName: name }, 'Policy kept job disabled')
       }
     }
 
@@ -129,10 +132,13 @@ export class CronScheduler extends EventEmitter {
 
     job.enabled = true
     if (this.isRunning) {
+      // Replace, never add: an already-enabled job keeps one timer.
+      const timer = this.timers.get(jobId)
+      if (timer) clearTimeout(timer)
       this.scheduleJob(job)
     }
 
-    console.log(`[Cron] Enabled job: ${job.name} (${jobId})`)
+    logger.info({ component: 'Cron', jobId, jobName: job.name }, 'Enabled job')
     return true
   }
 
@@ -148,7 +154,7 @@ export class CronScheduler extends EventEmitter {
       this.timers.delete(jobId)
     }
 
-    console.log(`[Cron] Disabled job: ${job.name} (${jobId})`)
+    logger.info({ component: 'Cron', jobId, jobName: job.name }, 'Disabled job')
     return true
   }
 
@@ -163,7 +169,7 @@ export class CronScheduler extends EventEmitter {
     }
 
     this.jobs.delete(jobId)
-    console.log(`[Cron] Deleted job: ${job.name} (${jobId})`)
+    logger.info({ component: 'Cron', jobId, jobName: job.name }, 'Deleted job')
 
     this.emit('cron:deleted', job)
     return true
@@ -176,7 +182,10 @@ export class CronScheduler extends EventEmitter {
       clearTimeout(timer)
       this.timers.delete(job.id)
     }
-    console.log(`[Cron] Stateless policy disabled schedule: ${job.name} (${job.id})`)
+    logger.info(
+      { component: 'Cron', jobId: job.id, jobName: job.name },
+      'Stateless policy disabled schedule'
+    )
   }
 
   updateJob(
@@ -192,7 +201,7 @@ export class CronScheduler extends EventEmitter {
     if (updates.schedule) {
       const nextRun = parseNextRun(updates.schedule)
       if (!nextRun) {
-        console.error(`[Cron] Invalid schedule: ${updates.schedule}`)
+        logger.error({ component: 'Cron', jobId, schedule: updates.schedule }, 'Invalid schedule')
         return null
       }
       job.schedule = updates.schedule
@@ -209,7 +218,7 @@ export class CronScheduler extends EventEmitter {
       this.scheduleJob(job)
     }
 
-    console.log(`[Cron] Updated job: ${job.name} (${jobId})`)
+    logger.info({ component: 'Cron', jobId, jobName: job.name }, 'Updated job')
     return job
   }
 
@@ -217,7 +226,7 @@ export class CronScheduler extends EventEmitter {
     const job = this.jobs.get(jobId)
     if (!job) return null
 
-    console.log(`[Cron] Manually triggering job: ${job.name} (${jobId})`)
+    logger.info({ component: 'Cron', jobId, jobName: job.name }, 'Manually triggering job')
     return this.executeJob(job)
   }
 
@@ -228,14 +237,28 @@ export class CronScheduler extends EventEmitter {
     const runAt = job.nextRun.getTime()
     const delay = Math.max(0, runAt - now)
 
-    console.log(`[Cron] Scheduling job: ${job.name} in ${Math.round(delay / 1000)}s`)
+    logger.info(
+      {
+        component: 'Cron',
+        jobId: job.id,
+        jobName: job.name,
+        delaySeconds: Math.round(delay / 1000),
+      },
+      'Scheduling job'
+    )
 
     // Guard against setTimeout overflow: delays > 2^31-1 ms cause Node.js
     // to silently set the timeout to 1ms, creating a runaway infinite loop.
     // Use a relay timer that wakes up at the safe max and re-checks.
     if (delay > MAX_SAFE_TIMEOUT) {
-      console.log(
-        `[Cron] Delay exceeds setTimeout max (${Math.round(delay / 86_400_000)}d), using relay timer for ${job.name}`
+      logger.info(
+        {
+          component: 'Cron',
+          jobId: job.id,
+          jobName: job.name,
+          delayDays: Math.round(delay / 86_400_000),
+        },
+        'Delay exceeds setTimeout max, using relay timer'
       )
       const timer = setTimeout(() => {
         if (job.enabled && job.nextRun) {
@@ -247,6 +270,7 @@ export class CronScheduler extends EventEmitter {
     }
 
     const timer = setTimeout(() => {
+      if (!job.enabled) return
       this.executeJob(job)
 
       // Schedule next run — advance "from" by 60s to avoid re-firing
@@ -262,7 +286,7 @@ export class CronScheduler extends EventEmitter {
   }
 
   private executeJob(job: CronJob): Task {
-    console.log(`[Cron] Executing job: ${job.name} (${job.id})`)
+    logger.info({ component: 'Cron', jobId: job.id, jobName: job.name }, 'Executing job')
     job.lastRun = new Date()
 
     const task = this.queue.createTaskFromCron(job.id, job.task, job.origin, 'normal')
@@ -308,10 +332,10 @@ export class CronScheduler extends EventEmitter {
         imported++
       }
 
-      console.log(`[Cron] Imported ${imported} job(s)`)
+      logger.info({ component: 'Cron', imported }, 'Imported jobs')
       return imported
     } catch (error) {
-      console.error('[Cron] Failed to import jobs:', error)
+      logger.error({ component: 'Cron', error }, 'Failed to import jobs')
       return 0
     }
   }

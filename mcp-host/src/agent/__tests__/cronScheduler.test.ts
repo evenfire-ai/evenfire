@@ -588,6 +588,53 @@ describe('CronScheduler — no double-fire after execution', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Re-enabling an enabled job must not leave an orphaned timer behind
+// ---------------------------------------------------------------------------
+
+describe('CronScheduler — repeated enableJob leaves no orphaned timer', () => {
+  let scheduler: CronScheduler
+  let queue: MessageQueue
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    // Mid-minute, so the every-minute schedule fires 30s from now.
+    vi.setSystemTime(new Date('2026-11-26T12:00:30.000Z'))
+    queue = createMockQueue()
+    scheduler = new CronScheduler(queue)
+  })
+
+  afterEach(() => {
+    scheduler.stop()
+    vi.useRealTimers()
+  })
+
+  it('does not run a job that was enabled twice and then disabled, and runs an enabled job once', () => {
+    const createTask = vi.spyOn(queue, 'createTaskFromCron')
+    scheduler.start()
+    const target = scheduler.createJob('target', '*/1 * * * *', 'target task')!
+    const control = scheduler.createJob('control', '*/1 * * * *', 'control task')!
+
+    expect(scheduler.enableJob(target.id)).toBe(true)
+    expect(scheduler.enableJob(target.id)).toBe(true)
+    expect(scheduler.enableJob(control.id)).toBe(true)
+    expect(scheduler.enableJob(control.id)).toBe(true)
+    expect(scheduler.disableJob(target.id)).toBe(true)
+
+    // Just past the first fire (30s), before the next minute boundary.
+    vi.advanceTimersByTime(31_000)
+
+    const runsOf = (jobId: string) => createTask.mock.calls.filter(([id]) => id === jobId).length
+    // The control count is the liveness witness: the timer path ran and fired
+    // the enabled job exactly once. One assertion reports both counts.
+    expect({ target: runsOf(target.id), control: runsOf(control.id) }).toEqual({
+      target: 0,
+      control: 1,
+    })
+    expect(queue.enqueue).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // CronScheduler — hasEnabledJobs (cron×stateless D8 probe)
 // ---------------------------------------------------------------------------
 
