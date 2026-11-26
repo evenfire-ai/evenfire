@@ -592,6 +592,9 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
       pool: databasePool,
       runPollMs: 60_000,
       maxRunDurationCapSeconds: 86_400,
+      deliverCancelSignal: () => {
+        throw new Error('no cancel is delivered by this test')
+      },
       createChildRecipe: async () => ({ name: childName, namespace: config.sandboxNamespace }),
       checkpointAuthority: checkpoint,
     })

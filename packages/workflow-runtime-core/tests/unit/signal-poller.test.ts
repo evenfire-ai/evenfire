@@ -136,6 +136,34 @@ describe('SignalPoller', () => {
       stop()
     })
 
+    it('drops a repeated requestId', async () => {
+      vi.useFakeTimers()
+      const ownCancel: Signal = {
+        type: 'cancel',
+        requestId: OWN_CANCEL_ID,
+        receivedAt: new Date().toISOString(),
+      }
+      // workflow-recipes re-queues the same cancel on every tick, so a later
+      // poll can return a signal the runtime already consumed.
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ signals: [ownCancel] }),
+      })
+      const poller = makePoller(fetchMock)
+      const received: Signal[] = []
+      const stop = poller.pollSignals(s => {
+        received.push(s)
+      })
+
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(60000)
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(received).toEqual([ownCancel])
+      expect(poller.getSignals()).toEqual([ownCancel])
+      stop()
+    })
+
     it('continues polling when network error occurs', async () => {
       const fetchMock = vi
         .fn()

@@ -140,6 +140,9 @@ describeRealPostgres('workflow run failure reasons on PostgreSQL 16', () => {
       pool: { connect: runtimeClient } as unknown as Pool,
       runPollMs: 30_000,
       maxRunDurationCapSeconds: 86_400,
+      deliverCancelSignal: () => {
+        throw new Error('no cancel is delivered by this test')
+      },
       createChildRecipe: async () => {
         throw new Error('protected_child_must_not_be_created')
       },

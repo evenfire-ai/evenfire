@@ -8,6 +8,7 @@
  *   Pending → (create child recipe) → Running   [processPending]
  *   Running → Succeeded|Failed|Canceled         [syncFromRecipeExecution]
  *   Running → Failed (timeout)                  [checkStuckRuns]
+ *   cancel request → runtime cancel signal      [deliverCancelRequests]
  *
  * Every UPDATE carries `WHERE owner_instance_id = $self AND phase = $expected`
  * as defense-in-depth: if another replica grabbed the row, we silently no-op
@@ -172,6 +173,11 @@ export interface DbRunProcessorOptions {
   maxRunDurationCapSeconds: number
   /** Builds + creates the child WorkflowRecipe for a run (injected). */
   createChildRecipe: ChildRecipeCreator
+  /**
+   * Queues the runtime cancel signal of a run that has a cancel request,
+   * under the run's child recipe name (the name its coordinator polls).
+   */
+  deliverCancelSignal: (childRecipeName: string, runId: string) => void
   /** Live Control API checkpoint required before protected v2 queued work. */
   checkpointAuthority?: (run: DbRunRow) => Promise<void>
   /** Checks whether a previously created child WorkflowRecipe still exists. */
@@ -191,6 +197,12 @@ export interface DbRunProcessor {
   processPending(runId: string): Promise<void>
   syncFromRecipeExecution(recipe: WorkflowRecipeCRD): Promise<void>
   checkStuckRuns(): Promise<number>
+  /**
+   * Re-queues the cancel signal of every Running or AuthorizationPaused run
+   * that has a cancel request and a child (or of `runId` only). Rejects when
+   * the read fails.
+   */
+  deliverCancelRequests(runId?: string): Promise<void>
   checkpointRunningBoundary(runId: string): Promise<RunningBoundaryOutcome>
   getRunStatus(
     runId: string,
@@ -384,6 +396,44 @@ const FAIL_RECLAIMED_MISSING_CHILD = `
      AND phase = 'Running'
      AND owner_instance_id = $2`
 
+// Cancel delivery reads with no owner predicate: any processor re-queues the
+// signal, because the coordinator may poll any workflow-recipes pod. The tick
+// walks the rows in pages with a keyset cursor, so a page of requests that
+// never resolve cannot hide a newer one. `cancel_requested_key` carries the
+// timestamp as text: a JS Date keeps milliseconds only, and the comparison
+// needs the stored microseconds.
+const CANCEL_DELIVERY_PAGE_SIZE = 200
+
+const CANCEL_DELIVERY_WHERE = `
+   WHERE cancel_requested_at IS NOT NULL
+     AND phase IN ('Running', 'AuthorizationPaused')
+     AND child_recipe_name IS NOT NULL`
+
+const FIND_CANCEL_REQUEST_FOR_RUN = `
+  SELECT run_id, child_recipe_name
+    FROM workflow_runs${CANCEL_DELIVERY_WHERE}
+     AND run_id = $1
+   LIMIT ${CANCEL_DELIVERY_PAGE_SIZE}`
+
+const FIND_CANCEL_REQUESTS_FIRST_PAGE = `
+  SELECT run_id, child_recipe_name, cancel_requested_at::text AS cancel_requested_key
+    FROM workflow_runs${CANCEL_DELIVERY_WHERE}
+   ORDER BY cancel_requested_at, run_id
+   LIMIT ${CANCEL_DELIVERY_PAGE_SIZE}`
+
+const FIND_CANCEL_REQUESTS_AFTER_CURSOR = `
+  SELECT run_id, child_recipe_name, cancel_requested_at::text AS cancel_requested_key
+    FROM workflow_runs${CANCEL_DELIVERY_WHERE}
+     AND (cancel_requested_at, run_id) > ($1::timestamptz, $2::uuid)
+   ORDER BY cancel_requested_at, run_id
+   LIMIT ${CANCEL_DELIVERY_PAGE_SIZE}`
+
+interface CancelDeliveryRow {
+  run_id: string
+  child_recipe_name: string
+  cancel_requested_key: string
+}
+
 // ─── Factory ───────────────────────────────────────────────────────────
 
 export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcessor {
@@ -393,6 +443,9 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
   let listenClient: PoolClient | null = null
   let pollTimer: ReturnType<typeof setInterval> | null = null
   let stopped = true
+  // Key of the last row of the previous full tick page; null starts the next
+  // tick from the first row. Kept in memory only: a restart starts over.
+  let cancelDeliveryCursor: { requestedKey: string; runId: string } | null = null
 
   async function attachListener(): Promise<void> {
     try {
@@ -401,6 +454,12 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
         if (msg.channel !== 'workflow_run_update' || !msg.payload) return
         void processPending(msg.payload).catch(err => {
           log.error('notification dispatch failed', {
+            run_id: msg.payload,
+            err: err instanceof Error ? err.message : String(err),
+          })
+        })
+        void deliverCancelRequests(msg.payload).catch(err => {
+          log.error('cancel delivery failed', {
             run_id: msg.payload,
             err: err instanceof Error ? err.message : String(err),
           })
@@ -590,6 +649,37 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
         err: err instanceof Error ? err.message : String(err),
       })
     }
+  }
+
+  // ─── Public: deliverCancelRequests ───────────────────────────────────
+  //
+  // The runtime drains its signals when it polls, so a queued signal can be
+  // lost (restart, a poll that reaches another pod, a lost response). Every
+  // tick therefore re-queues the signal of every run that still has a
+  // request; the store keeps one per requestId and the poller drops one it
+  // has seen.
+  async function deliverCancelRequests(runId?: string): Promise<void> {
+    if (runId !== undefined) {
+      const res = await opts.pool.query<{ run_id: string; child_recipe_name: string }>(
+        FIND_CANCEL_REQUEST_FOR_RUN,
+        [runId]
+      )
+      for (const row of res.rows) opts.deliverCancelSignal(row.child_recipe_name, row.run_id)
+      return
+    }
+    const cursor = cancelDeliveryCursor
+    const res = cursor
+      ? await opts.pool.query<CancelDeliveryRow>(FIND_CANCEL_REQUESTS_AFTER_CURSOR, [
+          cursor.requestedKey,
+          cursor.runId,
+        ])
+      : await opts.pool.query<CancelDeliveryRow>(FIND_CANCEL_REQUESTS_FIRST_PAGE)
+    for (const row of res.rows) opts.deliverCancelSignal(row.child_recipe_name, row.run_id)
+    const last = res.rows[res.rows.length - 1]
+    cancelDeliveryCursor =
+      res.rows.length === CANCEL_DELIVERY_PAGE_SIZE && last
+        ? { requestedKey: last.cancel_requested_key, runId: last.run_id }
+        : null
   }
 
   // ─── Public: processPending ──────────────────────────────────────────
@@ -1022,6 +1112,11 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
         void checkStuckRuns().catch(() => {
           /* logged inside */
         })
+        void deliverCancelRequests().catch(err => {
+          log.error('cancel delivery failed', {
+            err: err instanceof Error ? err.message : String(err),
+          })
+        })
       }, opts.runPollMs)
       if (typeof pollTimer.unref === 'function') pollTimer.unref()
     },
@@ -1050,6 +1145,7 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
     processPending,
     syncFromRecipeExecution,
     checkStuckRuns,
+    deliverCancelRequests,
     checkpointRunningBoundary,
     getRunStatus,
   }

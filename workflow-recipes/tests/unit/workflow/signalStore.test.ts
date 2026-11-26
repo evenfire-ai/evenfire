@@ -98,6 +98,21 @@ describe('signalStore — enqueue and drain', () => {
     expect(d1).toHaveLength(1)
     expect(d2).toHaveLength(0)
   })
+
+  it('queues one signal per requestId', () => {
+    const cancel = (receivedAt: string) =>
+      makeSignal('cancel', { requestId: 'cancel:run-a', receivedAt })
+    enqueueSignal('recipe-a', cancel('2026-11-26T10:00:00.000Z'))
+    enqueueSignal('recipe-a', cancel('2026-11-26T10:00:30.000Z'))
+    enqueueSignal('recipe-a', cancel('2026-11-26T10:01:00.000Z'))
+
+    const drained = drainSignals('recipe-a')
+    expect(drained).toHaveLength(1)
+    expect(drained[0]).toEqual(cancel('2026-11-26T10:00:00.000Z'))
+
+    enqueueSignal('recipe-a', cancel('2026-11-26T10:01:30.000Z'))
+    expect(drainSignals('recipe-a')).toEqual([cancel('2026-11-26T10:01:30.000Z')])
+  })
 })
 
 // ─── Step 4.6: overflow / security cap ──────────────────────────────────────

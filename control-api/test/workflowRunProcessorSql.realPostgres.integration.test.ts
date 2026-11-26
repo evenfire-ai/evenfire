@@ -27,6 +27,15 @@ function quoteIdent(value: string): string {
   return `"${value.replace(/"/g, '""')}"`
 }
 
+/** One read of the cancel delivery statement, as the processor made it. */
+interface CancelRead {
+  /** What the test was doing when the read started. */
+  stage: string
+  /** True for the notification statement (filtered by run id). */
+  byRunId: boolean
+  rows: number
+}
+
 interface RunFixture {
   phase: 'Pending' | 'Running' | 'AuthorizationPaused' | 'Succeeded' | 'Failed' | 'Canceled'
   ownerInstanceId: string | null
@@ -156,6 +165,25 @@ describeRealPostgres('workflow run processor SQL on PostgreSQL 16', () => {
     } as unknown as Pool
   }
 
+  /** The runtime pool, recording every read of the cancel delivery statement. */
+  function recordingPool(reads: CancelRead[], stage: () => string): Pool {
+    const base = runtimePool()
+    return {
+      connect: base.connect.bind(base),
+      query: async (text: string, values?: unknown[]) => {
+        if (!text.includes('cancel_requested_at IS NOT NULL')) return base.query(text, values)
+        const startedIn = stage()
+        const result = await base.query(text, values)
+        reads.push({
+          stage: startedIn,
+          byRunId: values?.length === 1,
+          rows: result.rowCount ?? 0,
+        })
+        return result
+      },
+    } as unknown as Pool
+  }
+
   function processor(
     overrides: Partial<DbRunProcessorOptions> & Pick<DbRunProcessorOptions, 'instanceId'>
   ): DbRunProcessor {
@@ -166,11 +194,192 @@ describeRealPostgres('workflow run processor SQL on PostgreSQL 16', () => {
       createChildRecipe: async () => {
         throw new Error('no child is created by this test')
       },
+      deliverCancelSignal: () => {
+        throw new Error('no cancel is delivered by this test')
+      },
       ...overrides,
     })
     processors.push(created)
     return created
   }
+
+  it('an unbound run makes no authority checkpoint', async () => {
+    const instanceId = `unbound-${randomUUID()}`
+    const runId = await insertRun({
+      phase: 'Pending',
+      ownerInstanceId: null,
+      maxDurationSeconds: null,
+      startedSecondsAgo: null,
+      childRecipeName: null,
+    })
+    const childName = `child-${randomBytes(4).toString('hex')}`
+    const checkpointAuthority = vi.fn()
+    const onRunStarted = vi.fn()
+    const createChildRecipe = vi.fn(async () => ({ name: childName, namespace: 'sandbox-recipes' }))
+    const claimer = processor({ instanceId, checkpointAuthority, onRunStarted, createChildRecipe })
+
+    await expect(claimer.processPending(runId)).resolves.toBeUndefined()
+
+    const claimed = await databasePool.query(
+      'SELECT phase, child_recipe_name, owner_instance_id FROM workflow_runs WHERE run_id = $1',
+      [runId]
+    )
+    expect(claimed.rows).toEqual([
+      { phase: 'Running', child_recipe_name: childName, owner_instance_id: instanceId },
+    ])
+    expect(createChildRecipe).toHaveBeenCalledOnce()
+    expect(onRunStarted).toHaveBeenCalledOnce()
+    expect(onRunStarted).toHaveBeenCalledWith(runId)
+    expect(checkpointAuthority).not.toHaveBeenCalled()
+  })
+
+  describe('cancel delivery (X9)', () => {
+    it('every tick re-delivers until the run is terminal', async () => {
+      const firstInstance = `deliver-a-${randomUUID()}`
+      const childName = `child-${randomBytes(4).toString('hex')}`
+      const runId = await insertRun({
+        phase: 'Running',
+        ownerInstanceId: firstInstance,
+        maxDurationSeconds: null,
+        startedSecondsAgo: 30,
+        childRecipeName: childName,
+        cancelRequested: true,
+      })
+      const reads: CancelRead[] = []
+      let stage = 'first instance'
+      const pool = recordingPool(reads, () => stage)
+
+      const deliveredFirst = vi.fn()
+      const first = processor({
+        instanceId: firstInstance,
+        pool,
+        runPollMs: 40,
+        deliverCancelSignal: deliveredFirst,
+      })
+      await first.start()
+      await vi.waitFor(() => expect(deliveredFirst.mock.calls.length).toBeGreaterThanOrEqual(2), {
+        timeout: 5_000,
+      })
+      await first.stop()
+
+      // A restart: a new processor instance with an empty signal store.
+      stage = 'after restart'
+      const deliveredRestarted = vi.fn()
+      const restarted = processor({
+        instanceId: `deliver-b-${randomUUID()}`,
+        pool,
+        runPollMs: 40,
+        deliverCancelSignal: deliveredRestarted,
+      })
+      await restarted.start()
+      await vi.waitFor(() => expect(deliveredRestarted).toHaveBeenCalled(), { timeout: 5_000 })
+
+      // The phase UPDATE also fires the table's notify trigger: the
+      // notification read runs too, after the commit, and finds nothing.
+      await databasePool.query(
+        `UPDATE workflow_runs SET phase = 'Canceled', completed_at = now() WHERE run_id = $1`,
+        [runId]
+      )
+      stage = 'terminal'
+      const terminalTickReads = () =>
+        reads.filter(read => read.stage === 'terminal' && !read.byRunId)
+      await vi.waitFor(() => expect(terminalTickReads().length).toBeGreaterThanOrEqual(2), {
+        timeout: 5_000,
+      })
+      await restarted.stop()
+
+      const rowsRead = (stages: string[]) =>
+        reads.filter(read => stages.includes(read.stage)).reduce((sum, read) => sum + read.rows, 0)
+      for (const call of [...deliveredFirst.mock.calls, ...deliveredRestarted.mock.calls]) {
+        expect(call).toEqual([childName, runId])
+      }
+      // One delivery per row read; every row came from a tick read before the
+      // run was terminal.
+      expect(deliveredFirst).toHaveBeenCalledTimes(rowsRead(['first instance']))
+      expect(deliveredRestarted).toHaveBeenCalledTimes(rowsRead(['after restart', 'terminal']))
+      expect(reads.filter(read => read.byRunId).every(read => read.rows === 0)).toBe(true)
+      // The tick read ran after the row became terminal and returned nothing.
+      expect(terminalTickReads().length).toBeGreaterThanOrEqual(2)
+      expect(reads.filter(read => read.stage === 'terminal').every(read => read.rows === 0)).toBe(
+        true
+      )
+    })
+
+    it('first delivery: the run notification queues the signal before any tick', async () => {
+      const instanceId = `deliver-notify-${randomUUID()}`
+      const childName = `child-${randomBytes(4).toString('hex')}`
+      // Inserted before the listener starts, so the insert's own notification
+      // is not heard; the explicit notify below is the one the cancel route
+      // sends after storing the request.
+      const runId = await insertRun({
+        phase: 'Running',
+        ownerInstanceId: instanceId,
+        maxDurationSeconds: null,
+        startedSecondsAgo: 30,
+        childRecipeName: childName,
+        cancelRequested: true,
+      })
+      const reads: CancelRead[] = []
+      const delivered = vi.fn()
+      const listener = processor({
+        instanceId,
+        pool: recordingPool(reads, () => 'notification'),
+        runPollMs: 600_000,
+        deliverCancelSignal: delivered,
+      })
+      await listener.start()
+
+      await databasePool.query(`SELECT pg_notify('workflow_run_update', $1)`, [runId])
+
+      await vi.waitFor(() => expect(delivered).toHaveBeenCalled(), { timeout: 5_000 })
+      expect(delivered).toHaveBeenCalledOnce()
+      expect(delivered).toHaveBeenCalledWith(childName, runId)
+      expect(reads).toEqual([{ stage: 'notification', byRunId: true, rows: 1 }])
+    })
+
+    it('the tick cursor reaches a newer request behind 200 unresolved ones', async () => {
+      const inserted = await databasePool.query<{ run_id: string }>(
+        `INSERT INTO workflow_runs (
+           run_id, recipe_namespace, recipe_name, phase, actor_type,
+           trigger_source, ttl_seconds_after_finished, owner_instance_id,
+           started_at, child_recipe_name, child_recipe_namespace,
+           last_reconciled_at, cancel_requested_at, canceled_by
+         )
+         SELECT gen_random_uuid(), 'demo', 'echo', 'Running', 'user', 'onDemand', 0, NULL,
+                now() - interval '60 seconds', 'child-' || lpad(i::text, 4, '0'),
+                'sandbox-recipes', now(), now() - make_interval(secs => 1000 - i),
+                'canceller-user'
+           FROM generate_series(1, 201) AS i
+          ORDER BY i
+         RETURNING run_id, cancel_requested_at`
+      )
+      const byAge = inserted.rows.map(row => row.run_id)
+      expect(byAge).toHaveLength(201)
+      const ordered = await databasePool.query<{ run_id: string }>(
+        `SELECT run_id FROM workflow_runs ORDER BY cancel_requested_at, run_id`
+      )
+      const oldest = ordered.rows[0].run_id
+      const newest = ordered.rows[200].run_id
+      const ticks: string[][] = []
+      const walker = processor({
+        instanceId: `deliver-cursor-${randomUUID()}`,
+        deliverCancelSignal: (_childName, runId) => ticks[ticks.length - 1].push(runId),
+      })
+      const tick = async () => {
+        ticks.push([])
+        await walker.deliverCancelRequests()
+      }
+
+      await tick()
+      await tick()
+      await tick()
+
+      expect(ticks[0]).toHaveLength(200)
+      expect(new Set(ticks[0]).size).toBe(200)
+      expect([...ticks[0], ...ticks[1]]).toContain(newest)
+      expect(ticks[2][0]).toBe(oldest)
+    })
+  })
 
   describe('stuck sweep (X13)', () => {
     const storedDurations = [null, DEFAULT_CAP_SECONDS, 2 * DEFAULT_CAP_SECONDS, 300] as const

@@ -285,11 +285,23 @@ describe('createDbRunProcessor', () => {
     vi.unstubAllEnvs()
   })
 
-  type SpawnOptions = Omit<Parameters<typeof createDbRunProcessor>[0], 'maxRunDurationCapSeconds'> &
-    Partial<Pick<Parameters<typeof createDbRunProcessor>[0], 'maxRunDurationCapSeconds'>>
+  type SpawnOptions = Omit<
+    Parameters<typeof createDbRunProcessor>[0],
+    'maxRunDurationCapSeconds' | 'deliverCancelSignal'
+  > &
+    Partial<
+      Pick<
+        Parameters<typeof createDbRunProcessor>[0],
+        'maxRunDurationCapSeconds' | 'deliverCancelSignal'
+      >
+    >
 
   function spawn(opts: SpawnOptions): DbRunProcessor {
-    const p = createDbRunProcessor({ maxRunDurationCapSeconds: 86_400, ...opts })
+    const p = createDbRunProcessor({
+      maxRunDurationCapSeconds: 86_400,
+      deliverCancelSignal: vi.fn(),
+      ...opts,
+    })
     instances.push(p)
     return p
   }

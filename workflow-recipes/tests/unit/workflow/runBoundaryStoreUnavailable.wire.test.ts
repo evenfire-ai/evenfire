@@ -229,6 +229,9 @@ async function runWire(
     connect,
     runPollMs: 60_000,
     maxRunDurationCapSeconds: 86_400,
+    deliverCancelSignal: () => {
+      throw new Error('no cancel is delivered by this test')
+    },
     checkpointAuthority,
     createChildRecipe: vi.fn(),
     logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), withStep: vi.fn() },
