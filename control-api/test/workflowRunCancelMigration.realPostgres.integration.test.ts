@@ -96,9 +96,11 @@ describeRealPostgres('migration 0160 workflow run cancel request on PostgreSQL 1
 
     // A database at 0159: drop what 0160 adds, keep a row written before it.
     await databasePool.query(`
-      ALTER TABLE workflow_runs DROP CONSTRAINT ${WORKFLOW_RUN_CANCEL_REQUEST_PAIR_CHECK};
-      ALTER TABLE workflow_runs DROP COLUMN cancel_requested_at, DROP COLUMN canceled_by;
-      ALTER TABLE workflow_runs_audit DROP COLUMN cancel_requested_at, DROP COLUMN canceled_by;
+      ALTER TABLE workflow_runs DROP CONSTRAINT IF EXISTS ${WORKFLOW_RUN_CANCEL_REQUEST_PAIR_CHECK};
+      ALTER TABLE workflow_runs
+        DROP COLUMN IF EXISTS cancel_requested_at, DROP COLUMN IF EXISTS canceled_by;
+      ALTER TABLE workflow_runs_audit
+        DROP COLUMN IF EXISTS cancel_requested_at, DROP COLUMN IF EXISTS canceled_by;
     `)
     expect(await cancelColumns('workflow_runs')).toEqual([])
     const existingRunId = await insertRun()
