@@ -8,6 +8,7 @@
  * `error`/`result` payloads.
  */
 import type { ChatMessage, PendingApproval, ToolResult } from '../../core/types'
+import type { CronClaimArgs, CronJobRecord } from '../cronJobs'
 
 // ─── Row shapes (DB-side representation) ───────────────────────────────
 
@@ -356,6 +357,13 @@ export type WorkerOp =
   | { kind: 'sweep_closed_sessions'; cutoffEpoch: number; limit: number }
   | { kind: 'integrity_check' }
   | { kind: 'checkpoint' }
+  | { kind: 'load_cron_jobs' }
+  | { kind: 'insert_cron_job'; row: CronJobRecord }
+  | { kind: 'delete_cron_job'; id: string }
+  | { kind: 'read_cron_job'; id: string }
+  | ({ kind: 'claim_cron_job' } & CronClaimArgs)
+  | { kind: 'set_cron_schedule'; id: string; enabled: boolean; nextRunAt: number | null }
+  | { kind: 'set_cron_last_run'; id: string; lastRunAt: number }
   | { kind: 'shutdown' }
 
 export interface WorkerMessage {
@@ -415,6 +423,11 @@ export function isWriteOp(op: WorkerOp): boolean {
     case 'reap_awaiting_approval_sessions':
     case 'sweep_expired':
     case 'sweep_closed_sessions':
+    case 'insert_cron_job':
+    case 'delete_cron_job':
+    case 'claim_cron_job':
+    case 'set_cron_schedule':
+    case 'set_cron_last_run':
       return true
     default:
       return false
