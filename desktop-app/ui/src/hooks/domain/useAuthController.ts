@@ -756,8 +756,10 @@ export function useAuthController({
           reportSessionChanged()
           return
         }
-        // Main refuses the selection while an attempt redeems (D11), so this read of the
-        // browser sign-in only backs that refusal up.
+        // Redeeming cannot hold here with the real main: it refuses the selection while an
+        // attempt redeems (`assertProfileHandoffSessionIsSignedOut`, D11), and an attempt
+        // started after the selection advances the generation, which the check above reports.
+        // This read of the browser sign-in only backs those two up.
         if (busyRef.current || browserSignInBlocksAuthActions()) {
           reportAuthenticationInProgress()
           return
