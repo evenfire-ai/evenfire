@@ -2213,6 +2213,8 @@ async function editRows(w: World, changes: ReadonlyArray<[number, RowState]>): P
   if (edit) {
     await interact(w, () => fireEvent.click(edit))
     view.dirty = false
+    // A new edit session: its base is taken at its first change.
+    view.base = null
   }
   for (const [slot, state] of changes) {
     const current = perToolSection()
@@ -2225,13 +2227,21 @@ async function editRows(w: World, changes: ReadonlyArray<[number, RowState]>): P
       inherited: inheritingShown(tabRoot() as HTMLElement),
       logLen: w.fake.log.length,
     }
+    // Rows set back to the base leave the session clean, but the section
+    // still edits from the base it took. The banner may already show a newer
+    // load that the editing section did not take, so the base taken for this
+    // session stays, rather than one built from these rows and that banner.
+    const kept =
+      !view.dirty && view.base !== null && sameTools(view.base.tools, capture.tools)
+        ? view.base
+        : null
     const base = view.dirty && view.base ? view.base.tools : capture.tools
     await interact(w, () => fireEvent.change(select, { target: { value: state } }))
     const after = perToolSection()
     if (!after) return
     const dirtyNow = !sameTools(shownRows(after), base)
     if (!view.dirty && dirtyNow) {
-      view.base = { ...capture, source: baseSource(w, view.agent, capture) }
+      view.base = kept ?? { ...capture, source: baseSource(w, view.agent, capture) }
     }
     view.dirty = dirtyNow
   }
