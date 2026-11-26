@@ -552,7 +552,7 @@ describe('HostDetailsPage identity integration', () => {
     expect(typeChip).toHaveTextContent('Stateless')
     fireEvent.mouseEnter(typeChip)
     expect(screen.getByRole('tooltip')).toHaveTextContent(
-      'This agent persists session state to disk and scales to zero while idle (shown as Idle). It wakes on demand.'
+      'This agent persists session state to disk and scales to zero while idle. It wakes on demand.'
     )
   })
 

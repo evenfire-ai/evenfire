@@ -19,5 +19,5 @@ export const AGENT_TYPE_LABELS: Record<AgentLifecycleType, string> = {
 export const AGENT_TYPE_TOOLTIPS: Record<AgentLifecycleType, string> = {
   stateful: 'This agent runs continuously; its process is never scaled to zero.',
   stateless:
-    'This agent persists session state to disk and scales to zero while idle (shown as Idle). It wakes on demand.',
+    'This agent persists session state to disk and scales to zero while idle. It wakes on demand.',
 }

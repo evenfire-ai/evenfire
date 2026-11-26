@@ -428,7 +428,7 @@ describe('HostTable type column (lifecycle)', () => {
     const stateless = within(screen.getByLabelText('Open agent cold-agent')).getByText('Stateless')
     fireEvent.mouseEnter(stateless)
     expect(screen.getByRole('tooltip')).toHaveTextContent(
-      'This agent persists session state to disk and scales to zero while idle (shown as Idle). It wakes on demand.'
+      'This agent persists session state to disk and scales to zero while idle. It wakes on demand.'
     )
   })
 
