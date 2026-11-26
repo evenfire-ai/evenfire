@@ -73,7 +73,6 @@ describe('requireInternalToken — cluster-wide bootstrap', () => {
       .set('Authorization', 'Bearer any-token-1234567890')
       .set('x-service-token', 'external-rest-api')
       .send({})
-    expect(res.status).toBe(401)
     expectMarkedGateRefusal(res)
   })
 
@@ -86,7 +85,6 @@ describe('requireInternalToken — cluster-wide bootstrap', () => {
       .set('Authorization', 'Bearer wrong-token-1234567890')
       .set('x-service-token', 'rpc-proxy')
       .send({})
-    expect(res.status).toBe(401)
     expectMarkedGateRefusal(res)
   })
 
@@ -96,7 +94,6 @@ describe('requireInternalToken — cluster-wide bootstrap', () => {
       .post('/test')
       .set('x-service-token', 'external-rest-api')
       .send({})
-    expect(res.status).toBe(401)
     expectMarkedGateRefusal(res)
   })
 
@@ -108,7 +105,6 @@ describe('requireInternalToken — cluster-wide bootstrap', () => {
       .post('/test')
       .set('Authorization', 'Bearer some-token-1234567890')
       .send({})
-    expect(res.status).toBe(401)
     expectMarkedGateRefusal(res)
   })
 
@@ -121,7 +117,6 @@ describe('requireInternalToken — cluster-wide bootstrap', () => {
       .set('Authorization', 'Bearer short')
       .set('x-service-token', 'external-rest-api')
       .send({})
-    expect(res.status).toBe(401)
     expectMarkedGateRefusal(res)
   })
 
@@ -135,7 +130,6 @@ describe('requireInternalToken — cluster-wide bootstrap', () => {
       .set('Authorization', `Bearer ${staleReaderToken}`)
       .set('x-service-token', 'workflow-approval-reader')
       .send({})
-    expect(res.status).toBe(401)
     expectMarkedGateRefusal(res)
   })
 })
