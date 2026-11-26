@@ -65,9 +65,14 @@ export function AuthPage() {
     }
   }
 
+  // Saving an environment and the backend switch change the binding, which would discard a
+  // browser sign-in that redeems (R-38). The controller refuses both then (I-1); the page shows
+  // it by disabling them on the widened flag, as the dock does.
+  const environmentChangeBlocked = busy || authTransitioning
+
   const handleRuntimeSetupSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!busy && hasRuntimeSetupValues) {
+    if (!environmentChangeBlocked && hasRuntimeSetupValues) {
       handleSaveRuntimeConfig().then(state => {
         if (state) setRuntimeSetupVisible(false)
       })
@@ -116,7 +121,11 @@ export function AuthPage() {
                 onChange={event => setRuntimeConfigSetupExternalRestApiBaseUrl(event.target.value)}
               />
             </Field>
-            <Button block disabled={!hasRuntimeSetupValues || busy} type="submit">
+            <Button
+              block
+              disabled={!hasRuntimeSetupValues || environmentChangeBlocked}
+              type="submit"
+            >
               Save environment
             </Button>
             <button
@@ -179,7 +188,7 @@ export function AuthPage() {
                     size="sm"
                     variant="soft"
                     block
-                    disabled={busy}
+                    disabled={environmentChangeBlocked}
                     onClick={() => void handleSwitchLoginBackend()}
                   >
                     {`Switch to ${backendSwitchHint.targetLabel} & retry`}

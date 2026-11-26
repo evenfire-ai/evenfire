@@ -308,3 +308,64 @@ describe('AuthPage: the password submit (R-15)', () => {
     expect(screen.queryByText('Signing in...')).toBeNull()
   })
 })
+
+type EnvironmentChangeControlRow = Readonly<{
+  control: string
+  /** What the screen holds for the control to show and be usable. */
+  auth: Partial<AuthContextValue>
+  /** Brings the control on screen, when that takes a step. */
+  show?: (user: ReturnType<typeof userEvent.setup>) => Promise<void>
+}>
+
+/** The page's controls that change the binding outside the dock (R-38; Task 14a review I-1). */
+const ENVIRONMENT_CHANGE_CONTROLS: readonly EnvironmentChangeControlRow[] = [
+  {
+    control: 'Save environment',
+    auth: {
+      runtimeConfigSetupName: 'Environment D',
+      runtimeConfigSetupExternalRestApiBaseUrl: 'https://api-d.example.test',
+    },
+    show: async user => {
+      await user.click(screen.getByLabelText('Open environment selector'))
+      await user.click(screen.getByLabelText('Add environment'))
+    },
+  },
+  {
+    control: 'Switch to Localhost & retry',
+    auth: {
+      backendSwitchHint: {
+        targetOptionId: LOCALHOST_RUNTIME_CONFIG_OPTION_ID,
+        targetLabel: 'Localhost',
+        activeLabel: 'Production',
+      },
+    },
+  },
+]
+
+describe('AuthPage: environment changes and a browser sign-in (R-38)', () => {
+  it.each(ENVIRONMENT_CHANGE_CONTROLS.map(row => [row.control, row] as const))(
+    'R-38 disables %s while a browser sign-in redeems',
+    async (_control, row) => {
+      const user = userEvent.setup()
+      const page = (auth: Partial<AuthContextValue>) => (
+        <AuthContext.Provider value={makeAuthValue({ ...row.auth, ...auth })}>
+          <AuthPage />
+        </AuthContext.Provider>
+      )
+      const control = () => screen.getByRole('button', { name: row.control }) as HTMLButtonElement
+
+      // Positive control: a waiting attempt sets nothing (D14), so the change stays offered.
+      const { rerender } = render(page({ browserSignIn: MAIN.waiting }))
+      await row.show?.(user)
+      expect(control().disabled, `${row.control} is usable while a browser sign-in waits`).toBe(
+        false
+      )
+
+      // Main redeems: the controller returns the widened flag (decision 8).
+      rerender(page({ browserSignIn: MAIN.redeeming, authTransitioning: true }))
+      expect(control().disabled, `${row.control} is disabled while a browser sign-in redeems`).toBe(
+        true
+      )
+    }
+  )
+})

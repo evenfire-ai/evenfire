@@ -850,9 +850,10 @@ export function useAuthController({
     runtimeConfigSetupName,
     runtimeConfigSetupExternalRestApiBaseUrl,
     runtimeConfigSetupRpcProxyBaseUrl,
-    // Decision 8: a redeeming browser sign-in reaches every reader of `authTransitioning`
-    // without an edit there. The dock (`RuntimeConfigDock`) is disabled. The sign-in page leaves
-    // redeeming out of its password submit's "Signing in..." label (R-15). Onboarding's invited
+    // Decision 8: a redeeming browser sign-in reaches every reader of `authTransitioning`. The
+    // dock (`RuntimeConfigDock`) is disabled, with no edit there. The sign-in page disables
+    // "Save environment" and the backend switch with it (R-38), and leaves redeeming out of its
+    // password submit's "Signing in..." label (R-15). Onboarding's invited
     // step (`InvitedMember`) shows its in-progress label, and main refuses completing setup
     // (`completeDesktopSetup`) while an attempt redeems anyway (D11). The raw flag stays what
     // the flows write and their `finally` blocks clear (X3).
