@@ -641,6 +641,7 @@ export class SlackAdapter implements ChannelAdapter {
         unsupportedAttachmentCount > 0
           ? unsupportedAttachmentNote(unsupportedAttachmentCount)
           : 'Generated document attachments could not be delivered.'
+      const threadTs = replyToMessageId ? { thread_ts: replyToMessageId } : {}
       let messageTs: string | undefined
 
       if (!hasText && !hasBlocks && (!attachments || attachments.length === 0)) {
@@ -656,7 +657,7 @@ export class SlackAdapter implements ChannelAdapter {
         const result = await this.client.chat.postMessage({
           channel: resolvedChannelId,
           text: hasText ? contentWithUnsupportedAttachmentNote : fallbackText,
-          thread_ts: replyToMessageId,
+          ...threadTs,
           ...(hasBlocks ? { blocks: slackBlocks as never } : {}),
         })
         messageTs = result.ts
@@ -689,7 +690,7 @@ export class SlackAdapter implements ChannelAdapter {
           try {
             await this.client.files.uploadV2({
               channel_id: resolvedChannelId,
-              ...(replyToMessageId ? { thread_ts: replyToMessageId } : {}),
+              ...threadTs,
               file_uploads: fileUploads,
             })
             console.log(
@@ -705,14 +706,14 @@ export class SlackAdapter implements ChannelAdapter {
           await this.client.chat.postMessage({
             channel: resolvedChannelId,
             text: 'Generated document attachments could not be delivered.',
-            thread_ts: replyToMessageId,
+            ...threadTs,
           })
           return messageTs
         }
         const fallback = await this.client.chat.postMessage({
           channel: resolvedChannelId,
           text: 'Generated document attachments could not be delivered.',
-          thread_ts: replyToMessageId,
+          ...threadTs,
         })
         return fallback.ts
       }

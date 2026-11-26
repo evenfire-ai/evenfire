@@ -57,12 +57,25 @@ function telegramInlineKeyboard(
   return inline_keyboard.length > 0 ? { inline_keyboard } : undefined
 }
 
+function telegramMessageThread(
+  options?: SendMessageOptions
+): { message_thread_id: number } | undefined {
+  const threadId = options?.telegramMessageThreadId
+  if (typeof threadId !== 'string') return undefined
+  const trimmed = threadId.trim()
+  if (trimmed === '') return undefined
+  // Topic ids are stored as strings. Grammy types this Bot API field as a number.
+  // The stored string is sent unchanged and is never copied onto reply_to_message_id.
+  return { message_thread_id: trimmed as unknown as number }
+}
+
 function sendMessageOptions(
   replyId: number | undefined,
   options?: SendMessageOptions,
   includeInlineKeyboard = false
 ): {
   reply_to_message_id?: number
+  message_thread_id?: number
   parse_mode?: 'HTML'
   reply_markup?: { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> }
 } {
@@ -71,6 +84,7 @@ function sendMessageOptions(
     : undefined
   return {
     ...(replyId ? { reply_to_message_id: replyId } : {}),
+    ...telegramMessageThread(options),
     ...(options?.parseMode === 'telegram-html' ? { parse_mode: 'HTML' as const } : {}),
     ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
   }
@@ -192,13 +206,19 @@ export async function sendTelegramMessage(
     if (inputFiles.length > 0) {
       const baseCaption = content.trim() ? content.trim() : captions[0]
       const { caption, remainder } = splitCaptionAndRemainder(baseCaption || '')
+      const thread = telegramMessageThread(options)
       const firstPhoto = await bot.api.sendPhoto(channelId, inputFiles[0], {
         caption: caption || undefined,
-        reply_to_message_id: replyId,
+        ...(replyId ? { reply_to_message_id: replyId } : {}),
+        ...thread,
       })
       const remainingPhotos = inputFiles.slice(1)
       if (remainingPhotos.length > 0) {
-        await Promise.all(remainingPhotos.map(file => bot.api.sendPhoto(channelId, file)))
+        await Promise.all(
+          remainingPhotos.map(file =>
+            thread ? bot.api.sendPhoto(channelId, file, thread) : bot.api.sendPhoto(channelId, file)
+          )
+        )
       }
 
       const trailingText = remainder.trim()
@@ -253,7 +273,8 @@ export async function sendTelegramMessage(
         const caption = attachment.caption || `${filename} (${buffer.byteLength} bytes)`
         const sent = await bot.api.sendDocument(channelId, new InputFile(buffer, filename), {
           caption: caption.slice(0, TELEGRAM_MAX_CAPTION_LENGTH),
-          reply_to_message_id: replyId,
+          ...(replyId ? { reply_to_message_id: replyId } : {}),
+          ...telegramMessageThread(options),
         })
         firstDocumentId ??= String(sent.message_id)
       } catch (err) {
@@ -267,7 +288,19 @@ export async function sendTelegramMessage(
       return textResults[0] ? String(textResults[0].message_id) : firstDocumentId
     }
     if (textResults[0]) {
-      await bot.api.sendMessage(channelId, 'Generated document attachments could not be delivered.')
+      const thread = telegramMessageThread(options)
+      if (thread) {
+        await bot.api.sendMessage(
+          channelId,
+          'Generated document attachments could not be delivered.',
+          thread
+        )
+      } else {
+        await bot.api.sendMessage(
+          channelId,
+          'Generated document attachments could not be delivered.'
+        )
+      }
       return String(textResults[0].message_id)
     }
   }

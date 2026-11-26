@@ -497,6 +497,12 @@ export interface ChannelReaderOptions {
   credentialsResolver?: { resolve(cc: CommunicationChannelCRD): Promise<ResolvedCredentials> }
 }
 
+function cronOriginThreadId(threadId: string | undefined): string | undefined {
+  if (typeof threadId !== 'string') return undefined
+  const trimmed = threadId.trim()
+  return trimmed === '' ? undefined : trimmed
+}
+
 export class ChannelReader {
   private watcher?: InstanceType<typeof CommunicationChannelWatcher>
   private adapters: Map<string, ChannelAdapter> = new Map()
@@ -2507,6 +2513,44 @@ export class ChannelReader {
   }
 
   /**
+   * Post a completed cron result on the channel that created the job.
+   * Slack's reply argument is the stored thread. Telegram sets
+   * telegramMessageThreadId and leaves the reply unset. Teams, email, and rpc
+   * do not pass origin.threadId; with no attachments they take no reply argument.
+   */
+  private async deliverCronResult(
+    adapter: ChannelAdapter,
+    result: {
+      origin: ChannelReaderRuntimeSource
+      response: string
+      attachments?: Attachment[]
+    }
+  ): Promise<void> {
+    const channelId = result.origin.channelId
+    const { response, attachments } = result
+    const threadId = cronOriginThreadId(result.origin.threadId)
+    if (result.origin.channelType === 'slack') {
+      await adapter.sendMessage(channelId, response, threadId, attachments)
+      return
+    }
+    if (result.origin.channelType === 'telegram') {
+      if (threadId) {
+        await adapter.sendMessage(channelId, response, undefined, attachments, {
+          telegramMessageThreadId: threadId,
+        })
+        return
+      }
+      await adapter.sendMessage(channelId, response, undefined, attachments)
+      return
+    }
+    if (attachments && attachments.length > 0) {
+      await adapter.sendMessage(channelId, response, undefined, attachments)
+      return
+    }
+    await adapter.sendMessage(channelId, response)
+  }
+
+  /**
    * Poll mcp-host for pending cron task results and deliver them to channels.
    * Cron tasks bypass the approval gate, so mcp-host only emits completed results.
    */
@@ -2527,12 +2571,7 @@ export class ChannelReader {
         console.log(
           `[Main] Delivering cron result: ${result.cronJobName} → ${result.origin.channelType}:${result.origin.channelId}`
         )
-        await adapter.sendMessage(
-          result.origin.channelId,
-          result.response,
-          undefined,
-          result.attachments
-        )
+        await this.deliverCronResult(adapter, result)
         await this.rpcClient.acknowledgeCronResult(result.id, result.origin)
         console.log(`[Main] Cron result delivered and acknowledged: ${result.id}`)
       }
