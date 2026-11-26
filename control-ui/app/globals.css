@@ -10032,7 +10032,7 @@ td.cu-registry-description {
   cursor: default;
 }
 
-/* Portal hover tooltip card (HoverTooltip). Fixed under the trigger,
+/* Portal hover tooltip card (HoverTooltip). Fixed near the trigger,
  * horizontally centered by the component; no fade — it appears at once. */
 .cu-hover-tooltip-card {
   position: fixed;
@@ -10040,6 +10040,10 @@ td.cu-registry-description {
   z-index: 1000;
   width: max-content;
   max-width: min(18rem, 72vw);
+  max-height: calc(100dvh - 16px);
+  box-sizing: border-box;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
   padding: var(--cu-space-2) var(--cu-space-3);
   color: var(--cu-text);
   font-size: 0.75rem;

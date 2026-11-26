@@ -67,13 +67,19 @@ export function HoverTooltip({
     )
     const spaceBelow = window.innerHeight - rect.bottom - GAP_PX
     const flipAbove = spaceBelow < cardHeight + EDGE_MARGIN_PX && rect.top >= cardHeight + GAP_PX
-    const top = flipAbove ? rect.top - GAP_PX - cardHeight : rect.bottom + GAP_PX
+    const preferredTop = flipAbove ? rect.top - GAP_PX - cardHeight : rect.bottom + GAP_PX
+    const top = Math.max(
+      EDGE_MARGIN_PX,
+      Math.min(preferredTop, window.innerHeight - cardHeight - EDGE_MARGIN_PX)
+    )
     setPos({ top, left })
   }, [open, reflowTick])
 
   useEffect(() => {
     if (!open) return
-    const onScroll = () => {
+    const onScroll = (event: Event) => {
+      // A constrained card can scroll its own text without losing hover intent.
+      if (event.target instanceof Node && cardRef.current?.contains(event.target)) return
       setHovered(false)
       setReflowTick(tick => tick + 1)
     }
