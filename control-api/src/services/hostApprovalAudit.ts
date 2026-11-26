@@ -19,6 +19,7 @@ import { rootLogger } from '../observability/logger.js'
 import { approvalBlocksEqual } from './hostApprovalRules.js'
 import { isMcpHostNativeToolName } from './mcpHostNativeToolNames.js'
 import { currentAdministrativeRequestContext } from './tracing/adminOperationContext.js'
+import { MAX_TRACE_SUMMARY_LENGTH } from './tracing/traceSafeFieldProjection.js'
 
 /**
  * A per-tool override map may be large; the line lists every changed mcp-host
@@ -221,8 +222,12 @@ export function buildHostApprovalChange(input: {
   }
 }
 
-/** The stored summary on the administrative intent event is JSON of at most this many characters. */
-export const MAX_APPROVAL_CHANGE_SUMMARY_LENGTH = 4096
+/**
+ * The stored summary on the administrative intent event is JSON of at most
+ * this many characters: the most the trace read discloses, so a summary is
+ * never dropped from the detail read for its length.
+ */
+export const MAX_APPROVAL_CHANGE_SUMMARY_LENGTH = MAX_TRACE_SUMMARY_LENGTH
 
 /**
  * Characters `JSON.stringify` leaves raw that can make a summary read

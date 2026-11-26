@@ -67,7 +67,12 @@ const LONG_TOKEN_KEYS = new Set<keyof SafeEventPayloadV1>([
 ])
 const INTEGER_KEYS = new Set<keyof SafeEventPayloadV1>(['attempt', 'count'])
 const TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/
-const MAX_SUMMARY_LENGTH = 4096
+/**
+ * The longest `summary` the administrative profile discloses. The Host
+ * approval audit keeps its summaries within it
+ * (`MAX_APPROVAL_CHANGE_SUMMARY_LENGTH` in services/hostApprovalAudit.ts).
+ */
+export const MAX_TRACE_SUMMARY_LENGTH = 4096
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARACTER_RE = /[\u0000-\u001f\u007f]/
 const SHA256_RE = /^[0-9a-f]{64}$/
@@ -104,7 +109,7 @@ function disclosedValue(key: keyof SafeEventPayloadV1, value: unknown): string |
     // change as JSON. Free text, so it is bounded, not token-checked.
     return typeof value === 'string' &&
       value.length > 0 &&
-      value.length <= MAX_SUMMARY_LENGTH &&
+      value.length <= MAX_TRACE_SUMMARY_LENGTH &&
       !CONTROL_CHARACTER_RE.test(value)
       ? value
       : null
