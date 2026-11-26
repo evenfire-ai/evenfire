@@ -3783,6 +3783,13 @@ const EXAMPLES: Example[] = [
 ]
 
 const SEED = Number(process.env.APPROVAL_MODEL_SEED ?? Date.now() % 2_147_483_647)
+const TEST_TIMEOUT_MS = (NUM_RUNS + EXAMPLES.length) * TIMEOUT_MS_PER_RUN
+/**
+ * Ruling 70: shrinking a failure stops this long before the test timeout. The
+ * run then fails with its message and the smallest counterexample found so
+ * far, never as "Test timed out". The slowest single run seen took 2.5 s.
+ */
+const REPORT_MARGIN_MS = 20_000
 
 describe('approval settings — property suite (spec §7 A4, A6)', () => {
   beforeEach(() => resetApprovalTestState())
@@ -3806,6 +3813,9 @@ describe('approval settings — property suite (spec §7 A4, A6)', () => {
     'keeps S1–S8 and L1–L5 for generated interleavings of E1–E23',
     async () => {
       console.info(`approval property suite: seed=${SEED} numRuns=${NUM_RUNS}`)
+      const shrinkUntil = Date.now() + TEST_TIMEOUT_MS - REPORT_MARGIN_MS
+      let runIndex = -1
+      let failed = false
       await fc.assert(
         fc.asyncProperty(
           fc.scheduler(),
@@ -3819,19 +3829,25 @@ describe('approval settings — property suite (spec §7 A4, A6)', () => {
               : {}),
           }),
           async (scheduler, setup, commands) => {
-            const started = Date.now()
-            const world = await startWorld(scheduler, setup)
+            // Ruling 70: past the deadline each further shrink candidate is
+            // skipped untried, so fast-check ends at once with the smallest
+            // failure it has found.
+            if (failed && Date.now() > shrinkUntil) fc.pre(false)
+            if (!failed) runIndex += 1
             try {
-              await fc.asyncModelRun(() => ({ model: {}, real: world }), commands)
-              await drain(world)
-              checkScriptFollowed(world)
-              checkPin(world, setup.pin)
-              checkAtRest(world)
-              totals.runs += 1
-              totals.ms.push(Date.now() - started)
-              addStats(totals.stats, world.stats)
-            } finally {
-              await stopWorld(world)
+              await runOnce(scheduler, setup, commands)
+            } catch (error) {
+              if (!failed) {
+                failed = true
+                // Logged before shrinking starts, so the failure shows even
+                // if what follows is cut short.
+                const path = process.env.APPROVAL_MODEL_PATH ?? String(runIndex)
+                console.error(
+                  `approval property suite: first failure, seed=${SEED} path=${path}\n` +
+                    (error instanceof Error ? error.message : String(error))
+                )
+              }
+              throw error
             }
           }
         ),
@@ -3848,6 +3864,28 @@ describe('approval settings — property suite (spec §7 A4, A6)', () => {
       )
       expect(totals.runs).toBeGreaterThan(0)
     },
-    (NUM_RUNS + EXAMPLES.length) * TIMEOUT_MS_PER_RUN
+    TEST_TIMEOUT_MS
   )
 })
+
+/** One run: a world from the setup, the commands, the drain, and the checks at rest. */
+async function runOnce(
+  scheduler: fc.Scheduler,
+  setup: Setup,
+  commands: Iterable<fc.AsyncCommand<Model, World>>
+): Promise<void> {
+  const started = Date.now()
+  const world = await startWorld(scheduler, setup)
+  try {
+    await fc.asyncModelRun(() => ({ model: {}, real: world }), commands)
+    await drain(world)
+    checkScriptFollowed(world)
+    checkPin(world, setup.pin)
+    checkAtRest(world)
+    totals.runs += 1
+    totals.ms.push(Date.now() - started)
+    addStats(totals.stats, world.stats)
+  } finally {
+    await stopWorld(world)
+  }
+}
