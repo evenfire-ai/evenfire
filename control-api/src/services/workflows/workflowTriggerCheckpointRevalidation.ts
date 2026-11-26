@@ -15,11 +15,10 @@ import {
   authorityDatabaseFailure,
   isAuthorityDependencyUnavailable,
 } from '../access/authorityDependency.js'
-import { type LogicalSessionCheckpointAuthority } from '../access/principalAuthoritySnapshot.js'
+import { type UserGrantContinuationAuthority } from '../access/principalAuthoritySnapshot.js'
 import { canonicalWorkflowRunId } from '../access/workflowRunId.js'
 
 type StoredWorkflowBinding = Readonly<{
-  id: string
   binding_kind: 'trigger' | 'run_management'
   path_kind: 'direct' | 'team'
   effective_team_id: string | null
@@ -60,7 +59,6 @@ type RevalidationStage =
   | 'path_resolution'
   | 'selected_path_resolution'
   | 'destination'
-  | 'binding_expiry'
 
 /**
  * A step of the revalidation failed. A dependency failure (the request budget
@@ -98,8 +96,12 @@ function sameStoredPath(
  * Run creation and progress writes advance subject revisions after a workflow
  * binding is issued. Revalidate only an authenticated WRC checkpoint against
  * its exact persisted trigger or resume action and the same direct/team grant
- * lineage. The stored source expiry remains authoritative; this does not issue
- * or refresh a user credential.
+ * lineage. Continuation is anchored on the user who started the run: the live
+ * checks are the user's lifecycle state, the grant and membership of the
+ * stored path kind and team, the path's behavior and the destination. The
+ * stored delegation expiry and the login session the delegation was issued
+ * from are provenance and are not checked. This does not issue or refresh a
+ * user credential.
  */
 export async function revalidateWorkflowTriggerCheckpoint(input: {
   request: ActionAuthorityCheckpointRequestV2
@@ -157,8 +159,7 @@ export async function revalidateWorkflowTriggerCheckpoint(input: {
       ? await runAccessDatabaseQuery(
           input.db,
           input.budget,
-          `SELECT binding.id::text AS id,
-              binding.binding_kind,
+          `SELECT binding.binding_kind,
               binding.path_kind,
               binding.effective_team_id::text AS effective_team_id
          FROM workflow_authority_bindings binding
@@ -175,7 +176,6 @@ export async function revalidateWorkflowTriggerCheckpoint(input: {
           AND binding.access_path_id = $8
           AND binding.authorization_revision = $9
           AND binding.behavior_binding_hash = $10
-          AND binding.source_expires_at > clock_timestamp()
           AND EXISTS (
             SELECT 1
               FROM workflow_runs run
@@ -217,8 +217,7 @@ export async function revalidateWorkflowTriggerCheckpoint(input: {
       : await runAccessDatabaseQuery(
           input.db,
           input.budget,
-          `SELECT binding.id::text AS id,
-                  binding.binding_kind,
+          `SELECT binding.binding_kind,
                   binding.path_kind,
                   binding.effective_team_id::text AS effective_team_id,
                   run.recipe_namespace,
@@ -245,14 +244,10 @@ export async function revalidateWorkflowTriggerCheckpoint(input: {
               AND binding.access_path_id = $9
               AND binding.authorization_revision = $10
               AND binding.behavior_binding_hash = $11
-              AND binding.source_expires_at > clock_timestamp()
               AND run.actor_type = 'user'
               AND run.actor_id = binding.user_id
               AND run.phase IN ('Pending', 'Running', 'AuthorizationPaused')
               AND initiating.user_id = binding.user_id
-              AND initiating.session_id = binding.session_id
-              AND initiating.session_version = binding.session_version
-              AND initiating.source_expires_at > clock_timestamp()
               AND initiating.path_kind = binding.path_kind
               AND initiating.effective_team_id IS NOT DISTINCT FROM binding.effective_team_id
               AND run.team_id IS NOT DISTINCT FROM binding.effective_team_id
@@ -303,9 +298,9 @@ export async function revalidateWorkflowTriggerCheckpoint(input: {
     return invalidBinding()
   }
 
-  const session: LogicalSessionCheckpointAuthority = Object.freeze({
+  const session: UserGrantContinuationAuthority = Object.freeze({
     contract: 'v2',
-    authorityMode: 'logical_session_checkpoint',
+    authorityMode: 'user_grant_continuation',
     userId: request.principal.sub,
     sid: request.principal.sid,
     sessionVersion: request.principal.sessionVersion,
@@ -386,26 +381,11 @@ export async function revalidateWorkflowTriggerCheckpoint(input: {
       : { version: 2, status: 'not_found', code: 'not_found' }
   }
 
-  try {
-    const stillCurrent = await runAccessDatabaseQuery(
-      input.db,
-      input.budget,
-      `SELECT source_expires_at > clock_timestamp() AS current
-         FROM workflow_authority_bindings
-        WHERE id = $1`,
-      [stored.id],
-      { onDatabaseFailure: authorityDatabaseFailure }
-    )
-    if ((stillCurrent.rows[0] as { current?: boolean } | undefined)?.current !== true) {
-      return { version: 2, status: 'denied', code: 'forbidden' }
-    }
-  } catch (error) {
-    return unavailableOnDependencyFailure(error, 'binding_expiry')
-  }
-
   // Revalidation proves the current policy still allows this exact operation,
-  // target, session, and persisted grant lineage. The original revision and
+  // target, user, and persisted grant lineage. The original revision and
   // behavior hash remain immutable provenance; neither is refreshed or issued.
+  // The stored `sid` and `sessionVersion` are echoed in the attribution and are
+  // not compared with a live session.
   return Object.freeze({
     version: 2,
     status: 'allowed',

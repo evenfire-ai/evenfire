@@ -1040,6 +1040,89 @@ describeRealPostgres('workflow trigger selected-path attribution on real Postgre
     }
   })
 
+  it('a user-anchored checkpoint answer passes the workflow-recipes binding check', async () => {
+    vi.stubEnv('INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET', config.internalControlJwtWrcHmacSecret)
+    const { result } = await runSelectedTrigger(bothGrantRecipe, 'team')
+    if (result.kind !== 'run') throw new Error('actual V2 producer did not create a workflow run')
+
+    const checkpointApp = express()
+    checkpointApp.use(express.json())
+    checkpointApp.use('/api/v1', createInternalActionAuthorityCheckpointRouter(gateway))
+    checkpointServer = checkpointApp.listen(0, '127.0.0.1')
+    await once(checkpointServer, 'listening')
+    const checkpointAddress = checkpointServer.address()
+    if (!checkpointAddress || typeof checkpointAddress === 'string') {
+      throw new Error('workflow checkpoint test server did not bind a TCP port')
+    }
+    const answers: Array<{ httpStatus: number; body: Record<string, any> }> = []
+    const checkpoint = createWorkflowRunAuthorityCheckpointer({
+      baseUrl: `http://127.0.0.1:${checkpointAddress.port}`,
+      fetchImpl: async (url, init) => {
+        const response = await fetch(url, init)
+        answers.push({ httpStatus: response.status, body: await response.clone().json() })
+        return response
+      },
+    })
+    // The run row as workflow-recipes reads it (`SELECT_RUN`, dbRunProcessor.ts),
+    // limited to the columns the checkpoint client reads.
+    const loaded = await databasePool.query(
+      `SELECT run.run_id, run.recipe_namespace, run.recipe_name, run.actor_type, run.actor_id,
+              jsonb_build_object(
+                'version', binding.binding_version,
+                'userId', binding.user_id,
+                'sid', binding.session_id,
+                'sessionVersion', binding.session_version,
+                'delegationJti', binding.delegation_jti,
+                'operationId', binding.operation_id,
+                'resource', binding.resource,
+                'target', binding.target,
+                'targetHash', binding.target_hash,
+                'accessPathId', binding.access_path_id,
+                'authorizationRevision', binding.authorization_revision,
+                'pathKind', binding.path_kind,
+                'effectiveTeamId', binding.effective_team_id,
+                'behaviorBindingHash', binding.behavior_binding_hash
+              ) AS authority_binding
+         FROM workflow_runs run
+         JOIN workflow_authority_bindings binding
+           ON binding.id = run.initiating_authority_binding_id
+        WHERE run.run_id = $1`,
+      [result.row.run_id]
+    )
+    const run = loaded.rows[0]
+    const binding = run.authority_binding
+
+    // The real client validation (workflowActionCheckpointClient.ts) accepts
+    // the answer: attribution user, sid and session version equal the binding's.
+    await expect(checkpoint(run)).resolves.toBeUndefined()
+    expect(answers).toHaveLength(1)
+    expect(answers[0]).toMatchObject({
+      httpStatus: 200,
+      body: {
+        status: 'allowed',
+        attribution: {
+          userId: binding.userId,
+          sid: binding.sid,
+          sessionVersion: binding.sessionVersion,
+          pathKind: 'team',
+          effectiveTeamId: teamId,
+        },
+      },
+    })
+
+    // A binding whose sid differs from the stored binding's is refused by the
+    // same client as invalid_binding.
+    const foreignSid = { ...run, authority_binding: { ...binding, sid: randomUUID() } }
+    await expect(checkpoint(foreignSid)).rejects.toMatchObject({
+      name: 'WorkflowAuthorityCheckpointError',
+      failure: 'invalid_binding',
+      retryable: false,
+    })
+    // Witness: the refused request reached control-api and got its answer.
+    expect(answers).toHaveLength(2)
+    expect(answers[1]).toMatchObject({ httpStatus: 400, body: { status: 'invalid_binding' } })
+  })
+
   it('does not resume a run after its initiating delegation expires', async () => {
     const { result, caller } = await runSelectedTrigger(teamOnlyRecipe, 'team')
     expect(result.kind).toBe('run')
