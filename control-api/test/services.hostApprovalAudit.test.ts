@@ -430,15 +430,38 @@ describe('buildHostApprovalChange', () => {
       expect(parsedSummary.fields.shellClassifierModel.new).toBe(`model${hostile}`)
     })
 
-    it('a defaultPolicy outside the CRD enum stays out of the summary and the line', () => {
-      const before = block({ modeCeiling: 'manual' })
-      const after = block({ defaultPolicy: 'typed-by-an-admin-not-a-policy', modeCeiling: 'auto' })
+    it('a defaultPolicy outside the CRD enum is recorded as a fixed marker, never as null (valid to invalid)', () => {
+      const before = block({ defaultPolicy: 'cli_only', modeCeiling: 'manual' })
+      const after = block({
+        defaultPolicy: 'typed-by-an-admin-not-a-policy',
+        modeCeiling: 'auto',
+      })
       const change = buildHostApprovalChange({ before, after })
+      expect(change?.fields.defaultPolicy).toEqual({ old: 'cli_only', new: '(not a policy value)' })
       // The partner: the same write's modeCeiling change is audited.
-      expect(Object.keys(change?.fields ?? {})).toEqual(['modeCeiling'])
+      expect(change?.fields.modeCeiling).toEqual({ old: 'manual', new: 'auto' })
       const summary = buildApprovalChangeSummary({ before, after }) as string
-      expect(summary).toContain('"modeCeiling"')
+      expect(summary).toContain('(not a policy value)')
       expect(summary).not.toContain('typed-by-an-admin')
+    })
+
+    it('a stored defaultPolicy outside the enum becoming valid shows the marker as old (invalid to valid)', () => {
+      const change = buildHostApprovalChange({
+        before: block({ defaultPolicy: 'legacy-free-text' }),
+        after: block({ defaultPolicy: 'channel_users' }),
+      })
+      expect(change?.fields).toEqual({
+        defaultPolicy: { old: '(not a policy value)', new: 'channel_users' },
+      })
+      expect(JSON.stringify(change)).not.toContain('legacy-free-text')
+    })
+
+    it('a non-string defaultPolicy is a marker too, whatever String() would make of it', () => {
+      const change = buildHostApprovalChange({
+        before: block({ defaultPolicy: 'cli_only' }),
+        after: block({ defaultPolicy: ['cli_only'] }),
+      })
+      expect(change?.fields.defaultPolicy).toEqual({ old: 'cli_only', new: '(not a policy value)' })
     })
 
     it('a defaultPolicy that is an enum value is still audited', () => {

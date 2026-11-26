@@ -81,11 +81,18 @@ type Walk = {
  */
 const TOP_LEVEL_FIELDS = ['modeCeiling', 'defaultPolicy', 'shellClassifierModel'] as const
 /**
- * The Host CRD's `defaultPolicy` enum. A value outside it cannot be stored (the
- * apiserver rejects it), but the summary is built before that check, so it is
- * kept out: an admin-typed string never reaches the durable record.
+ * The Host CRD's `defaultPolicy` enum, pinned to the CRD fixture by a test. A
+ * value outside it cannot be stored (the apiserver rejects it), but the summary
+ * is built before that check, so it is recorded as `NOT_A_POLICY_VALUE`: an
+ * admin-typed string never reaches the durable record, and the entry never
+ * reads as a removal.
  */
-const DEFAULT_POLICIES: readonly string[] = ['cli_only', 'channel_users', 'designated_approvers']
+export const DEFAULT_POLICIES: readonly string[] = [
+  'cli_only',
+  'channel_users',
+  'designated_approvers',
+]
+export const NOT_A_POLICY_VALUE = '(not a policy value)'
 const CHANNEL_TYPES = ['telegram', 'email', 'slack', 'teams'] as const
 const CHANNEL_FIELDS = ['enabled', 'allowModeChange'] as const
 
@@ -94,8 +101,15 @@ function flatten(approval: unknown): Walk {
   if (!isRecord(approval)) return out
   for (const key of TOP_LEVEL_FIELDS) {
     if (!Object.hasOwn(approval, key)) continue
-    if (key === 'defaultPolicy' && !DEFAULT_POLICIES.includes(String(approval[key]))) continue
-    out.leaves.set(key, approval[key])
+    const value = approval[key]
+    const isPolicy = typeof value === 'string' && DEFAULT_POLICIES.includes(value)
+    // null and undefined stay absent; any other non-enum value is the marker.
+    out.leaves.set(
+      key,
+      key === 'defaultPolicy' && value !== null && value !== undefined && !isPolicy
+        ? NOT_A_POLICY_VALUE
+        : value
+    )
   }
   if (isRecord(approval.channels)) {
     for (const type of CHANNEL_TYPES) {
