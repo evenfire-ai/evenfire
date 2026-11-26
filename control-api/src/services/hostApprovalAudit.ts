@@ -295,8 +295,9 @@ export type SummaryOptions = {
  * The change as the JSON text kept on the administrative intent event
  * (`summary`, spec §6.8). The text is always valid JSON of at most
  * `MAX_APPROVAL_CHANGE_SUMMARY_LENGTH` characters, never a JSON string cut
- * mid-way. Native tool entries are kept as long as anything can be, in four
- * tiers:
+ * mid-way. Native tool entries are kept ahead of everything else except the
+ * changed `modeCeiling` and `defaultPolicy`, which rank above them (Ruling
+ * 76), in four tiers:
  *
  * 1. Entries of other tools are dropped one by one, from the end, and counted
  *    into `toolsTruncated`, until the text fits.
@@ -311,10 +312,10 @@ export type SummaryOptions = {
  *    `modeCeiling` and `defaultPolicy`, old and new (they decide whether a
  *    person is asked, and who). The other fields show only as counts.
  * 4. Only if even that cannot fit (mcp-host gaining about 15 more native
- *    tools), native entries are cut from the end of the counts-only object
- *    (which keeps `modeCeiling` and `defaultPolicy` while they fit),
- *    counted in `nativeToolsTruncated`, and a `host_approval_summary_oversize`
- *    warning is logged, so nothing disappears silently.
+ *    tools), native entries are cut from the end of the counts-only object,
+ *    which keeps `modeCeiling` and `defaultPolicy`, counted in
+ *    `nativeToolsTruncated`, and a `host_approval_summary_oversize` warning
+ *    is logged, so nothing disappears silently.
  */
 export function serializeApprovalChangeSummary(
   change: HostApprovalChange,
