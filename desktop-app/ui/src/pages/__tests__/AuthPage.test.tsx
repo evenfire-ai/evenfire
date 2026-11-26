@@ -2,6 +2,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { BrowserSignInAttempts } from '../../../../src/browserSignIn'
+import type { BrowserSignInSnapshot } from '../../../../src/types'
+import { FakeBrowserSignInClock } from '../../../../testSupport/browserSignInClock'
 import { LOCALHOST_RUNTIME_CONFIG_OPTION_ID } from '../../constants/runtimeConfig'
 import { AuthContext } from '../../contexts/AuthContext'
 import type { AuthContextValue } from '../../contexts/AuthContext'
@@ -10,6 +13,46 @@ import { AuthPage } from '../AuthPage'
 afterEach(() => {
   cleanup()
 })
+
+const BINDING = Object.freeze({
+  environmentKey: 'fixture_env-0123456789ab',
+  profileId: null,
+  restBaseUrl: 'https://edge-fixture.example.test',
+})
+
+/**
+ * What a real attempt store pushes for one attempt as it waits, then redeems: the renderer is fed
+ * main's own snapshots (T1).
+ */
+async function captureMainSnapshots() {
+  const pushes: BrowserSignInSnapshot[] = []
+  const store = new BrowserSignInAttempts({
+    push: snapshot => {
+      pushes.push(snapshot)
+    },
+    warn: (message, error) => {
+      throw new Error(`unexpected browser sign-in store warning: ${message}`, { cause: error })
+    },
+    clock: new FakeBrowserSignInClock(),
+  })
+  const attemptId = store.record({
+    state: 'fake-state-1',
+    verifier: 'fake-verifier-1',
+    binding: BINDING,
+    generation: 1,
+  })
+  if (!store.beginRedeem(attemptId)) throw new Error(`attempt ${attemptId} did not begin to redeem`)
+  // The store pushes each snapshot on a microtask.
+  await new Promise<void>(resolve => setTimeout(resolve, 0))
+  const pushed = (phase: 'waiting' | 'redeeming') => {
+    const snapshot = pushes.find(item => item.phase === phase)
+    if (!snapshot) throw new Error(`the store pushed no ${phase} snapshot`)
+    return snapshot
+  }
+  return Object.freeze({ waiting: pushed('waiting'), redeeming: pushed('redeeming') })
+}
+
+const MAIN = await captureMainSnapshots()
 
 // The environment dock probes for a local Evenfire and only lists Localhost
 // when one answers, so these tests must say whether one is running.
@@ -229,5 +272,39 @@ describe('AuthPage', () => {
     renderAuthPage({ backendSwitchHint: null })
 
     expect(screen.queryByRole('button', { name: /Switch to .* & retry/ })).toBeNull()
+  })
+})
+
+/** The password form's submit, with whatever label it shows. */
+function passwordSubmit(): HTMLButtonElement {
+  const form = screen.getByLabelText('Password').closest('form')
+  const submit = form?.querySelector('button[type="submit"]')
+  if (!(submit instanceof HTMLButtonElement)) throw new Error('the password form has no submit')
+  return submit
+}
+
+describe('AuthPage: the password submit (R-15)', () => {
+  it('R-15 says "Signing in..." for a password sign-in, not while a browser sign-in redeems', () => {
+    // A password sign-in in flight: the controller sets `busy` and the raw flag.
+    const { unmount } = renderAuthPage({
+      busy: true,
+      authTransitioning: true,
+      email: 'member@example.test',
+      password: 'fake-password',
+    })
+    expect(passwordSubmit().textContent, 'a password sign-in shows its progress').toBe(
+      'Signing in...'
+    )
+    unmount()
+
+    // A browser sign-in redeems: the controller returns the widened flag (decision 8).
+    renderAuthPage({
+      authTransitioning: true,
+      browserSignIn: MAIN.redeeming,
+      email: 'member@example.test',
+      password: 'fake-password',
+    })
+    expect(passwordSubmit().textContent, 'redeeming is not a password sign-in').toBe('Sign in')
+    expect(screen.queryByText('Signing in...')).toBeNull()
   })
 })

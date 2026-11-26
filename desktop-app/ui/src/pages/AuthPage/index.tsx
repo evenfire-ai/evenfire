@@ -23,6 +23,7 @@ export function AuthPage() {
     runtimeConfigSetupExternalRestApiBaseUrl,
     authTransitioning,
     backendSwitchHint,
+    browserSignIn,
     setEmail,
     setPassword,
     setRuntimeConfigSetupName,
@@ -39,6 +40,10 @@ export function AuthPage() {
     Boolean(runtimeConfigSetupName.trim()) &&
     Boolean(runtimeConfigSetupExternalRestApiBaseUrl.trim())
   const [forgotPasswordBusy, setForgotPasswordBusy] = useState(false)
+  // `authTransitioning` also holds while a browser sign-in redeems (decision 8), which is not a
+  // password sign-in, so the submit says "Signing in..." only for the flows that set the flag
+  // themselves (R-15).
+  const passwordSigningIn = authTransitioning && browserSignIn.phase !== 'redeeming'
 
   const handlePasswordSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -144,7 +149,7 @@ export function AuthPage() {
               />
             </Field>
             <Button block disabled={!hasPasswordLoginCredentials || busy} type="submit">
-              {authTransitioning ? (
+              {passwordSigningIn ? (
                 <span className="auth-button-loading">
                   <span className="auth-button-spinner" aria-hidden="true" />
                   Signing in...
