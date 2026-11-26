@@ -9,6 +9,7 @@ import {
   createMockCoreApi,
   createMockNetworkingApi,
   createMockRbacApi,
+  signedAssertionRpcProxyDeployment,
 } from '../test/__fixtures__/testMocks'
 import {
   HostFleetReconcileError,
@@ -59,6 +60,7 @@ vi.mock('./config', () => ({
     gfscPort: 8087,
     desktopPort: 3000,
     rpcProxyNamespace: 'rpc-proxy',
+    hostRpcProxyEdgeProtocol: 'signed-assertion-v1',
     channelsNamespace: 'channels',
     hostK8sRequestTimeoutMs: 30_000,
     hostFullReconcileConcurrency: 2,
@@ -1499,8 +1501,11 @@ describe('HostReconciler Host inventory mutation authority', () => {
     })
     vi.spyOn(reconciler as any, 'hasChannelIngress').mockReturnValue(false)
     appsApi.createNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
-    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
-    appsApi.readNamespacedDeployment.mockImplementationOnce(async () => {
+    let hostDeploymentReads = 0
+    appsApi.readNamespacedDeployment.mockImplementation(async ({ name }: { name: string }) => {
+      if (name === 'rpc-proxy') return signedAssertionRpcProxyDeployment()
+      hostDeploymentReads += 1
+      if (hostDeploymentReads === 1) throw { code: 404 }
       current = {
         ...host,
         generation: 4,
@@ -1519,7 +1524,12 @@ describe('HostReconciler Host inventory mutation authority', () => {
     await expect(reconciler.reconcile(host)).rejects.toThrow(/Host spec generation/)
 
     expect(appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
-    expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(2)
+    // Two Host reads, plus the RPC Proxy cohort read the create waited on.
+    expect(hostDeploymentReads).toBe(2)
+    expect(appsApi.readNamespacedDeployment).toHaveBeenCalledWith({
+      name: 'rpc-proxy',
+      namespace: 'rpc-proxy',
+    })
     expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
   })
 
@@ -1547,7 +1557,8 @@ describe('HostReconciler Host inventory mutation authority', () => {
     })
     vi.spyOn(reconciler as any, 'hasChannelIngress').mockReturnValue(false)
     appsApi.createNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
-    appsApi.readNamespacedDeployment.mockImplementation(async () => {
+    appsApi.readNamespacedDeployment.mockImplementation(async ({ name }: { name: string }) => {
+      if (name === 'rpc-proxy') return signedAssertionRpcProxyDeployment()
       deploymentReads += 1
       if (deploymentReads === 2) {
         current = {
@@ -1575,7 +1586,13 @@ describe('HostReconciler Host inventory mutation authority', () => {
     }
 
     expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
-    expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(2)
+    // Two Host reads; the unlabelled existing Deployment also made the replace
+    // read the RPC Proxy cohort.
+    expect(deploymentReads).toBe(2)
+    expect(appsApi.readNamespacedDeployment).toHaveBeenCalledWith({
+      name: 'rpc-proxy',
+      namespace: 'rpc-proxy',
+    })
     expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
   })
 

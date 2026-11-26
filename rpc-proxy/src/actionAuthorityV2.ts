@@ -26,6 +26,12 @@ export type AuthorizedActionV2 = Readonly<{
   checkpoint: Extract<ActionAuthorityCheckpointResponseV2, { status: 'allowed' }>
   trustedEdgeContext: TrustedEdgeActionContextV2
   trustedEdgeHeader: string
+  /**
+   * The edge assertion control-api issued with this checkpoint, sent to the
+   * Host with `trustedEdgeHeader`. Present exactly when the destination is a
+   * Host; null for an MCP server destination or none.
+   */
+  hostEdgeAssertion: string | null
 }>
 
 export type HostMessageAdmissionRetryContext = Readonly<{
@@ -304,6 +310,12 @@ export async function authorizeActionV2(
   ) {
     throw new ActionAuthorityCheckpointError(503, 'authority_unavailable')
   }
+  // The Host accepts a V2 request only with the assertion issued by the same
+  // checkpoint; a control-api that does not issue one cannot authorize it.
+  const hostEdgeAssertion = parsed.hostEdgeAssertion ?? null
+  if (parsed.destination?.kind === 'host' && hostEdgeAssertion === null) {
+    throw new ActionAuthorityCheckpointError(503, 'authority_unavailable')
+  }
   if (admissionReceipt) options.onHostMessageAdmissionReceipt?.(admissionReceipt)
 
   const now = Date.now()
@@ -338,12 +350,17 @@ export async function authorizeActionV2(
   const trustedEdgeHeader = Buffer.from(JSON.stringify(trustedEdgeContext), 'utf8').toString(
     'base64url'
   )
-  const { hostMessageAdmissionReceipt: _privateReceipt, ...checkpointWithoutReceipt } = parsed
+  const {
+    hostMessageAdmissionReceipt: _privateReceipt,
+    hostEdgeAssertion: _assertion,
+    ...checkpointWithoutCredentials
+  } = parsed
   return Object.freeze({
     claims,
     bound,
-    checkpoint: checkpointWithoutReceipt as typeof parsed,
+    checkpoint: checkpointWithoutCredentials as typeof parsed,
     trustedEdgeContext,
     trustedEdgeHeader,
+    hostEdgeAssertion,
   })
 }

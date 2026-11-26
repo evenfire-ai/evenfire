@@ -462,9 +462,12 @@ wait_until "the DNS fixture to start" "$READY_SECONDS" dns_ready || { docker log
 AUTH_SECRET="secret-$RUN_ID"
 (
   cd "$HCC_DIR"
+  # HCC config requires the edge protocol label that its Deployment sets
+  # (deploy/base/control-plane/host-context-controller.yaml).
   # shellcheck disable=SC2016 # TypeScript source; ${...} is a JS template literal.
   TEMPLATE_DIR="$WORK/templates" SECURITY_ARGS="$WORK/proxy-security-args" \
     PROXY_ENV_FILE="$WORK/proxy-env-entry" \
+    CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL=signed-assertion-v1 \
     node node_modules/ts-node/dist/bin.js --transpile-only -e '
 import * as fs from "fs"
 import * as path from "path"

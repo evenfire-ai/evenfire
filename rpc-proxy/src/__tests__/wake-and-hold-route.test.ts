@@ -32,6 +32,7 @@ const serviceMock = vi.hoisted(() => ({
   forwardTaskResultFromHost: vi.fn(),
   listAllowedServersForUser: vi.fn(),
   resolveHostConnectionForUser: vi.fn(),
+  refreshV1HostConnection: vi.fn(),
   resolveServerConnectionForUser: vi.fn(),
   validateRpcRequest: vi.fn(),
   UpstreamHostError: class UpstreamHostError extends Error {
@@ -121,6 +122,7 @@ beforeEach(() => {
   vi.resetAllMocks()
   authTokenMock.verifyRpcToken.mockReturnValue({ ...VALID_CLAIMS })
   serviceMock.resolveHostConnectionForUser.mockResolvedValue({ ...HOST_CONNECTION })
+  serviceMock.refreshV1HostConnection.mockResolvedValue(null)
 })
 
 afterEach(() => {

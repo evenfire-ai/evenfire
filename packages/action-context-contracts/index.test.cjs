@@ -34,18 +34,73 @@ test('Host route deterministic validators preserve approval, model, and title ru
   })
 })
 
-test('RPC Proxy to MCP Host edge authentication uses one canonical dedicated header', () => {
-  assert.equal(
-    contracts.RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER,
-    'x-clerum-rpc-proxy-edge-token'
+test('no production source still reads or sends the removed static rpc-proxy edge token', () => {
+  const { execFileSync, spawnSync } = require('node:child_process')
+  const repoRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+    cwd: __dirname,
+    encoding: 'utf8',
+  }).trim()
+  const sourcePathspec = [
+    '--',
+    '.',
+    ':!docs',
+    ':!*.md',
+    ':!*.test.*',
+    ':!**/__tests__/**',
+    ':!**/test/**',
+    ':!tests/**',
+  ]
+  const grep = (pattern) =>
+    spawnSync('git', ['grep', '-n', '-E', pattern, ...sourcePathspec], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    })
+  // Liveness witness: the same pathspec finds the assertion header the forwarders now send.
+  const witness = grep('x-clerum-edge-assertion|HOST_EDGE_ASSERTION_HEADER')
+  assert.equal(witness.status, 0, witness.stderr)
+  assert.ok(witness.stdout.includes('rpc-proxy/src/'), 'witness must reach rpc-proxy source')
+  assert.ok(witness.stdout.includes('mcp-host/src/'), 'witness must reach mcp-host source')
+  const removed = grep(
+    'RPC_PROXY_MCP_HOST_EDGE_TOKEN|MCP_HOST_RPC_PROXY_EDGE_TOKEN|rpcProxyServiceAuthenticated|parseRpcProxyEdgeToken|rpcProxyEdgeToken|mcpHostEdgeToken|x-clerum-rpc-proxy-edge-token'
   )
+  assert.equal(removed.status, 1, `static edge token still referenced:\n${removed.stdout}`)
 })
 
-test('local RPC Proxy and MCP Host share one explicit development credential', () => {
-  assert.equal(
-    contracts.RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT,
-    'dev-rpc-proxy-mcp-host-edge-token'
-  )
+test('Host edge assertion constants pin the wire contract and no static edge token remains', () => {
+  assert.equal(contracts.HOST_EDGE_ASSERTION_HEADER, 'x-clerum-edge-assertion')
+  assert.equal(contracts.HOST_EDGE_ASSERTION_AUDIENCE, 'evenfire-host-runtime-edge')
+  assert.equal(contracts.HOST_EDGE_ASSERTION_JWT_TYPE, 'host-edge-assertion+jwt')
+  assert.equal(contracts.HOST_EDGE_ASSERTION_CLAIM_TYPE, 'host_edge_assertion')
+  assert.equal(contracts.HOST_EDGE_ASSERTION_MAX_TTL_SECONDS, 300)
+  assert.equal(contracts.HOST_EDGE_ASSERTION_MAX_IAT_SKEW_SECONDS, 5)
+  assert.equal(Object.isFrozen(contracts.HOST_EDGE_RPC_PROXY_ROUTE_SCOPES), true)
+  assert.equal(Object.keys(contracts.HOST_EDGE_RPC_PROXY_ROUTE_SCOPES).length, 19)
+  assert.equal('RPC_PROXY_MCP_HOST_EDGE_TOKEN_HEADER' in contracts, false)
+  assert.equal('RPC_PROXY_MCP_HOST_EDGE_TOKEN_DEV_DEFAULT' in contracts, false)
+})
+
+test('Host edge route scope map pins the scope of each of the 19 Host routes', () => {
+  assert.deepEqual(contracts.HOST_EDGE_RPC_PROXY_ROUTE_SCOPES, {
+    'GET /v1/runtime/status': 'host:status:read',
+    'GET /v1/runtime/activity': 'host:activity:read',
+    'GET /v1/runtime/activity/stream': 'host:activity:read',
+    'POST /v1/runtime/messages': 'host:message:invoke',
+    'POST /v1/runtime/approvals/approve': 'host:approval:write',
+    'POST /v1/runtime/approvals/deny': 'host:approval:write',
+    'GET /v1/runtime/sessions/search': 'host:session:read',
+    'GET /v1/runtime/sessions': 'host:session:read',
+    'GET /v1/runtime/sessions/:agent/:chatId/messages': 'host:session:read',
+    'GET /v1/runtime/sessions/:agent/:chatId/context-breakdown': 'host:session:read',
+    'GET /v1/runtime/tasks/:taskId/result': 'host:message:invoke',
+    'POST /v1/runtime/tasks/:taskId/cancel': 'host:message:invoke',
+    'GET /v1/runtime/models': 'host:session:read',
+    'POST /v1/runtime/model': 'host:model:write',
+    'PATCH /v1/runtime/sessions/:agent/:chatId/name': 'host:session:write',
+    'PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode': 'host:approval:write',
+    'GET /v1/runtime/tasks/:taskId/progress/stream': 'host:activity:read',
+    'GET /v1/runtime/artifacts': 'host:task:read',
+    'GET /v1/runtime/artifacts/:filename/download': 'host:task:read',
+  })
 })
 
 test('overlong normalized titles skip unbounded code-point array materialization', () => {
@@ -342,6 +397,29 @@ test('checkpoint response accepts only strict server-derived destinations on all
       url: 'https://search.internal.example/rpc',
     }
   )
+  const hostEdgeAssertion = 'eyJhbGciOiJSUzI1NiJ9.eyJ2IjoyfQ.c2lnbmF0dXJl'
+  assert.equal(
+    contracts.validateActionAuthorityCheckpointResponse({ ...allowed, hostEdgeAssertion })
+      .hostEdgeAssertion,
+    hostEdgeAssertion
+  )
+  for (const refused of [
+    { ...allowed, destination: null, hostEdgeAssertion },
+    {
+      ...allowed,
+      destination: {
+        kind: 'mcp_server',
+        ref: 'mcp-system/search',
+        url: 'https://search.internal.example/rpc',
+      },
+      hostEdgeAssertion,
+    },
+    { ...allowed, hostEdgeAssertion: 'not-a-jws' },
+    { ...allowed, hostEdgeAssertion: 42 },
+    { ...allowed, hostEdgeAssertion: `${'a'.repeat(8190)}.b.c` },
+  ]) {
+    assert.throws(() => contracts.validateActionAuthorityCheckpointResponse(refused))
+  }
   for (const destination of [
     { kind: 'host', ref: 'not-namespaced', url: 'http://host.internal' },
     { kind: 'host', ref: 'mcp-host/host-b', url: 'file:///etc/passwd' },
@@ -500,5 +578,323 @@ test('message-retry wake contract is a separate same-Host source-binding variant
       sourceBinding,
       wakeReason: 'explicit',
     })
+  )
+})
+
+const {
+  generateKeyPairSync,
+  randomUUID,
+  sign: cryptoSign,
+  verify: cryptoVerify,
+} = require('node:crypto')
+
+function base64UrlJson(value) {
+  return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url')
+}
+
+// A test signer that mirrors the control-api producer: RS256 compact JWS with the header typ, the
+// issuer, the audience constant, a UUID jti and an expiry bounded by the maximum lifetime. The
+// round trip through the real producer runs in control-api
+// (test/routes.rpcAccessUsers.hostEdgeAssertion.test.ts and
+// test/routes.internalActionAuthorityCheckpoint.hostEdgeAssertion.test.ts).
+function signEdgeAssertion(privateKey, claims) {
+  const header = { alg: 'RS256', typ: contracts.HOST_EDGE_ASSERTION_JWT_TYPE }
+  const signingInput = `${base64UrlJson(header)}.${base64UrlJson(claims)}`
+  const signature = cryptoSign('sha256', Buffer.from(signingInput), privateKey).toString(
+    'base64url'
+  )
+  return `${signingInput}.${signature}`
+}
+
+// Verifies and decodes the way the Host receives the token, returning the decoded payload.
+function verifyEdgeAssertion(publicKey, token) {
+  const [encodedHeader, encodedPayload, signature] = token.split('.')
+  const header = JSON.parse(Buffer.from(encodedHeader, 'base64url').toString('utf8'))
+  assert.deepEqual(header, { alg: 'RS256', typ: 'host-edge-assertion+jwt' })
+  assert.equal(
+    cryptoVerify(
+      'sha256',
+      Buffer.from(`${encodedHeader}.${encodedPayload}`),
+      publicKey,
+      Buffer.from(signature, 'base64url')
+    ),
+    true
+  )
+  return JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8'))
+}
+
+const edgeKeys = generateKeyPairSync('rsa', { modulusLength: 2048 })
+const EDGE_ISSUER = 'fixture-control-api-issuer'
+const EDGE_HOST = 'hosts/fixture-host'
+const EDGE_IAT = 1_900_000_000
+// The verifier clock of the existing rows: the second the fixtures were issued.
+const EDGE_NOW = EDGE_IAT
+
+function v1Claims(overrides = {}) {
+  return {
+    typ: contracts.HOST_EDGE_ASSERTION_CLAIM_TYPE,
+    v: 1,
+    iss: EDGE_ISSUER,
+    aud: contracts.HOST_EDGE_ASSERTION_AUDIENCE,
+    sub: 'user-fixture-1',
+    host: EDGE_HOST,
+    jti: randomUUID(),
+    iat: EDGE_IAT,
+    exp: EDGE_IAT + 300,
+    teamId: 'team-fixture-1',
+    scopes: ['host:status:read', 'host:message:invoke'],
+    ...overrides,
+  }
+}
+
+const V1_EXPECTED = Object.freeze({
+  v: 1,
+  iss: EDGE_ISSUER,
+  host: EDGE_HOST,
+  sub: 'user-fixture-1',
+  teamId: 'team-fixture-1',
+  requiredScope: 'host:status:read',
+})
+
+const V2_BOUND = Object.freeze({
+  operationId: 'host.status.read',
+  delegationJti: randomUUID(),
+  sid: 'session-fixture-1',
+  sessionVersion: 3,
+  accessPathId: 'access-path-fixture-1',
+  pathKind: 'team',
+  effectiveTeamId: 'team-fixture-1',
+  resource: { type: 'host', logicalId: 'fixture-host' },
+  targetHash: 'ath2_fixture',
+  authorizationRevision: 'revision-fixture-1',
+  behaviorBindingHash: 'bh2_fixture',
+  checkedAt: '2030-03-17T17:46:40.000Z',
+})
+
+function v2Claims(overrides = {}) {
+  return {
+    typ: contracts.HOST_EDGE_ASSERTION_CLAIM_TYPE,
+    v: 2,
+    iss: EDGE_ISSUER,
+    aud: contracts.HOST_EDGE_ASSERTION_AUDIENCE,
+    sub: 'user-fixture-1',
+    host: EDGE_HOST,
+    jti: randomUUID(),
+    iat: EDGE_IAT,
+    exp: EDGE_IAT + 120,
+    ...V2_BOUND,
+    ...overrides,
+  }
+}
+
+const V2_EXPECTED = Object.freeze({
+  v: 2,
+  iss: EDGE_ISSUER,
+  host: EDGE_HOST,
+  sub: 'user-fixture-1',
+  ...V2_BOUND,
+})
+
+test('signed round trip: a V1 assertion signed by the test signer decodes to a payload the validator accepts', () => {
+  const payload = verifyEdgeAssertion(
+    edgeKeys.publicKey,
+    signEdgeAssertion(edgeKeys.privateKey, v1Claims())
+  )
+  assert.deepEqual(Object.keys(payload), [...contracts.HOST_EDGE_ASSERTION_V1_CLAIM_KEYS])
+  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(payload, V1_EXPECTED, EDGE_NOW), {
+    ok: true,
+  })
+})
+
+test('signed round trip: a V2 assertion signed by the test signer decodes to a payload the validator accepts', () => {
+  const payload = verifyEdgeAssertion(
+    edgeKeys.publicKey,
+    signEdgeAssertion(edgeKeys.privateKey, v2Claims())
+  )
+  assert.deepEqual(Object.keys(payload), [...contracts.HOST_EDGE_ASSERTION_V2_CLAIM_KEYS])
+  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(payload, V2_EXPECTED, EDGE_NOW), {
+    ok: true,
+  })
+})
+
+test('V1 claims: key set, registered claims, lifetime, binding and route scope are enforced', () => {
+  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(v1Claims(), V1_EXPECTED, EDGE_NOW), {
+    ok: true,
+  })
+  const { teamId: _omitted, ...missingTeam } = v1Claims()
+  const cases = [
+    [missingTeam, 'claim keys do not match the declared version'],
+    [{ ...v1Claims(), extra: true }, 'claim keys do not match the declared version'],
+    [{ ...v1Claims(), ...V2_BOUND }, 'claim keys do not match the declared version'],
+    [v1Claims({ v: 2 }), 'version mismatch'],
+    [v1Claims({ typ: 'other' }), 'typ mismatch'],
+    [v1Claims({ aud: 'rpc-proxy' }), 'aud mismatch'],
+    [v1Claims({ iss: 'other-issuer' }), 'iss mismatch'],
+    [v1Claims({ jti: 'not-a-uuid' }), 'jti must be a UUID'],
+    [v1Claims({ iat: 1.5 }), 'iat and exp must be whole seconds'],
+    [v1Claims({ exp: EDGE_IAT }), 'lifetime out of bounds'],
+    [v1Claims({ exp: EDGE_IAT + 301 }), 'lifetime out of bounds'],
+    [v1Claims({ host: 'hosts/other' }), 'host mismatch'],
+    [v1Claims({ sub: 'user-other' }), 'sub mismatch'],
+    [v1Claims({ teamId: 7 }), 'teamId must be a string or null'],
+    [v1Claims({ teamId: null }), 'teamId mismatch'],
+    [v1Claims({ teamId: 'team-other' }), 'teamId mismatch'],
+    [v1Claims({ scopes: [] }), 'scopes must be a non-empty array of strings'],
+    [v1Claims({ scopes: ['host:status:read', 3] }), 'scopes must be a non-empty array of strings'],
+    [v1Claims({ scopes: ['host:message:invoke'] }), 'route scope missing'],
+  ]
+  for (const [payload, error] of cases) {
+    assert.deepEqual(contracts.validateHostEdgeAssertionClaims(payload, V1_EXPECTED, EDGE_NOW), {
+      ok: false,
+      error,
+    })
+  }
+  assert.deepEqual(
+    contracts.validateHostEdgeAssertionClaims(
+      v1Claims({ teamId: null }),
+      { ...V1_EXPECTED, teamId: null },
+      EDGE_NOW
+    ),
+    { ok: true }
+  )
+  assert.deepEqual(
+    contracts.validateHostEdgeAssertionClaims(
+      v1Claims(),
+      { ...V1_EXPECTED, requiredScope: '' },
+      EDGE_NOW
+    ),
+    { ok: false, error: 'expected requiredScope is missing' }
+  )
+})
+
+test('V2 claims: every bound field must equal the expectation', () => {
+  for (const key of Object.keys(V2_BOUND)) {
+    const changedValue = key === 'sessionVersion' ? 4 : `${JSON.stringify(V2_BOUND[key])}-x`
+    assert.deepEqual(
+      contracts.validateHostEdgeAssertionClaims(
+        v2Claims({ [key]: changedValue }),
+        V2_EXPECTED,
+        EDGE_NOW
+      ),
+      { ok: false, error: `${key} mismatch` }
+    )
+  }
+  const { checkedAt: _omitted, ...expectationWithoutCheckedAt } = V2_EXPECTED
+  assert.deepEqual(
+    contracts.validateHostEdgeAssertionClaims(v2Claims(), expectationWithoutCheckedAt, EDGE_NOW),
+    { ok: false, error: 'expected checkedAt is missing' }
+  )
+  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(v2Claims(), V1_EXPECTED, EDGE_NOW), {
+    ok: false,
+    error: 'version mismatch',
+  })
+})
+
+test('validator refuses a non-object payload and an unknown expected version', () => {
+  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(null, V1_EXPECTED, EDGE_NOW), {
+    ok: false,
+    error: 'payload must be an object',
+  })
+  assert.deepEqual(
+    contracts.validateHostEdgeAssertionClaims(v1Claims(), { ...V1_EXPECTED, v: 3 }, EDGE_NOW),
+    { ok: false, error: 'expected version must be 1 or 2' }
+  )
+})
+
+test('validator refuses an iat more than the allowed skew ahead of the verifier clock', () => {
+  const yearAhead = EDGE_NOW + 31_536_000
+  assert.deepEqual(
+    contracts.validateHostEdgeAssertionClaims(
+      v1Claims({ iat: yearAhead, exp: yearAhead + 300 }),
+      V1_EXPECTED,
+      EDGE_NOW
+    ),
+    { ok: false, error: 'iat is in the future' }
+  )
+  // Liveness witness: the same claims issued at the verifier clock pass.
+  assert.deepEqual(
+    contracts.validateHostEdgeAssertionClaims(
+      v1Claims({ iat: EDGE_NOW, exp: EDGE_NOW + 300 }),
+      V1_EXPECTED,
+      EDGE_NOW
+    ),
+    { ok: true }
+  )
+})
+
+test('validator accepts an iat up to 5 seconds ahead of the verifier clock and refuses 6', () => {
+  for (const [version, claims, expected] of [
+    ['v1', v1Claims, V1_EXPECTED],
+    ['v2', v2Claims, V2_EXPECTED],
+  ]) {
+    const atSkew = EDGE_NOW + 5
+    assert.deepEqual(
+      contracts.validateHostEdgeAssertionClaims(
+        claims({ iat: atSkew, exp: atSkew + 120 }),
+        expected,
+        EDGE_NOW
+      ),
+      { ok: true },
+      version
+    )
+    const pastSkew = EDGE_NOW + 6
+    assert.deepEqual(
+      contracts.validateHostEdgeAssertionClaims(
+        claims({ iat: pastSkew, exp: pastSkew + 120 }),
+        expected,
+        EDGE_NOW
+      ),
+      { ok: false, error: 'iat is in the future' },
+      version
+    )
+  }
+})
+
+test('validator requires the verifier clock in whole seconds', () => {
+  for (const nowSeconds of [undefined, 1.5, 0]) {
+    assert.deepEqual(
+      contracts.validateHostEdgeAssertionClaims(v1Claims(), V1_EXPECTED, nowSeconds),
+      { ok: false, error: 'verifier clock must be whole seconds' },
+      String(nowSeconds)
+    )
+  }
+  // Liveness witness: the same payload passes with a whole-second clock.
+  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(v1Claims(), V1_EXPECTED, EDGE_NOW), {
+    ok: true,
+  })
+})
+
+test('validator refuses a verifier clock that is not in seconds', () => {
+  // With a millisecond clock the future-iat bound could never fire: this assertion a year
+  // ahead of the verifier must not be accepted.
+  const yearAhead = EDGE_NOW + 31_536_000
+  assert.deepEqual(
+    contracts.validateHostEdgeAssertionClaims(
+      v1Claims({ iat: yearAhead, exp: yearAhead + 300 }),
+      V1_EXPECTED,
+      EDGE_NOW * 1000
+    ),
+    { ok: false, error: 'verifier clock must be whole seconds' }
+  )
+  for (const clock of [EDGE_NOW * 1000, Date.now(), 100_000_000_000]) {
+    assert.deepEqual(
+      contracts.validateHostEdgeAssertionClaims(v1Claims(), V1_EXPECTED, clock),
+      { ok: false, error: 'verifier clock must be whole seconds' },
+      String(clock)
+    )
+  }
+  // Liveness witness: the same payload passes with the clock in seconds, and the largest
+  // clock the validator takes as seconds still reaches the claim checks.
+  assert.deepEqual(contracts.validateHostEdgeAssertionClaims(v1Claims(), V1_EXPECTED, EDGE_NOW), {
+    ok: true,
+  })
+  const lastSecond = 99_999_999_999
+  assert.deepEqual(
+    contracts.validateHostEdgeAssertionClaims(
+      v1Claims({ iat: lastSecond, exp: lastSecond + 300 }),
+      V1_EXPECTED,
+      lastSecond
+    ),
+    { ok: true }
   )
 })
