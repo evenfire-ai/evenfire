@@ -18,9 +18,11 @@ import { type EdgeRecordKey, edgeResponse, readEdgeRecord } from './edgeContract
 
 /**
  * The real `AppService` for the browser sign-in model (state model §7.3): a temp `userData`
- * with stored profiles A and B and a REST-only profile C, `electron` mocked, the token store a
- * fake passed through `AppServiceOptions.tokenStore`, `bindChatStoreForUser` mocked, and HTTP
- * mocked at `fetch` only, so the real `AuthClient` and `requestJson` run. The service gets the
+ * with stored profiles A and B and a REST-only profile C, `electron` mocked, the token store
+ * passed through `AppServiceOptions.tokenStore`, `bindChatStoreForUser` mocked, and HTTP
+ * mocked at `fetch` only, so the real `AuthClient` and `requestJson` run. The token store is a
+ * fake, or with `realTokenStore` the real `TokenStore` on `darwin` with `keytar` mocked, so its
+ * quit-drain admission (V33) runs (revision 2.2). The service gets the
  * test-only generation observer (feeding `bumpLog`) and a `FakeBrowserSignInClock` through its
  * constructor, which `main.ts` never passes, and the links option, which `main.ts` takes from the
  * dev-isolation policy. Each snapshot the service pushes through `onBrowserSignInChanged` lands
@@ -152,6 +154,11 @@ export async function pushedBrowserSignInSnapshots(): Promise<BrowserSignInSnaps
  *   (`appService.ts:2126`).
  * - `installTokenWrite`: install's `tokenStore.setSessionToken` (`appService.ts:2132`).
  *
+ * With `realTokenStore`, the two token-store holds sit on the mocked `keytar` call inside the
+ * real `TokenStore`, so its admission runs around them: `restoreTokenRead` on the next
+ * `keytar.getPassword` that no `holdKeychainRead` claims, `installTokenWrite` on the next
+ * `keytar.setPassword` of a token that is not a team switch's.
+ *
  * The two chat-store holds match by user id, not by call site. `restoreChatBind` takes the next
  * bind of the restore driver's user, and `installChatBind` the next bind of the redeem answer's
  * user, wherever it comes from. So any later bind of that user consumes a pending hold: the
@@ -190,7 +197,9 @@ export type HarnessHold = {
   /**
    * Lets the held call go on. A `Response` answers a held fetch; an `Error` rejects the held
    * call; nothing runs the call as it would have run. A released call does not pass through the
-   * scheduler: the test chose the moment.
+   * scheduler: the test chose the moment. With `realTokenStore`, the held call is the `keytar`
+   * one, and the real `TokenStore` catches its rejection and falls back to a file
+   * (`tokenStore.ts:280-286`, `:460-465`).
    */
   release(answer?: Response | Error): void
   readonly reached: boolean
@@ -217,8 +226,16 @@ export type BrowserSignInHarness = {
     body: unknown
     headers: Record<string, string>
   }>[]
+  /**
+   * The token of each `tokenStore.setSessionToken` call, recorded when it is made. With
+   * `realTokenStore` that is before admission, so a call queued behind closed admission is here
+   * and has no `keytar.setPassword` in `realTokenStore.keychainCalls`.
+   */
   tokenWrites: SeqRecord<string>[]
-  /** The environment key of each `tokenStore.getSessionToken` call, recorded when it is made. */
+  /**
+   * The environment key of each `tokenStore.getSessionToken` call, recorded when it is made
+   * (with `realTokenStore`, before admission, as `tokenWrites`).
+   */
   tokenReads: SeqRecord<string>[]
   /** URLs passed to `shell.openExternal`. */
   opens: SeqRecord<string>[]
@@ -243,7 +260,38 @@ export type BrowserSignInHarness = {
    * `{ owner: false }`, the auth owner queue settled.
    */
   drain(options?: HarnessDrainOptions): Promise<void>
+  /** Set only when the harness was built with `realTokenStore`. */
+  realTokenStore?: RealTokenStoreHandle
 }
+
+export type KeychainCall = Readonly<{
+  method: 'getPassword' | 'setPassword' | 'deletePassword'
+  /** `session-token::<envKey>`, or `session-token` for the legacy global slot. */
+  account: string
+}>
+
+/**
+ * The real `TokenStore` the service was built with, and what the test needs around it. The
+ * admission functions come from the `tokenStore.ts` instance the service loaded: V33 is module
+ * state, and the harness resets modules, so a test's own static import would be another
+ * instance.
+ */
+export type RealTokenStoreHandle = Readonly<{
+  store: TokenStore
+  /** The active environment's key when the harness was built (A's). */
+  activeEnvKey: string
+  /** Each call the store made to the mocked `keytar`, recorded when it is made. */
+  keychainCalls: SeqRecord<KeychainCall>[]
+  /** What the mocked keychain holds: account → password. */
+  keychain: ReadonlyMap<string, string>
+  /** Holds the next `keytar.getPassword` of `envKey`'s account, before the named holds. */
+  holdKeychainRead(envKey: string): HarnessHold
+  /** Calls to the store (read, write or clear) that have not settled: queued or in flight. */
+  unsettledCalls(): number
+  closeTokenStoreAdmission(): boolean
+  waitForTokenStoreOperations(): Promise<void>
+  openTokenStoreAdmission(): void
+}>
 
 export type BrowserSignInHarnessOptions = Readonly<{
   scheduler?: Scheduler
@@ -268,6 +316,16 @@ export type BrowserSignInHarnessOptions = Readonly<{
    * (D13): nothing is pushed, so `pushes` stays empty.
    */
   withoutPushTarget?: boolean
+  /**
+   * Builds the service with the real `TokenStore` (state model §7.3, revision 2.2):
+   * `process.platform` is `darwin` until cleanup, as `tokenStore.quitLifecycle.test.ts:31-57`
+   * sets it, so the store's quit-drain admission (V33) runs; `keytar` is mocked, and
+   * `safeStorage` reports no encryption. The kept token, if any, is in the mocked keychain.
+   * Cleanup releases this harness's holds, reopens admission and waits for the store's calls,
+   * then closes admission for good before it unmocks `keytar`, so no later call from this
+   * module instance can reach the real keychain.
+   */
+  realTokenStore?: boolean
 }>
 
 /**
@@ -353,6 +411,18 @@ type ActiveHarness = {
   /** Puts back the `fetch` the harness found, so a stub the calling test made survives. */
   restoreFetch: () => void
   unrouted: string[]
+  /** `realTokenStore`: settles the store's calls, then closes its admission for good. */
+  settleTokenStore?: () => Promise<void>
+  /** `realTokenStore`: puts back the `process.platform` descriptor the harness found. */
+  restorePlatform?: () => void
+}
+
+/**
+ * The keychain account of `envKey`, as `accountFor` in `tokenStore.ts:90-93` (private) builds
+ * it.
+ */
+function keychainAccount(envKey: string): string {
+  return `session-token::${envKey}`
 }
 
 const activeHarnesses: ActiveHarness[] = []
@@ -465,7 +535,14 @@ export async function createBrowserSignInHarness(
   const secretsSeen: string[] = []
   const unrouted: string[] = []
   const holds = new Map<HoldPoint, PendingHold[]>()
+  /** `realTokenStore.holdKeychainRead`'s holds, by keychain account. */
+  const keychainReadHolds = new Map<string, PendingHold[]>()
+  /** Every hold this harness made, so cleanup can release those left (`realTokenStore`). */
+  const madeHolds: PendingHold[] = []
   const savedTokens = new Map<string, string>()
+  /** `realTokenStore`'s mocked keychain: account → password. */
+  const keychain = new Map<string, string>()
+  const keychainCalls: SeqRecord<KeychainCall>[] = []
   const sessionsByToken = new Map<string, SessionMe>()
   const switchTokens = new Set<string>()
   const issued = { password: 0, google: 0, switch: 0 }
@@ -489,6 +566,13 @@ export async function createBrowserSignInHarness(
     unrouted,
   }
   activeHarnesses.push(active)
+  if (options.realTokenStore) {
+    // Before any import: the store's admission is gated on macOS only (`tokenStore.ts:39`).
+    const hostPlatform = Object.getOwnPropertyDescriptor(process, 'platform')
+    if (!hostPlatform) throw new Error('Node process.platform descriptor is unavailable')
+    Object.defineProperty(process, 'platform', { ...hostPlatform, value: 'darwin' })
+    active.restorePlatform = () => Object.defineProperty(process, 'platform', hostPlatform)
+  }
 
   /**
    * Resolves through the scheduler when there is one. A pending answer is scheduled once it
@@ -511,17 +595,38 @@ export async function createBrowserSignInHarness(
       })
   }
 
-  const passThrough = async <T>(
-    point: HoldPoint | null,
+  const passThroughHold = async <T>(
+    pending: PendingHold | undefined,
     label: string,
     perform: (held: Response | undefined) => T | Promise<T>
   ): Promise<T> => {
-    const pending = point ? holds.get(point)?.shift() : undefined
     if (!pending) return deliver(label, () => perform(undefined))
     pending.reached = true
     const answer = await pending.answer.promise
     if (answer instanceof Error) throw answer
     return perform(answer)
+  }
+
+  const passThrough = <T>(
+    point: HoldPoint | null,
+    label: string,
+    perform: (held: Response | undefined) => T | Promise<T>
+  ): Promise<T> => passThroughHold(point ? holds.get(point)?.shift() : undefined, label, perform)
+
+  const makeHold = (queue: PendingHold[], name: string): HarnessHold => {
+    const pending: PendingHold = { reached: false, released: false, answer: deferred() }
+    queue.push(pending)
+    madeHolds.push(pending)
+    return {
+      release(answer) {
+        if (pending.released) throw new Error(`the ${name} hold was already released`)
+        pending.released = true
+        pending.answer.resolve(answer)
+      },
+      get reached() {
+        return pending.reached
+      },
+    }
   }
 
   const refuseResponse = (point: string) => (held: Response | undefined) => {
@@ -636,7 +741,40 @@ export async function createBrowserSignInHarness(
         return passThrough('open', 'shell.openExternal', refuseResponse('open'))
       },
     },
+    // The real token store reads it once `keytar` has no token (`tokenStore.ts:289`).
+    ...(options.realTokenStore ? { safeStorage: { isEncryptionAvailable: () => false } } : {}),
   }))
+  if (options.realTokenStore) {
+    const recordKeychainCall = (method: KeychainCall['method'], account: string) => {
+      keychainCalls.push({ seq: nextSeq(), value: { method, account } })
+    }
+    vi.doMock('keytar', () => ({
+      getPassword: (_service: string, account: string) => {
+        recordKeychainCall('getPassword', account)
+        const pending =
+          keychainReadHolds.get(account)?.shift() ?? holds.get('restoreTokenRead')?.shift()
+        return passThroughHold(pending, 'keytar.getPassword', held => {
+          refuseResponse('restoreTokenRead')(held)
+          return keychain.get(account) ?? null
+        })
+      },
+      setPassword: (_service: string, account: string, password: string) => {
+        recordKeychainCall('setPassword', account)
+        // A team switch writes its token through the same store call (`appService.ts:1331`).
+        const pending = switchTokens.has(password)
+          ? undefined
+          : holds.get('installTokenWrite')?.shift()
+        return passThroughHold(pending, 'keytar.setPassword', held => {
+          refuseResponse('installTokenWrite')(held)
+          keychain.set(account, password)
+        })
+      },
+      deletePassword: (_service: string, account: string) => {
+        recordKeychainCall('deletePassword', account)
+        return deliver('keytar.deletePassword', () => keychain.delete(account))
+      },
+    }))
+  }
   vi.doMock('../src/chatStoreBinding.js', () => ({
     bindChatStoreForUser: (userId: string) => {
       const point: HoldPoint | null =
@@ -657,9 +795,11 @@ export async function createBrowserSignInHarness(
     })
   }
 
-  const [{ AppService: AppServiceClass }, runtimeConfig] = await Promise.all([
+  // `appService.ts` imports `tokenStore.ts` too, so both share this instance's admission (V33).
+  const [{ AppService: AppServiceClass }, runtimeConfig, tokenStoreModule] = await Promise.all([
     import('../src/appService.js'),
     import('../src/config.js'),
+    import('../src/tokenStore.js'),
   ])
   const optionIdFor = (restBaseUrl: string) => {
     const option = runtimeConfig
@@ -691,11 +831,13 @@ export async function createBrowserSignInHarness(
   }
   await runtimeConfig.selectDesktopRuntimeConfigOption(activeOptionId)
   if (options.keptToken) {
-    savedTokens.set(runtimeConfig.getActiveEnvKey(), KEPT_SESSION_TOKEN)
+    const activeEnvKey = runtimeConfig.getActiveEnvKey()
+    if (options.realTokenStore) keychain.set(keychainAccount(activeEnvKey), KEPT_SESSION_TOKEN)
+    else savedTokens.set(activeEnvKey, KEPT_SESSION_TOKEN)
     sessionsByToken.set(KEPT_SESSION_TOKEN, harnessDriverUsers.restore)
   }
 
-  const tokenStore = {
+  const fakeTokenStore = {
     getSessionToken: (envKey: string, readOptions: { legacyEnvKeys?: readonly string[] } = {}) => {
       tokenReads.push({ seq: nextSeq(), value: envKey })
       return passThrough('restoreTokenRead', 'tokenStore.getSessionToken', held => {
@@ -723,8 +865,56 @@ export async function createBrowserSignInHarness(
       }),
   }
 
+  let tokenStore = fakeTokenStore as unknown as TokenStore
+  let realTokenStore: RealTokenStoreHandle | undefined
+  let unsettledStoreCalls = 0
+  if (options.realTokenStore) {
+    const store = new tokenStoreModule.TokenStore()
+    const track = <T>(call: Promise<T>): Promise<T> => {
+      unsettledStoreCalls += 1
+      const settled = () => {
+        unsettledStoreCalls -= 1
+      }
+      // Only counts the settlement: `call` itself goes back to the caller, rejection included.
+      call.then(settled, settled)
+      return call
+    }
+    // The real methods run; each call is recorded when it is made, before admission.
+    const read = store.getSessionToken.bind(store)
+    const write = store.setSessionToken.bind(store)
+    const clear = store.clearSessionToken.bind(store)
+    store.getSessionToken = (...args: Parameters<TokenStore['getSessionToken']>) => {
+      tokenReads.push({ seq: nextSeq(), value: args[0] })
+      return track(read(...args))
+    }
+    store.setSessionToken = (...args: Parameters<TokenStore['setSessionToken']>) => {
+      tokenWrites.push({ seq: nextSeq(), value: args[0] })
+      secretsSeen.push(args[0])
+      return track(write(...args))
+    }
+    store.clearSessionToken = (...args: Parameters<TokenStore['clearSessionToken']>) =>
+      track(clear(...args))
+    tokenStore = store
+    realTokenStore = Object.freeze({
+      store,
+      activeEnvKey: runtimeConfig.getActiveEnvKey(),
+      keychainCalls,
+      keychain,
+      holdKeychainRead(envKey: string) {
+        const account = keychainAccount(envKey)
+        const queue = keychainReadHolds.get(account) ?? []
+        keychainReadHolds.set(account, queue)
+        return makeHold(queue, `keychain read of ${envKey}`)
+      },
+      unsettledCalls: () => unsettledStoreCalls,
+      closeTokenStoreAdmission: tokenStoreModule.closeTokenStoreAdmission,
+      waitForTokenStoreOperations: tokenStoreModule.waitForTokenStoreOperations,
+      openTokenStoreAdmission: tokenStoreModule.openTokenStoreAdmission,
+    })
+  }
+
   const rawService = new AppServiceClass({
-    tokenStore: tokenStore as unknown as TokenStore,
+    tokenStore,
     browserSignInLinksAvailable: options.linksAvailable ?? false,
     browserSignInClock: clock,
     onBrowserSignInChanged: options.withoutPushTarget
@@ -768,7 +958,7 @@ export async function createBrowserSignInHarness(
     },
   })
 
-  return {
+  const harness: BrowserSignInHarness = {
     service,
     envs: Object.freeze(envs),
     fetches,
@@ -782,20 +972,9 @@ export async function createBrowserSignInHarness(
     unrouted,
     routes,
     hold(point) {
-      const pending: PendingHold = { reached: false, released: false, answer: deferred() }
       const queue = holds.get(point) ?? []
-      queue.push(pending)
       holds.set(point, queue)
-      return {
-        release(answer) {
-          if (pending.released) throw new Error(`the ${point} hold was already released`)
-          pending.released = true
-          pending.answer.resolve(answer)
-        },
-        get reached() {
-          return pending.reached
-        },
-      }
+      return makeHold(queue, point)
     },
     async drain(drainOptions = {}) {
       const owner = drainOptions.owner !== false
@@ -828,17 +1007,63 @@ export async function createBrowserSignInHarness(
         quietTurns = schedulerBusy || !ownerSettled ? 0 : quietTurns + 1
       }
     },
+    realTokenStore,
   }
+
+  if (options.realTokenStore) {
+    active.settleTokenStore = async () => {
+      try {
+        // Every call left queued or held runs to its end against the mocked keychain.
+        for (const pending of madeHolds) {
+          if (pending.released) continue
+          pending.released = true
+          pending.answer.resolve(undefined)
+        }
+        tokenStoreModule.openTokenStoreAdmission()
+        await harness.drain()
+        // A call that found no token goes on to the store's file fallbacks, real I/O that
+        // `setImmediate` turns do not wait for.
+        for (let turn = 0; unsettledStoreCalls > 0; turn += 1) {
+          if (turn >= DRAIN_TURN_LIMIT) {
+            throw new Error(
+              `browserSignInHarness: ${unsettledStoreCalls} token-store calls unsettled`
+            )
+          }
+          await new Promise<void>(resolve => setTimeout(resolve, 1))
+        }
+        await harness.drain()
+      } finally {
+        // Closed for good, while the platform is still `darwin`: a later call from this module
+        // instance queues and never loads `keytar`, which cleanup unmocks next.
+        tokenStoreModule.closeTokenStoreAdmission()
+      }
+    }
+  }
+
+  return harness
 }
 
 /**
  * Undoes every live harness, newest first: each one saved the environment and `fetch` as the
  * harness before it had left them, so only that order ends on what the test had. It undoes only
- * what a harness set; the calling test's own stubs stay.
+ * what a harness set; the calling test's own stubs stay. A `realTokenStore` harness first
+ * settles its store (`settleTokenStore`), then gets its host platform back, whether or not the
+ * settle failed; a settle failure is thrown once everything is undone.
  */
 export async function cleanupBrowserSignInHarness(): Promise<void> {
   const unrouted: string[] = []
+  const settleFailures: unknown[] = []
+  let keytarMocked = false
   for (const active of activeHarnesses.splice(0).reverse()) {
+    if (active.settleTokenStore) {
+      keytarMocked = true
+      await active.settleTokenStore().catch((error: unknown) => {
+        // Rethrown below, once the rest of the cleanup has run.
+        settleFailures.push(error)
+      })
+    }
+    // Nothing after the settle needs `darwin`.
+    active.restorePlatform?.()
     active.restoreConsole()
     active.restoreFetch()
     for (const [name, value] of Object.entries(active.savedEnvironment)) {
@@ -850,7 +1075,13 @@ export async function cleanupBrowserSignInHarness(): Promise<void> {
   }
   vi.doUnmock('electron')
   vi.doUnmock('../src/chatStoreBinding.js')
+  if (keytarMocked) vi.doUnmock('keytar')
   vi.resetModules()
+  if (settleFailures.length) {
+    throw new Error('browserSignInHarness: the real token store did not settle', {
+      cause: settleFailures.length === 1 ? settleFailures[0] : settleFailures,
+    })
+  }
   if (unrouted.length) {
     throw new Error(`browserSignInHarness: requests without a route: ${unrouted.join(', ')}`)
   }
