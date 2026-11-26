@@ -1727,8 +1727,10 @@ describe('browser sign-in link acceptance, redeem and install', () => {
     // X1. The install ran as far as the token write.
     expect(harness.tokenWrites.map(entry => entry.value)).toEqual([recordedSessionToken()])
     expect(endStatesOf(harness, attemptId)).toEqual(['failed'])
-    // Logged with the error class only.
-    expect(harness.secretsSeen).toContain(`${LINK_HANDLING_FAILED} Error`)
+    // Logged once, with the error class only.
+    expect(harness.secretsSeen.filter(text => text.startsWith(LINK_HANDLING_FAILED))).toEqual([
+      `${LINK_HANDLING_FAILED} Error`,
+    ])
     expect(harness.secretsSeen.filter(text => text.includes('fake keychain write'))).toEqual([])
     // The install op itself ends the attempt, before the chain's last catch reports the error
     // (R-4's catch would end it too, one owner op later).
