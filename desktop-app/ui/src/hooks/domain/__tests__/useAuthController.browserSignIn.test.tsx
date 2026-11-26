@@ -4,7 +4,8 @@
  * - each of the six binding-changing calls goes through the login model's one helper (D15;
  *   A3-56, A3-64, A3-65; G2-15c, G2-15d);
  * - the auth gates treat a redeeming browser sign-in as an action in progress, and a waiting one
- *   as nothing (D14; A3-15, A3-19, A3-55, A3-68; G2-14a, G2-14b, G2-14e).
+ *   as nothing (D14; A3-15, A3-19, A3-55, A3-68; G2-14a, G2-14b, G2-14e; decision 9), and two
+ *   quick activations of the page's start send one start (Review Focus 5).
  *
  * Main is the browser sign-in harness's real `AppService` (state model §7.3): its runtime-config
  * answers, generations, refusals, login models and browser sign-in snapshots reach the controller
@@ -13,8 +14,8 @@
  *
  * The D15 tests use only interfaces the controller had before D15: its handlers, its setters and
  * `window.clerum.auth`; the shown model is read from the controller's result. The D14 tests render
- * the existing `AuthPage` inside an `AuthContext.Provider` fed by the real controller, and read the
- * dock from the page.
+ * `AuthPage` inside an `AuthContext.Provider` fed by the real controller, and read the dock, the
+ * provider button and the password form from the page.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
