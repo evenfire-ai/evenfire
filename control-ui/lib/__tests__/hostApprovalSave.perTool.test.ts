@@ -412,8 +412,12 @@ describe('per-tool save protocol (spec §6.4)', () => {
   describe('prune check', () => {
     it('T5 v0.12.1: a pruned field is reported with what is live', async () => {
       // The block holds fields the v0.12.1 CRD lacks, as written under a newer
-      // CRD; the fake serves seeds as given and prunes on write. telegram's
-      // allowModeChange is pruned too, but its default is the value sent.
+      // CRD; the fake serves seeds as given and prunes on write only. The
+      // apiserver prunes on read too (Task 25c checked it on a cluster), so
+      // under a v0.12.1 CRD the save's read never shows these fields: the
+      // scenario needs the CRD to change between that read and the write.
+      // telegram's allowModeChange is pruned too, but its default is the value
+      // sent.
       const fake = createFake(
         {
           modeCeiling: 'auto',

@@ -37,7 +37,10 @@
  * `404 { error: 'Not Found' }` (control-api/src/app.ts).
  *
  * Not modelled: the model allowlist (every model is accepted), warnings for
- * fallbacks and `allowedModels` entries, and other Host validation.
+ * fallbacks and `allowedModels` entries, other Host validation, and pruning on
+ * read. The apiserver also prunes a stored block on read when the CRD lacks a
+ * field; the fake serves a seed as given, so a seed written under a newer CRD
+ * stands for a CRD that changed after the seed was stored.
  *
  * control-api/test/routes.hostPut.fakeContract.test.ts pins this model to the
  * real routes.

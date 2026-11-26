@@ -633,7 +633,11 @@ describe('Set to Manual now (spec §6.3)', () => {
   describe('prune check (R5)', () => {
     it('T5 a pruned modeCeiling counts as stored', async () => {
       // The block was written under a newer CRD; the fake serves seeds as
-      // given, and the v0.12.1 CRD prunes modeCeiling on write.
+      // given, and the v0.12.1 CRD prunes modeCeiling on write. The apiserver
+      // prunes on read too (Task 25c checked it on a cluster), so under a
+      // v0.12.1 CRD the switch's read never shows modeCeiling, and it reports
+      // Already Manual: the scenario needs the CRD to change between the read
+      // and the write.
       const fake = createFake(
         { modeCeiling: 'auto', tools: { system_info: true } },
         { crd: 'v0.12.1' }

@@ -817,6 +817,9 @@ describe('HostApprovalSection — saving', () => {
   })
 
   it('a field the cluster did not store is named with what is stored now, in the edit view', async () => {
+    // As in the protocol's T5: the seed holds modeCeiling, which the v0.12.1
+    // CRD lacks. The apiserver prunes on read too, so this needs the CRD to
+    // change between the save's read and its write.
     const fake = createSectionFake(
       { modeCeiling: 'auto', tools: { json_transform: true } },
       { crd: 'v0.12.1' }
