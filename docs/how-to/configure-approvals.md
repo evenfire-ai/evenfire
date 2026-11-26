@@ -293,14 +293,144 @@ shell. It does not keep a card in allow-all; a guardrail `ask` rule does. See
 
 ## Option C — the Control UI
 
-The host detail page in Control UI has a per-tool approval editor
-(`HostApprovalSection`) with three settings per native tool — **Default /
-Required / Skip** — plus a risk hint when an override loosens a tool whose
-built-in default is Required (for example `shell_exec` or `http_request` set
-to Skip). Saving writes the same `spec.approval.tools` field on the `Host`
-CRD shown above; it is a front end for it, not a second mechanism. MCP tools
-stay approval-required by default regardless of what is set here. See
-[Control UI](../surfaces/control-ui.md).
+Open the agent in Control UI and choose the **Approvals** tab, between
+**Access** and **Advanced** (`/agents/<name>/approval-settings`; the older
+`/agents/<name>/approvals` link redirects there). It does three things.
+
+- **Reads every approval setting.** The highest mode and what it lets run,
+  the shell judge (shown in Auto and Allow all), which channels may change the
+  mode, who may raise it from a channel (the policy and each channel's
+  approvers), and the per-tool overrides. Approver IDs and email addresses
+  show on this page, which any admin who can open the agent can read. The
+  mode, channel and approver sections are read-only in this release. Change
+  them on the Host as described in [Approval modes](#approval-modes); the
+  tab's **How to change these** link points there.
+- **Lowers the ceiling with one button.** **Set to Manual now** is the off
+  switch, described next.
+- **Edits per-tool overrides.** Each native tool is **Default / Required /
+  Skip**. A change that loosens approval (a tool set to Skip, or Required put
+  back to Default on a tool whose default is Skip, among others) lists each
+  loosening item in a confirmation dialog, and the save is sent only after
+  you confirm. Saving writes `spec.approval.tools` and nothing else on the
+  Host, except on a first save (below). MCP tools stay approval-required
+  regardless of what is set here.
+
+The per-tool editor used to live under **Advanced**; **Advanced** now holds a
+pointer to the **Approvals** tab. The Overview, Model and guardrails saves on
+the agent page read the Host's version first and refuse to save without one
+(the page says "Reload the page to save").
+
+### Set to Manual now
+
+The button writes `modeCeiling: manual` and nothing else in `spec`. It needs
+no confirmation, and it is available even when the tab could not load the
+agent's settings. It reads the Host, and if the ceiling is already Manual (or
+the Host has no `spec.approval`) it reports "Already Manual" and writes
+nothing; it never creates an approval block. Otherwise it sends the Host with
+the version it just read, and retries on a version conflict, a 429, a server
+error or no answer, starting no new attempt more than 20 seconds after the
+click. Running chats apply the lower ceiling at their next tool call, as in
+[Kill switch](#kill-switch). The message that follows lists what still runs
+without a card, and it links to that section for what the switch does not
+stop.
+
+Other things to know:
+
+- **It can be refused.** The general Host save validates the whole spec, so
+  an unrelated field can refuse it. One case: a Host whose spec names the
+  `codex-subscription` or `grok-subscription` provider while control-api's
+  `CONTROL_API_CODEX_SUBSCRIPTION_ENABLED` or
+  `CONTROL_API_GROK_SUBSCRIPTION_ENABLED` is `false` (the `deploy/base`
+  default; the minikube overlay sets both to `true`) is answered with 422
+  `provider "..." is disabled`. The page then shows the error and this
+  command, which changes only the ceiling:
+
+  ```bash
+  kubectl -n <namespace> patch host <name> --type=json \
+    -p '[{"op":"replace","path":"/spec/approval/modeCeiling","value":"manual"}]'
+  ```
+
+  The patch needs `spec.approval` to exist. On a Host without it the ceiling
+  is already Manual.
+- **Agents with no approval settings of their own.** The tab says the agent
+  uses the cluster default, which the page cannot show. mcp-host reads the
+  ceiling and the channel switches from the Host's own block only, so such an
+  agent already runs Manual. Its first per-tool save asks you to pick who may
+  approve from a channel ("Any channel user" or "Nobody (Desktop only)"),
+  writes that `defaultPolicy` with the tools, and shows a warning: mcp-host
+  uses `spec.approval` or `CLERUM_APPROVAL_CONFIG` as one whole object, so
+  the cluster rules stop applying for this agent and may have been stricter
+  than the values the page shows. **Before that first save**, if you made
+  `CLERUM_APPROVAL_CONFIG` stricter than the default, copy `defaultPolicy`,
+  `channels` and `tools` into the Host with `kubectl` first, as
+  [Dev mode](#dev-mode-no-cluster) describes. In `deploy/base` and the
+  minikube overlay `CLERUM_ENABLE_APPROVAL` defaults to `true`; if it is
+  `false` for the cluster there is no approval gate and nothing on this tab
+  has an effect.
+- **Agents set by a deployment manifest.** A banner appears when a manifest
+  also sets `spec.approval`: a `kubectl apply` that recorded
+  `spec.approval` in its `last-applied-configuration` annotation (the banner
+  then shows the values it set), or a server-side apply that owns
+  `spec.approval` (the banner shows no values). Edits made in the tab,
+  `kubectl patch` and `kubectl edit` do not raise it. The next deploy puts the
+  manifest's values back, including a higher ceiling, so change the manifest
+  too.
+- **HTTP allowlist.** In Auto, `http_request` runs with no card. Unless
+  `CLERUM_HTTP_ALLOWLIST` is set on mcp-host, it can reach any public address
+  (it refuses private ones). Neither `deploy/base` nor the minikube overlay
+  sets it. Setting `http_request` to Skip without an allowlist logs an
+  `[approval-config]` warning at startup.
+- **In-flight action checks.** Any change to `spec.approval`, the off switch
+  included, changes the Host's approval-policy fingerprint. An action-authority
+  check that was bound to the earlier fingerprint fails revalidation and
+  comes back stale (`access_path_stale`) instead of running, so it has to be
+  checked again against the new policy.
+- **Concurrent edits.** A Host PUT that changes `spec.approval` must carry
+  the `metadata.resourceVersion` it read. Without it control-api answers
+  `409 {"error":"conflict","reason":"approval_requires_version"}`. A PUT
+  that leaves `spec.approval` as stored needs no version. A PUT or create
+  with no `spec` is refused with 422. Scripts and clients that change
+  approval through the Host API must read the Host first and send its version.
+  `kubectl` is not affected.
+
+### The audit line and its retention
+
+Each Host create or update through control-api that changes `spec.approval`
+writes one structured log line, event `host_approval_changed` at `info`, from
+the control-api logger. It records the Host, namespace, admin `sub`, the
+`operationId` of the administrative operation record, and `via` (`host_put` or
+`host_create`). Then:
+
+- `fields`: old and new for `modeCeiling`, `defaultPolicy`, `shellClassifierModel`
+  and each channel's `enabled` and `allowModeChange`. A `defaultPolicy` that
+  is not one of the three CRD values is recorded as `(not a policy value)`.
+- `tools`: a list of `{ name, old, new }`. Changed native tools of mcp-host come
+  first, then at most 50 other changed keys, with `toolsTruncated` for the
+  rest. Names are cut to 64 characters and string values to 128.
+- `approvers`: counts added and removed per channel. Approver IDs and
+  addresses are never logged.
+- `blockRemoved` and `inheritedBefore`.
+
+String values are written with control, C1, bidirectional and line-separator
+characters as `\uXXXX` escapes.
+
+A Host create, or an update that carries a version, also stores the same
+change as JSON in the `summary` of the administrative intent event for the
+request, readable
+through the administrative event detail in control-api's tracing API. It is
+capped at 4096 characters. If the change is larger, other tools are dropped
+first, then long string values become `(value too long)`, then the field values
+become counts (the changed `modeCeiling` and `defaultPolicy` keep their old and
+new values, and every native tool entry stays). If even that cannot fit,
+control-api logs a `host_approval_summary_oversize` warning and cuts native
+entries, counting them in `nativeToolsTruncated`. A PUT without a version
+cannot change `spec.approval`, so it stores no summary.
+
+Retention is not set by this feature. Log lines last as long as your log
+collection keeps them; control-api does not store them. The stored `summary`
+is an administrative event, which the trace maintenance worker prunes after 90
+days ([Governed tracing](../architecture/governed-tracing.md)). Where you need
+longer evidence, keep the log line.
 
 ## Where humans approve
 
