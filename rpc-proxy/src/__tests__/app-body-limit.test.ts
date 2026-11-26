@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { once } from 'node:events'
 import { type Server, request as httpRequest } from 'node:http'
 import { createRequire } from 'node:module'
@@ -145,11 +145,29 @@ function forwardedAttachmentLength(): number {
   return forwarded.attachments[0].dataBase64.length
 }
 
+let consoleErrorSpy: ReturnType<typeof vi.spyOn>
+
+// The app's error handler logs an unclassified error by name, never by message:
+// exactly one line, naming the parser's SyntaxError, without the parser text.
+function expectOneUnhandledSyntaxErrorLine(): void {
+  const lines = consoleErrorSpy.mock.calls
+    .map(args => String(args[0]))
+    .filter(line => line.startsWith('[RPC_PROXY] unhandled route error '))
+  expect(lines).toHaveLength(1)
+  expect(lines[0]).toContain('error=SyntaxError')
+  expect(lines[0]).not.toMatch(/JSON/)
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
+  consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
   authTokenMock.verifyRpcToken.mockReturnValue(VALID_CLAIMS)
   serviceMock.resolveHostConnectionForUser.mockResolvedValue(HOST_CONNECTION)
   serviceMock.forwardHostMessageToHost.mockResolvedValue({ success: true, status: 'completed' })
+})
+
+afterEach(() => {
+  consoleErrorSpy.mockRestore()
 })
 
 describe('rpc-proxy JSON body limit on POST /rpc/hosts/:hostRef/messages', () => {
@@ -235,10 +253,11 @@ describe('rpc-proxy parses request bodies only after authentication (M4)', () =>
       .send(MALFORMED_JSON_BODY)
 
     // The parser is mounted on the route: its SyntaxError reaches the app's
-    // error handler (mapped to 500), and the handler never runs.
+    // error handler (mapped to 500, without the parser's message), and the
+    // handler never runs.
     expect(res.status).toBe(500)
-    expect(res.body.error).toBe('Internal Server Error')
-    expect(res.body.message).toMatch(/JSON/)
+    expect(res.body).toEqual({ error: 'Internal Server Error' })
+    expectOneUnhandledSyntaxErrorLine()
     expect(authTokenMock.verifyRpcToken).toHaveBeenCalledWith('token')
     expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
   })
@@ -264,7 +283,7 @@ describe('rpc-proxy parses request bodies only after authentication (M4)', () =>
       .send(MALFORMED_JSON_BODY)
 
     expect(res.status).toBe(500)
-    expect(res.body.error).toBe('Internal Server Error')
-    expect(res.body.message).toMatch(/JSON/)
+    expect(res.body).toEqual({ error: 'Internal Server Error' })
+    expectOneUnhandledSyntaxErrorLine()
   })
 })

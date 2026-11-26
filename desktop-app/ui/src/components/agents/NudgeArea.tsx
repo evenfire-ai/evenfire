@@ -4,6 +4,7 @@ import { Button, IconButton, StatusBanner } from '@components/Common'
 import { IconClose } from '@components/SidebarNav/icons'
 import { useBrowserWindowState } from '@hooks/useBrowserWindowState'
 import { useTaskTier } from '@hooks/useTaskTier'
+import { formatToolDisplayName } from '@lib/toolLabels'
 import type { ProgressStep } from '../../uiTypes'
 
 interface Props {
@@ -20,7 +21,7 @@ function MiniSummary({ steps }: { steps: ProgressStep[] }) {
   return (
     <div className="nudge-mini-summary">
       <span>Iteration {lastTool?.iteration ?? 0}</span>
-      {lastTool ? <span>Last tool: {lastTool.displayName}</span> : null}
+      {lastTool ? <span>Last tool: {formatToolDisplayName(lastTool)}</span> : null}
     </div>
   )
 }
