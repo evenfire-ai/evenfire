@@ -1,4 +1,4 @@
-import { type Locator, type Page, expect, test } from '@playwright/test'
+import { type Locator, type Page, errors, expect, test } from '@playwright/test'
 
 // Operator cancel of a run from the plugin runs table, against a live cluster.
 //
@@ -51,10 +51,18 @@ async function login(page: Page, env: CancelJourneyEnv) {
   await expect(page.getByRole('navigation', { name: 'Main sections' })).toBeVisible({
     timeout: 60_000,
   })
+  // The reminder banner is optional. `isVisible` does not wait (its `timeout` is
+  // ignored), so wait a bounded time for it and treat only that timeout as
+  // "no banner"; any other error fails the journey.
   const remindLater = page.getByRole('button', { name: 'Remind me later' })
-  if (await remindLater.isVisible({ timeout: 3_000 }).catch(() => false)) {
-    await remindLater.click()
-  }
+  const bannerShown = await remindLater.waitFor({ state: 'visible', timeout: 3_000 }).then(
+    () => true,
+    (err: unknown) => {
+      if (err instanceof errors.TimeoutError) return false
+      throw err
+    }
+  )
+  if (bannerShown) await remindLater.click()
 }
 
 async function openRunsTab(page: Page, env: CancelJourneyEnv) {
