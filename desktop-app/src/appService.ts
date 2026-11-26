@@ -1224,18 +1224,28 @@ export class AppService {
     }
   }
 
+  /**
+   * Whether `binding` is still the active environment: the same profile id and the same REST
+   * endpoint. A throw from capturing the active binding is not caught here.
+   */
+  private authEnvironmentBindingMatches(binding: {
+    environmentKey: string
+    profileId: string | null
+    restBaseUrl: string
+  }): boolean {
+    const current = this.captureAuthEnvironmentBinding()
+    return (
+      current.profileId === binding.profileId &&
+      sameDesktopRestEndpoint(current.restBaseUrl, binding.restBaseUrl)
+    )
+  }
+
   private assertAuthEnvironmentBinding(binding: {
     environmentKey: string
     profileId: string | null
     restBaseUrl: string
   }): void {
-    const current = this.captureAuthEnvironmentBinding()
-    if (
-      current.profileId !== binding.profileId ||
-      !sameDesktopRestEndpoint(current.restBaseUrl, binding.restBaseUrl)
-    ) {
-      throw new Error('stale_runtime_environment')
-    }
+    if (!this.authEnvironmentBindingMatches(binding)) throw new Error('stale_runtime_environment')
   }
 
   private runtimeConfigDiscoveryMatchesCurrentBinding(discovery: RuntimeConfigDiscovery): boolean {
@@ -2874,23 +2884,14 @@ export class AppService {
   /**
    * D7: whether `attempt` still belongs to this session and environment. A moved generation is
    * `replaced` (D2); the same generation with another binding (profile id or REST endpoint) is
-   * `environment_changed`.
+   * `environment_changed`. A throw from capturing the active binding goes on to the link
+   * chain's last catch.
    */
   private isBrowserSignInAttemptCurrent(
     attempt: BrowserSignInAttempt
   ): 'current' | 'replaced' | 'environment_changed' {
     if (attempt.generation !== this.sessionGeneration) return 'replaced'
-    try {
-      this.assertAuthEnvironmentBinding(attempt.binding)
-    } catch (error) {
-      // The binding check's own refusal is this answer. Any other error is unexpected and goes
-      // on to the link chain's last catch.
-      if (error instanceof Error && error.message === 'stale_runtime_environment') {
-        return 'environment_changed'
-      }
-      throw error
-    }
-    return 'current'
+    return this.authEnvironmentBindingMatches(attempt.binding) ? 'current' : 'environment_changed'
   }
 
   /** Ends attempt `attemptId` as D7 found it: `replaced`, or `failed(environment_changed)`. */

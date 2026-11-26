@@ -158,7 +158,7 @@ function modelRestUrls(real: BumpReal, model: BumpModel): string[] {
   return envs.map(env => (env === 'D' ? ENV_D_REST : real.harness.envs[env].restBaseUrl)).sort()
 }
 
-/** A boundary change away from A clears A's saved token (`appService.ts:2284`). */
+/** A boundary change away from A clears A's saved token (`appService.ts:2294`). */
 function leave(model: BumpModel, next: EnvName | null) {
   if (model.active === 'A' && next !== 'A') model.storedA = false
   model.active = next
@@ -203,7 +203,7 @@ const bumpEvents = {
     id: 'E15',
     label: 'E15 session restore (getSessionState)',
     check: () => true,
-    // The model leaves out `getSessionState`'s 5 s retry gate (`appService.ts:4033-4038`): it
+    // The model leaves out `getSessionState`'s 5 s retry gate (`appService.ts:4034-4039`): it
     // never decides an expectation here. `storedA` holds while signed out on A only before the
     // first restore on A (a kept token at start), and that restore succeeds. Every later
     // `storedA` comes from a sign-in on A, and every way back to signed out (logout, or a change
@@ -1565,8 +1565,8 @@ describe('browser sign-in link acceptance, redeem and install', () => {
 
     const restore = service.getSessionState()
     await until(harness, () => bind.reached, "the restore's chat-store bind")
-    // The restore commit holds the owner with the session token set (`appService.ts:1996`) and
-    // its generation advance (`:2026`) still ahead.
+    // The restore commit holds the owner with the session token set (`appService.ts:2006`) and
+    // its generation advance (`:2036`) still ahead.
     expect(service.getSessionPresence()).toEqual({ hasToken: true, hasMe: false })
     expect(service.acceptDesktopLoginLink(codeLink(state, envs.A.restBaseUrl))).toBe(true)
     await harness.drain({ owner: false })
