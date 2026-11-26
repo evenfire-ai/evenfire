@@ -361,6 +361,32 @@ describe('buildHostApprovalChange', () => {
       }
     )
 
+    it.each([4, 10])(
+      'tier 3 with %i extra natives keeps the ceiling and policy values beside the counts',
+      extraCount => {
+        const extra = Array.from({ length: extraCount }, (_, i) => `synthetic_native_${i}`)
+        const { before, after } = worstChange(128, extra)
+        const change = buildHostApprovalChange({ before, after })
+        const text = serializeApprovalChangeSummary(change as NonNullable<typeof change>, {
+          isNative: name => MCP_HOST_NATIVE_TOOL_NAMES.includes(name) || extra.includes(name),
+        })
+        expect(text.length).toBeLessThanOrEqual(4096)
+        const parsed = JSON.parse(text) as Parsed & {
+          fieldCount: number
+          nativeToolsTruncated?: number
+        }
+        expect(parsed.truncated).toBe(true)
+        expect(parsed.nativeToolsTruncated).toBeUndefined()
+        expect(parsed.tools).toHaveLength(MCP_HOST_NATIVE_TOOL_NAMES.length + extraCount)
+        expect(parsed.fields).toEqual({
+          modeCeiling: { old: 'manual', new: 'allow_all' },
+          defaultPolicy: { old: 'cli_only', new: 'designated_approvers' },
+        })
+        // The per-channel booleans fall to counts.
+        expect(parsed.fieldCount).toBe(11)
+      }
+    )
+
     it('the not-a-policy marker survives the shortening', () => {
       const names = [...MCP_HOST_NATIVE_TOOL_NAMES].slice(0, 46)
       const before = {

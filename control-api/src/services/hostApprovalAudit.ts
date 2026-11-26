@@ -307,9 +307,12 @@ export type SummaryOptions = {
  *    carries `valuesShortened: true`.
  * 3. The field values fall back to counts: a counts-only object marked
  *    `truncated: true` (field, tool and approver-channel counts, the approver
- *    totals and the two flags) that holds every native entry.
+ *    totals and the two flags) that holds every native entry and the changed
+ *    `modeCeiling` and `defaultPolicy`, old and new (they decide whether a
+ *    person is asked, and who). The other fields show only as counts.
  * 4. Only if even that cannot fit (mcp-host gaining about 15 more native
- *    tools), native entries are cut from the end of the counts-only object,
+ *    tools), native entries are cut from the end of the counts-only object
+ *    (which keeps `modeCeiling` and `defaultPolicy` while they fit),
  *    counted in `nativeToolsTruncated`, and a `host_approval_summary_oversize`
  *    warning is logged, so nothing disappears silently.
  */
@@ -362,10 +365,19 @@ export function serializeApprovalChangeSummary(
   })
   if (fits(markerText)) return markerText
 
-  // Tiers 3 and 4.
+  // Tiers 3 and 4. The two fields that decide whether a person is asked and
+  // who (modeCeiling, defaultPolicy) keep their old and new beside the counts.
   const counts = Object.values(change.approvers)
-  const countsOnly = (tools: HostApprovalToolChange[], cut: number): Record<string, unknown> => ({
+  const keyFields = Object.fromEntries(
+    Object.entries(shortFields).filter(([key]) => key in FIELD_ENUMS)
+  )
+  const countsOnly = (
+    tools: HostApprovalToolChange[],
+    cut: number,
+    withFields: boolean
+  ): Record<string, unknown> => ({
     truncated: true,
+    ...(withFields && Object.keys(keyFields).length > 0 ? { fields: keyFields } : {}),
     tools,
     ...(cut > 0 ? { nativeToolsTruncated: cut } : {}),
     fieldCount: Object.keys(change.fields).length,
@@ -376,15 +388,18 @@ export function serializeApprovalChangeSummary(
     blockRemoved: change.blockRemoved,
     inheritedBefore: change.inheritedBefore,
   })
-  const tier3 = encode(countsOnly(natives, 0))
+  const tier3 = encode(countsOnly(natives, 0, true))
   if (fits(tier3)) return tier3
 
   let kept = natives.length
   let text = tier3
   while (kept > 0 && !fits(text)) {
     kept -= 1
-    text = encode(countsOnly(natives.slice(0, kept), natives.length - kept))
+    text = encode(countsOnly(natives.slice(0, kept), natives.length - kept, true))
   }
+  // Not even the two fields fit beside the last native entry: they go too.
+  if (!fits(text)) text = encode(countsOnly([], natives.length, false))
+  const cutNatives = natives.length - (JSON.parse(text) as { tools: unknown[] }).tools.length
   rootLogger.child({ module: 'host-approval-audit' }).warn(
     {
       event: 'host_approval_summary_oversize',
@@ -392,7 +407,7 @@ export function serializeApprovalChangeSummary(
       requestId: currentAdministrativeRequestContext()?.requestId ?? null,
       length: tier3.length,
       limit: MAX_APPROVAL_CHANGE_SUMMARY_LENGTH,
-      nativeToolsTruncated: natives.length - kept,
+      nativeToolsTruncated: cutNatives,
     },
     'Host approval summary too long for its native tool entries'
   )
