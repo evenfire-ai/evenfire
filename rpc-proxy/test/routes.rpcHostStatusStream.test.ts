@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import jwt from 'jsonwebtoken'
+import { generateKeyPairSync, randomUUID } from 'node:crypto'
 import request from 'supertest'
+import {
+  HOST_EDGE_ASSERTION_AUDIENCE,
+  HOST_EDGE_ASSERTION_CLAIM_TYPE,
+  HOST_EDGE_ASSERTION_HEADER,
+  HOST_EDGE_ASSERTION_JWT_TYPE,
+} from '@clerum/action-context-contracts'
 import { config } from '../src/config.js'
 import {
   createRpcHostStatusStreamRouter,
@@ -29,9 +37,44 @@ const serviceMock = vi.hoisted(() => ({
     }
   },
 }))
-
 vi.mock('../src/authToken.js', () => authTokenMock)
-vi.mock('../src/services/mcpProxyService.js', () => serviceMock)
+// The route checks the held edge assertion's expiry before each poll with the
+// real helper.
+vi.mock('../src/services/mcpProxyService.js', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/mcpProxyService.js')>(
+    '../src/services/mcpProxyService.js'
+  )
+  return { ...serviceMock, isHeldEdgeAssertionNearExpiry: actual.isHeldEdgeAssertionNearExpiry }
+})
+
+// An edge assertion signed the way control-api signs it (RS256, the assertion
+// JWT type, the Host runtime audience), with `exp` 300 s ahead, so a poll runs.
+const EDGE_KEYS = generateKeyPairSync('rsa', { modulusLength: 2048 })
+
+function signedEdgeAssertionHeaders(): Record<string, string> {
+  const now = Math.floor(Date.now() / 1000)
+  const assertion = jwt.sign(
+    {
+      typ: HOST_EDGE_ASSERTION_CLAIM_TYPE,
+      v: 1,
+      iss: 'control-api',
+      sub: 'user-1',
+      host: `${config.hostNamespace}/agent2`,
+      jti: randomUUID(),
+      iat: now,
+      exp: now + 300,
+      teamId: 'team-1',
+      scopes: ['host:status:read'],
+    },
+    EDGE_KEYS.privateKey,
+    {
+      algorithm: 'RS256',
+      audience: HOST_EDGE_ASSERTION_AUDIENCE,
+      header: { alg: 'RS256', typ: HOST_EDGE_ASSERTION_JWT_TYPE },
+    }
+  )
+  return { [HOST_EDGE_ASSERTION_HEADER]: assertion }
+}
 
 const defaultStreamConfig = {
   streamMaxConcurrent: config.streamMaxConcurrent,
@@ -206,7 +249,7 @@ describe('routes/rpcHostStatusStream', () => {
     serviceMock.resolveHostConnectionForUser.mockResolvedValue({
       name: 'agent2',
       url: 'http://agent2.mcp-host.svc.cluster.local:8080',
-      headers: {},
+      headers: signedEdgeAssertionHeaders(),
     })
     serviceMock.forwardHostStatus.mockRejectedValue(
       new Error('fetch failed for http://internal.service.local/token=secret')
@@ -216,6 +259,8 @@ describe('routes/rpcHostStatusStream', () => {
       .get('/rpc/hosts/agent2/status/stream')
       .set('authorization', 'Bearer token')
       .expect(200)
+    // Witness: the error event comes from the rejected poll.
+    expect(serviceMock.forwardHostStatus).toHaveBeenCalled()
     expect(response.text).toContain('event: error')
     expect(response.text).toContain('Status temporarily unavailable')
     expect(response.text).not.toContain('internal.service.local')
@@ -261,7 +306,7 @@ describe('routes/rpcHostStatusStream', () => {
     serviceMock.resolveHostConnectionForUser.mockResolvedValue({
       name: 'agent2',
       url: 'http://agent2.mcp-host.svc.cluster.local:8080',
-      headers: {},
+      headers: signedEdgeAssertionHeaders(),
     })
     serviceMock.forwardHostStatus.mockResolvedValue({
       hostRef: 'agent2',

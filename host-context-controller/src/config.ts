@@ -32,6 +32,11 @@ export interface Config {
   // Kubernetes namespace where rpc-proxy runs (for L2 egress NetworkPolicy generation)
   rpcProxyNamespace: string
 
+  // RPC Proxy -> MCP Host edge protocol of the Host image HCC reconciles. The
+  // only supported value is signed-assertion-v1: the Host verifies an edge
+  // assertion signed by control-api on every rpc-proxy request.
+  hostRpcProxyEdgeProtocol: 'signed-assertion-v1'
+
   // Kubernetes namespace where per-Host channel-reader Deployments live
   channelsNamespace: string
 
@@ -718,6 +723,12 @@ export const config: Config = {
 
   // rpc-proxy namespace
   rpcProxyNamespace: getEnv('CONTEXT_MAPPER_RPC_PROXY_NAMESPACE', 'rpc-proxy')!,
+  hostRpcProxyEdgeProtocol: ((): 'signed-assertion-v1' => {
+    if (getEnv('CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL') !== 'signed-assertion-v1') {
+      throw new Error('CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL must be signed-assertion-v1')
+    }
+    return 'signed-assertion-v1'
+  })(),
 
   // Per-Host channel-reader Deployments namespace
   channelsNamespace: getEnv('CONTEXT_MAPPER_CHANNELS_NAMESPACE', 'channels')!,

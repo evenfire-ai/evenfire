@@ -321,6 +321,8 @@ type Config = {
   // Stateless-agent wake endpoint: per-host wake rate limit + server-side
   // coalescence window for the wake-annotation projection.
   hostWakeRlPerMin: number
+  hostMessageRlPerMin: number
+  hostRpcAdmissionRlPerMin: number
   hostWakeCoalesceWindowMs: number
   approvalMediumChallengeTtlSec: number
   telegramProviderEventChallengeTtlSec: number
@@ -785,6 +787,11 @@ if (memberRegistrationMode === 'hosted') {
 // Computed once so every consumer below reads the exact same resolved value
 // (rather than re-parsing REGISTRY_CONNECTION_MODE a second time).
 const registryConnectionMode: 'managed' | 'self-hosted' = parseRegistryConnectionMode()
+const oauthEncryptionKey = requiredOrDevDefault(
+  'CONTROL_API_OAUTH_ENCRYPTION_KEY',
+  // 32-byte hex-encoded dev key (AES-256-GCM). Prod must override.
+  '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff'
+)
 
 // Computed as locals because the two values are coupled: image-input evidence
 // written by a sync expires TTL after the capture it came from, so a TTL shorter
@@ -1340,6 +1347,11 @@ export const config: Config = {
   // bursts from a few concurrent devices (4 x 3 = 12) plus a real message.
   // Derivation is regression-guarded by test/config.hostWakeRateLimit.test.ts.
   hostWakeRlPerMin: positiveIntegerFromEnv('CONTROL_API_HOST_WAKE_RL_PER_MIN', 150),
+  hostMessageRlPerMin: positiveIntegerFromEnv('CONTROL_API_HOST_MESSAGE_RL_PER_MIN', 60),
+  hostRpcAdmissionRlPerMin: positiveIntegerFromEnv(
+    'CONTROL_API_HOST_RPC_ADMISSION_RL_PER_MIN',
+    300
+  ),
   hostWakeCoalesceWindowMs: Number(process.env.CONTROL_API_HOST_WAKE_COALESCE_WINDOW_MS || 2000),
   approvalMediumChallengeTtlSec: Number(
     process.env.WORKFLOW_APPROVAL_MEDIUM_CHALLENGE_TTL_SEC || 60 * 60
@@ -1463,11 +1475,7 @@ export const config: Config = {
     'CONTROL_API_OAUTH_STATE_HMAC_SECRET',
     'dev-oauth-state-hmac-secret-32-bytes-pad'
   ),
-  oauthEncryptionKey: requiredOrDevDefault(
-    'CONTROL_API_OAUTH_ENCRYPTION_KEY',
-    // 32-byte hex-encoded dev key (AES-256-GCM). Prod must override.
-    '00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff'
-  ),
+  oauthEncryptionKey,
   // Optional: when set, used verbatim as the origin of the public OAuth callback
   // URL (the redirect_uri). Empty → derive from the request Host (local dev).
   oauthCallbackBaseUrl: process.env.CONTROL_API_OAUTH_CALLBACK_BASE_URL ?? '',

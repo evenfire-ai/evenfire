@@ -46,6 +46,8 @@ export { AgentChatProviders } from './AgentChatProviders'
 export { McpRuntimeContext, McpRuntimeProvider, useMcpRuntimeContext } from './McpRuntimeContext'
 export type { McpRuntimeContextValue, McpRuntimeProviderProps } from './McpRuntimeContext'
 
+export { ChatLinkActivationContext, useChatLinkActivation } from './ChatLinkActivationContext'
+
 export { NavigationContext, useNavigationContext } from './NavigationContext'
 export type { NavigationContextValue } from './NavigationContext'
 

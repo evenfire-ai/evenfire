@@ -11,7 +11,7 @@ import {
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { parseFileReferenceV1 } from '@clerum/gfs-interaction-policy'
+import { parseFileReferenceV1, parseLocationReferenceV1 } from '@clerum/gfs-interaction-policy'
 import { AppService } from './appService.js'
 import { runChatGetIndex } from './chatGetIndexHandler.js'
 import {
@@ -19,6 +19,7 @@ import {
   requireChatStore,
   requireChatStoreForBindingGeneration,
 } from './chatStoreBinding.js'
+import { externalUrlToOpen } from './externalUrl.js'
 import { GFS_DOWNLOAD_MAX_BYTES_CEILING } from './gfs/downloadLimits.js'
 import { GFS_PREVIEW_MAX_BYTES } from './gfs/previewLimits.js'
 import type { GfsWatchClient, GfsWatchOwner } from './gfs/watchClient.js'
@@ -396,25 +397,43 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
     parsed.approvalMode !== 'auto' &&
     parsed.approvalMode !== 'allow_all'
   ) {
-    delete parsed.approvalMode
+    throw new Error('Invalid host message request: approvalMode')
   }
-  if (parsed.fileReferences !== undefined) {
-    // Checks shape only; mcp-host enforces the count limit and resolves each reference.
-    if (!Array.isArray(parsed.fileReferences)) {
-      throw new Error('Invalid host message request: fileReferences')
+  // Both reference lists are checked for shape only; mcp-host enforces the count
+  // limits and resolves each reference.
+  const fileReferences = parseReferenceList(
+    parsed.fileReferences,
+    'fileReferences',
+    parseFileReferenceV1
+  )
+  const locationReferences = parseReferenceList(
+    parsed.locationReferences,
+    'locationReferences',
+    parseLocationReferenceV1
+  )
+  return {
+    ...parsed,
+    ...(fileReferences === undefined ? {} : { fileReferences }),
+    ...(locationReferences === undefined ? {} : { locationReferences }),
+  }
+}
+
+function parseReferenceList<T>(
+  value: unknown,
+  field: string,
+  parse: (entry: unknown) => { ok: true; value: T } | { ok: false; code: string; message: string }
+): T[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) throw new Error(`Invalid host message request: ${field}`)
+  return value.map((entry, index) => {
+    const result = parse(entry)
+    if (!result.ok) {
+      throw new Error(
+        `Invalid host message request: ${field}[${index}] ${result.code}: ${result.message}`
+      )
     }
-    const fileReferences = parsed.fileReferences.map((entry, index) => {
-      const result = parseFileReferenceV1(entry)
-      if (!result.ok) {
-        throw new Error(
-          `Invalid host message request: fileReferences[${index}] ${result.code}: ${result.message}`
-        )
-      }
-      return result.value
-    })
-    return { ...parsed, fileReferences }
-  }
-  return parsed
+    return result.value
+  })
 }
 
 export function assertTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): void {
@@ -813,6 +832,10 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
   ipcMain.handle('gfs:resolve', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
     return service.resolveGfsUri(sanitizeString(payload?.uri))
+  })
+  ipcMain.handle('gfs:resolveForNavigation', async (event, payload: { uri: string }) => {
+    assertTrustedSender(event)
+    return service.resolveGfsUriForNavigation(sanitizeString(payload?.uri))
   })
   ipcMain.handle('gfs:copyDeepLink', async (event, payload: { uri: string }) => {
     assertTrustedSender(event)
@@ -1698,10 +1721,14 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
       const targetHostRefs = Array.isArray(hostRefs)
         ? hostRefs.map(v => String(v).trim()).filter(Boolean)
         : undefined
-      const action =
-        shellAction === 'once' || shellAction === 'command' || shellAction === 'shell'
-          ? shellAction
-          : undefined
+      if (
+        shellAction !== undefined &&
+        shellAction !== 'once' &&
+        shellAction !== 'command' &&
+        shellAction !== 'shell'
+      ) {
+        throw new Error('shellAction must be once, command, or shell')
+      }
       return service.approveToolCall(
         targetHostRef,
         targetTaskId,
@@ -1710,7 +1737,7 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
         {
           teamId: sanitizeString(teamId) || undefined,
           alwaysApprove: alwaysApprove === true,
-          ...(action ? { shellAction: action } : {}),
+          ...(shellAction ? { shellAction } : {}),
         }
       )
     }
@@ -2363,11 +2390,9 @@ export function registerIpcHandlers(service: AppService, logout: () => Promise<n
 
   ipcMain.handle('app:openUrl', async (event, { url }: { url: string }) => {
     assertTrustedSender(event)
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      throw new Error('Only HTTP(S) URLs are allowed')
-    }
+    const target = externalUrlToOpen(url)
     const { shell } = await import('electron')
-    await shell.openExternal(url)
+    await shell.openExternal(target)
   })
 
   ipcMain.handle('desktop:openWindow', async (event, { hostRef }: { hostRef: string }) => {

@@ -33,7 +33,13 @@ export {
 export { withRetry, computeBackoff } from './coordinator/retry'
 export { emitLog, initLogger } from './status-reporter/logger'
 export { createServer, start, stop, safeEqual } from './rest-server/server'
-export { CycleDetectedError, WorkflowSDKInitError, McpHostNotConfiguredError } from './errors'
+export {
+  CycleDetectedError,
+  WorkflowSDKInitError,
+  McpHostNotConfiguredError,
+  WorkflowAuthorizationPausedError,
+  WorkflowRunStateUnavailableError,
+} from './errors'
 export type {
   WorkflowConfig,
   WorkflowRecipeSpec,

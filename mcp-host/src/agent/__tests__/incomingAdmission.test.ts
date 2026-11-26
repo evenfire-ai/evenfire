@@ -7,11 +7,12 @@
  * the resolver call, or the structured log line the branch had to emit).
  */
 import { type Mock, afterEach, describe, expect, it, vi } from 'vitest'
+import { SqliteError } from 'better-sqlite3'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { ApprovalConfigSnapshot } from '../../core/approval/approvalMode'
+import type { ApprovalConfigSnapshot, ApprovalMode } from '../../core/approval/approvalMode'
 import { approvalLogId } from '../../core/approval/grantMemory'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { InMemoryConversationStore } from '../../core/conversation/conversationStore'
@@ -20,6 +21,7 @@ import {
   makeSqliteStore,
 } from '../../core/conversation/persistence/__tests__/testHelpers'
 import { FileAttachmentErrorCode } from '../../core/errors'
+import type { ApprovalConfig } from '../../core/extensions/approvalTypes'
 import { ConversationState } from '../../core/types'
 import { logger } from '../../logger'
 import type { IncomingMessage, MessageResponse, SetModelResult } from '../../server/types'
@@ -113,6 +115,7 @@ function makeAdmission(
     })),
     fileReferenceGfs: () => ({ status: 'unsupported' }),
     logger,
+    approvalSnapshot: () => ({ effective: undefined, hostSpec: undefined }),
     ...overrides,
   }
   const spies: Spies = {
@@ -676,7 +679,7 @@ describe('#666 file attachments at admission', () => {
 const OPEN_CEILING: ApprovalConfigSnapshot = {
   effective: { defaultPolicy: 'channel_users', channels: {}, modeCeiling: 'allow_all' },
   hostSpec: {
-    defaultPolicy: 'cli_only',
+    defaultPolicy: 'channel_users',
     channels: {
       telegram: { enabled: true, allowModeChange: true },
       email: { enabled: true, allowModeChange: true },
@@ -690,7 +693,7 @@ const OPEN_CEILING: ApprovalConfigSnapshot = {
 const UNSET_CHANNELS: ApprovalConfigSnapshot = {
   effective: OPEN_CEILING.effective,
   hostSpec: {
-    defaultPolicy: 'cli_only',
+    defaultPolicy: 'channel_users',
     channels: {
       telegram: { enabled: true, allowModeChange: false },
       email: { enabled: true, allowModeChange: false },
@@ -1010,7 +1013,7 @@ describe('approval mode writers at admission', () => {
     const absent: ApprovalConfigSnapshot = {
       effective: OPEN_CEILING.effective,
       hostSpec: {
-        defaultPolicy: 'cli_only',
+        defaultPolicy: 'channel_users',
         channels: { telegram: { enabled: true }, email: { enabled: true } },
         modeCeiling: 'allow_all',
       },
@@ -1049,50 +1052,6 @@ describe('approval mode writers at admission', () => {
           userId: 'mail-user@example.test',
           channelType: 'email',
           channelId: 'inbox-1',
-          threadId: 'chat-1',
-        })
-      )?.approval_mode
-    ).toBe('manual')
-  })
-
-  it('keeps a Slack sender matched only by username at manual', async () => {
-    const manager = new ConversationManager()
-    const { admit, spies } = admitWith(manager, OPEN_CEILING)
-    const byUsername = await admit(
-      message({
-        channelType: 'slack',
-        channelId: 'C1',
-        sender: 'slack-legacy',
-        messageId: 'msg-legacy',
-        content: 'approval-mode allow-all',
-        senderMatch: 'username',
-      })
-    )
-    const byUserId = await admit(
-      message({
-        channelType: 'slack',
-        channelId: 'C1',
-        sender: 'slack-user',
-        messageId: 'msg-user-id',
-        content: 'approval-mode allow-all',
-      })
-    )
-    expect(spies.dispatch).not.toHaveBeenCalled()
-    expect(byUsername).toMatchObject({
-      success: true,
-      response:
-        'Approval mode is manual. Effective mode is manual. Only an allowlisted Slack user ID can raise the mode.',
-    })
-    expect(byUserId).toMatchObject({
-      success: true,
-      response: 'Approval mode is allow_all. Effective mode is allow_all.',
-    })
-    expect(
-      manager.getSessionByKey(
-        serializeSessionKey({
-          userId: 'slack-legacy',
-          channelType: 'slack',
-          channelId: 'C1',
           threadId: 'chat-1',
         })
       )?.approval_mode
@@ -1155,10 +1114,6 @@ describe('approval mode writers at admission', () => {
           provider: 'zai',
         },
       })
-      expect(warn).toHaveBeenCalledWith(
-        { err: expect.objectContaining({ message: 'fixture approval-mode write failure' }) },
-        'Approval mode command could not be stored'
-      )
       expect(spies.dispatch).not.toHaveBeenCalled()
       const conv = manager.getSessionByKey(
         serializeSessionKey({
@@ -1167,6 +1122,11 @@ describe('approval mode writers at admission', () => {
           channelId: 'C1',
           threadId: 'thread-1',
         })
+      )
+      expect(conv).toBeDefined()
+      expect(warn).toHaveBeenCalledWith(
+        { errorClass: 'Error', session: approvalLogId(conv!.id) },
+        'Approval mode command could not be stored'
       )
       expect(conv?.approval_mode).toBe('manual')
       expect(l1Calls(info as unknown as Mock)).toHaveLength(0)
@@ -1197,7 +1157,7 @@ describe('approval mode writers at admission', () => {
         },
       })
       expect(warn).toHaveBeenCalledWith(
-        { err: expect.objectContaining({ message: 'fixture session read failure' }) },
+        { errorClass: 'Error' },
         'First-message approval mode could not be stored'
       )
       expect(spies.dispatch).not.toHaveBeenCalled()
@@ -1206,6 +1166,63 @@ describe('approval mode writers at admission', () => {
       warn.mockRestore()
     }
   })
+
+  it.each([
+    {
+      // The SQLite store's own refusal names the conversation id.
+      name: 'the SQLite store refusal',
+      error: (id: string) =>
+        new Error(
+          `persistApprovalMode: no sessionKey for conversation ${id}; refusing a write with no durable target`
+        ),
+      fields: { errorClass: 'Error' },
+    },
+    {
+      name: 'a SQLite driver error with a code',
+      error: (id: string) => new SqliteError(`database is locked for ${id}`, 'SQLITE_BUSY'),
+      fields: { errorClass: 'SqliteError', code: 'SQLITE_BUSY' },
+    },
+  ])(
+    'logs $name by its class, any code and the hashed session, never the conversation id',
+    async ({ error, fields }) => {
+      class RefusingModeWrite extends InMemoryConversationStore {
+        override async persistApprovalMode(conv: { id: string }): Promise<void> {
+          throw error(conv.id)
+        }
+      }
+      const manager = new ConversationManager(new RefusingModeWrite())
+      const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+      const { admit } = admitWith(manager, OPEN_CEILING)
+      try {
+        const response = await admit(
+          message({
+            channelType: 'slack',
+            channelId: 'C1',
+            threadId: 'thread-1',
+            sender: 'slack-user',
+            content: 'approval-mode auto',
+          })
+        )
+        expect(response).toMatchObject({ success: false })
+        const conv = manager.getSessionByKey(
+          serializeSessionKey({
+            userId: 'slack-user',
+            channelType: 'slack',
+            channelId: 'C1',
+            threadId: 'thread-1',
+          })
+        )
+        expect(conv).toBeDefined()
+        expect(warn).toHaveBeenCalledWith(
+          { ...fields, session: approvalLogId(conv!.id) },
+          'Approval mode command could not be stored'
+        )
+        expect(JSON.stringify(warn.mock.calls)).not.toContain(conv!.id)
+      } finally {
+        warn.mockRestore()
+      }
+    }
+  )
 
   it('is never recognized on an rpc message', async () => {
     const manager = new ConversationManager()
@@ -1309,5 +1326,446 @@ describe('approval mode writers at admission', () => {
       info.mockRestore()
       warn.mockRestore()
     }
+  })
+})
+
+type MessagingChannel = 'telegram' | 'slack' | 'teams' | 'email'
+
+const POLICY_CHANNELS: readonly MessagingChannel[] = ['telegram', 'slack', 'teams', 'email']
+
+/** Each approver entry is the sender id that channel reports to mcp-host. */
+const APPROVER: Record<MessagingChannel, string> = {
+  telegram: '111111111',
+  slack: 'U0APPROVER',
+  teams: '29:approver-id',
+  email: 'approver@example.test',
+}
+
+const NON_APPROVER: Record<MessagingChannel, string> = {
+  telegram: '222222222',
+  slack: 'U0OTHER',
+  teams: '29:other-id',
+  email: 'other@example.test',
+}
+
+function approverChannels(): Record<string, unknown> {
+  return Object.fromEntries(
+    POLICY_CHANNELS.map(channel => [
+      channel,
+      { enabled: true, approvers: [APPROVER[channel]], allowModeChange: true },
+    ])
+  )
+}
+
+/** `effective` and `hostSpec` are the same object, as a Host CR publishes them. */
+function policySnapshot(
+  defaultPolicy: unknown,
+  channels: unknown = approverChannels()
+): ApprovalConfigSnapshot {
+  const approval = {
+    defaultPolicy,
+    modeCeiling: 'allow_all',
+    channels,
+  } as unknown as ApprovalConfig
+  return { effective: approval, hostSpec: approval }
+}
+
+const REFUSAL_REPLY = {
+  policy_cli_only:
+    "Approval mode is manual. Effective mode is manual. This Host's approval policy does not let a messaging channel raise the mode.",
+  not_approver:
+    'Approval mode is manual. Effective mode is manual. Only a designated approver can raise the mode.',
+  policy_invalid:
+    "Approval mode is manual. Effective mode is manual. This Host's approval policy is not valid, so the mode cannot be raised.",
+} as const
+
+describe('approver policy on a messaging-channel mode raise', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function policyRun(live: ApprovalConfigSnapshot) {
+    const manager = new ConversationManager()
+    const setApprovalMode = vi.spyOn(manager, 'setApprovalMode')
+    const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    const { admit, spies } = makeAdmission({
+      getConversationManager: () => manager,
+      approvalSnapshot: () => live,
+    })
+    const logged = (event: string) =>
+      info.mock.calls.filter(call => (call[0] as Record<string, unknown>).event === event)
+    const key = (channel: MessagingChannel, sender: string) =>
+      serializeSessionKey({
+        userId: sender,
+        channelType: channel,
+        channelId: `${channel}-chat`,
+        threadId: 'chat-1',
+      })
+    let sent = 0
+    return {
+      spies,
+      warn,
+      setApprovalMode,
+      command: (channel: MessagingChannel, sender: string, mode: string) => {
+        sent += 1
+        return admit(
+          message({
+            channelType: channel,
+            channelId: `${channel}-chat`,
+            sender,
+            messageId: `msg-policy-${sent}`,
+            content: `approval-mode ${mode}`,
+          })
+        )
+      },
+      stored: (channel: MessagingChannel, sender: string) =>
+        manager.getSessionByKey(key(channel, sender))?.approval_mode,
+      conversationId: (channel: MessagingChannel, sender: string) =>
+        manager.getSessionByKey(key(channel, sender))?.id ?? '',
+      seed: (channel: MessagingChannel, sender: string, approvalMode: ApprovalMode) =>
+        manager.getOrCreate(key(channel, sender), {
+          userId: sender,
+          channelType: channel,
+          approvalMode,
+        }),
+      refusals: () =>
+        logged('approval_mode_command_refused').map(call => call[0] as Record<string, unknown>),
+      refusalMessages: () => logged('approval_mode_command_refused').map(call => call[1]),
+      l1: () => logged('L1'),
+    }
+  }
+
+  it.each(POLICY_CHANNELS)(
+    'designated_approvers: a %s raise by a listed approver stores allow_all',
+    async channel => {
+      const run = policyRun(policySnapshot('designated_approvers'))
+
+      const response = await run.command(channel, APPROVER[channel], 'allow-all')
+
+      expect(response).toEqual({
+        success: true,
+        status: 'completed',
+        response: 'Approval mode is allow_all. Effective mode is allow_all.',
+      })
+      expect(run.stored(channel, APPROVER[channel])).toBe('allow_all')
+      expect(run.refusals()).toEqual([])
+    }
+  )
+
+  it.each(POLICY_CHANNELS)(
+    'designated_approvers: a %s raise by a sender not in approvers is refused and stores nothing',
+    async channel => {
+      const run = policyRun(policySnapshot('designated_approvers'))
+
+      const response = await run.command(channel, NON_APPROVER[channel], 'allow-all')
+
+      expect(run.spies.dispatch).not.toHaveBeenCalled()
+      expect(response).toMatchObject({ success: true, response: REFUSAL_REPLY.not_approver })
+      expect(run.stored(channel, NON_APPROVER[channel])).toBe('manual')
+      expect(run.refusals()).toEqual([
+        expect.objectContaining({ channel, requested: 'allow_all', reason: 'not_approver' }),
+      ])
+      expect(run.setApprovalMode).not.toHaveBeenCalled()
+    }
+  )
+
+  // Email approver matching is exact, case included, by decision.
+  it('designated_approvers: an email raise from a sender whose case differs from the listed approver is refused', async () => {
+    const run = policyRun(policySnapshot('designated_approvers'))
+    const sender = 'Approver@example.test'
+    expect(sender.toLowerCase()).toBe(APPROVER.email)
+
+    const response = await run.command('email', sender, 'allow-all')
+
+    expect(run.spies.dispatch).not.toHaveBeenCalled()
+    expect(response).toMatchObject({ success: true, response: REFUSAL_REPLY.not_approver })
+    expect(run.stored('email', sender)).toBe('manual')
+    expect(run.refusals()).toEqual([
+      expect.objectContaining({ channel: 'email', requested: 'allow_all', reason: 'not_approver' }),
+    ])
+    expect(run.setApprovalMode).not.toHaveBeenCalled()
+  })
+
+  it.each(POLICY_CHANNELS)(
+    'cli_only: a %s raise is refused and stores nothing, even from a listed approver',
+    async channel => {
+      const run = policyRun(policySnapshot('cli_only'))
+
+      const response = await run.command(channel, APPROVER[channel], 'auto')
+
+      expect(run.spies.dispatch).not.toHaveBeenCalled()
+      expect(response).toMatchObject({ success: true, response: REFUSAL_REPLY.policy_cli_only })
+      expect(run.stored(channel, APPROVER[channel])).toBe('manual')
+      expect(run.refusals()).toEqual([
+        expect.objectContaining({ channel, requested: 'auto', reason: 'policy_cli_only' }),
+      ])
+      expect(run.setApprovalMode).not.toHaveBeenCalled()
+    }
+  )
+
+  // Lowering and keeping always store the requested mode. The policy does not
+  // allow this sender, so it caps the effective mode at manual.
+  it.each([
+    ['cli_only', 'telegram'],
+    ['cli_only', 'teams'],
+    ['designated_approvers', 'slack'],
+    ['designated_approvers', 'email'],
+    ['not-a-policy', 'telegram'],
+  ] as const)('%s: %s may always lower the mode or keep it', async (policy, channel) => {
+    const run = policyRun(policySnapshot(policy))
+    const sender = NON_APPROVER[channel]
+    await run.seed(channel, sender, 'allow_all')
+
+    const lower = await run.command(channel, sender, 'auto')
+    expect(lower).toMatchObject({
+      success: true,
+      response: 'Approval mode is auto. Effective mode is manual.',
+    })
+    expect(run.stored(channel, sender)).toBe('auto')
+
+    const same = await run.command(channel, sender, 'auto')
+    expect(same).toMatchObject({ response: 'Approval mode is auto. Effective mode is manual.' })
+    expect(run.stored(channel, sender)).toBe('auto')
+
+    const manual = await run.command(channel, sender, 'manual')
+    expect(manual).toMatchObject({
+      response: 'Approval mode is manual. Effective mode is manual.',
+    })
+    expect(run.stored(channel, sender)).toBe('manual')
+    expect(run.refusals()).toEqual([])
+    expect(run.warn).not.toHaveBeenCalled()
+  })
+
+  it.each(POLICY_CHANNELS)(
+    'designated_approvers: a %s non-approver who resends a pre-staged allow-all keeps it stored and runs manual',
+    async channel => {
+      const run = policyRun(policySnapshot('designated_approvers'))
+      const sender = NON_APPROVER[channel]
+      await run.seed(channel, sender, 'allow_all')
+
+      const response = await run.command(channel, sender, 'allow-all')
+
+      expect(response).toEqual({
+        success: true,
+        status: 'completed',
+        response: 'Approval mode is allow_all. Effective mode is manual.',
+      })
+      expect(run.stored(channel, sender)).toBe('allow_all')
+      expect(run.setApprovalMode).toHaveBeenCalledWith(
+        expect.anything(),
+        'allow_all',
+        { ceiling: 'allow_all', cap: 'manual', channelSwitch: 'allow_all' },
+        'command',
+        sender
+      )
+      expect(run.l1()).toEqual([
+        [
+          expect.objectContaining({ channelCap: 'manual', effectiveApprovalMode: 'manual' }),
+          'Stored approval mode',
+        ],
+      ])
+      expect(run.refusals()).toEqual([])
+    }
+  )
+
+  it('leaves a stored auto unchanged when a non-approver asks for allow-all', async () => {
+    const run = policyRun(policySnapshot('designated_approvers'))
+    const sender = NON_APPROVER.telegram
+    await run.seed('telegram', sender, 'auto')
+
+    const response = await run.command('telegram', sender, 'allow-all')
+
+    expect(response).toEqual({
+      success: true,
+      status: 'completed',
+      response:
+        'Approval mode is auto. Effective mode is manual. Only a designated approver can raise the mode.',
+    })
+    expect(run.refusals()).toEqual([
+      expect.objectContaining({
+        channel: 'telegram',
+        requested: 'allow_all',
+        reason: 'not_approver',
+      }),
+    ])
+    expect(run.refusalMessages()).toEqual(['Approval mode command refused; stored mode unchanged'])
+    expect(run.stored('telegram', sender)).toBe('auto')
+    expect(run.setApprovalMode).not.toHaveBeenCalled()
+    expect(run.l1()).toEqual([])
+  })
+
+  it.each([
+    ['an unknown string', 'admins_only'],
+    ['a different case', 'CLI_ONLY'],
+    ['a non-string', 7],
+  ])(
+    'refuses a raise under %s policy and logs the field, never its value',
+    async (_label, policy) => {
+      const run = policyRun(policySnapshot(policy))
+
+      const response = await run.command('slack', APPROVER.slack, 'allow-all')
+
+      expect(response).toMatchObject({ success: true, response: REFUSAL_REPLY.policy_invalid })
+      expect(run.stored('slack', APPROVER.slack)).toBe('manual')
+      expect(run.refusals()).toEqual([expect.objectContaining({ reason: 'policy_invalid' })])
+      expect(run.setApprovalMode).not.toHaveBeenCalled()
+      expect(run.warn).toHaveBeenCalledWith(
+        { event: 'approval_config_invalid', field: 'defaultPolicy' },
+        expect.any(String)
+      )
+      expect(JSON.stringify(run.warn.mock.calls)).not.toContain(String(policy))
+    }
+  )
+
+  // Controls: these stay open, as before the policy check.
+  it.each([
+    ['absent', undefined],
+    ['null', null],
+    ['empty', ''],
+    ['channel_users', 'channel_users'],
+  ])('leaves a raise open when the policy is %s', async (_label, policy) => {
+    const run = policyRun(policySnapshot(policy))
+
+    const response = await run.command('telegram', NON_APPROVER.telegram, 'allow-all')
+
+    expect(response).toMatchObject({
+      response: 'Approval mode is allow_all. Effective mode is allow_all.',
+    })
+    expect(run.stored('telegram', NON_APPROVER.telegram)).toBe('allow_all')
+    expect(run.refusals()).toEqual([])
+    expect(run.warn).not.toHaveBeenCalled()
+  })
+
+  it('reads the policy in force when the Host CR has no approval block', async () => {
+    const configMap = policySnapshot('designated_approvers').effective
+    const run = policyRun({ effective: configMap, hostSpec: undefined })
+
+    const response = await run.command('telegram', NON_APPROVER.telegram, 'allow-all')
+
+    expect(response).toMatchObject({ response: REFUSAL_REPLY.not_approver })
+    expect(run.stored('telegram', NON_APPROVER.telegram)).toBe('manual')
+  })
+
+  it('designated_approvers: a block with no enabled key lets a listed approver raise', async () => {
+    const run = policyRun(
+      policySnapshot('designated_approvers', {
+        telegram: { approvers: [APPROVER.telegram], allowModeChange: true },
+      })
+    )
+
+    const response = await run.command('telegram', APPROVER.telegram, 'allow-all')
+
+    expect(response).toMatchObject({
+      success: true,
+      response: 'Approval mode is allow_all. Effective mode is allow_all.',
+    })
+    expect(run.stored('telegram', APPROVER.telegram)).toBe('allow_all')
+    expect(run.refusals()).toEqual([])
+  })
+
+  it('designated_approvers: a block with no enabled key still refuses a non-approver', async () => {
+    const run = policyRun(
+      policySnapshot('designated_approvers', {
+        telegram: { approvers: [APPROVER.telegram], allowModeChange: true },
+      })
+    )
+
+    const response = await run.command('telegram', NON_APPROVER.telegram, 'allow-all')
+
+    expect(response).toMatchObject({ success: true, response: REFUSAL_REPLY.not_approver })
+    expect(run.stored('telegram', NON_APPROVER.telegram)).toBe('manual')
+  })
+
+  it.each([
+    [
+      'the channel is disabled',
+      { telegram: { enabled: false, approvers: [APPROVER.telegram], allowModeChange: true } },
+    ],
+    [
+      'enabled is not a boolean',
+      { telegram: { enabled: 'true', approvers: [APPROVER.telegram], allowModeChange: true } },
+    ],
+    [
+      'approvers is a string',
+      { telegram: { enabled: true, approvers: `${APPROVER.telegram}9`, allowModeChange: true } },
+    ],
+    [
+      'approvers holds a non-string',
+      { telegram: { enabled: true, approvers: [111111111], allowModeChange: true } },
+    ],
+  ])('designated_approvers: refuses a listed sender when %s', async (_label, channels) => {
+    const run = policyRun(policySnapshot('designated_approvers', channels))
+
+    const response = await run.command('telegram', APPROVER.telegram, 'allow-all')
+
+    expect(response).toMatchObject({ success: true, response: REFUSAL_REPLY.not_approver })
+    expect(run.stored('telegram', APPROVER.telegram)).toBe('manual')
+  })
+
+  it('designated_approvers: refuses a raise, not a store failure, when channels is absent', async () => {
+    const approval = { defaultPolicy: 'designated_approvers' } as unknown as ApprovalConfig
+    const run = policyRun({ effective: approval, hostSpec: approval })
+
+    const response = await run.command('telegram', APPROVER.telegram, 'allow-all')
+
+    expect(response).toEqual({
+      success: true,
+      status: 'completed',
+      response:
+        'Approval mode is manual. Effective mode is manual. Only a designated approver can raise the mode.',
+    })
+    expect(run.stored('telegram', APPROVER.telegram)).toBe('manual')
+  })
+
+  it('designated_approvers: refuses every Teams raise when the Host lists no Teams approvers', async () => {
+    const run = policyRun(
+      policySnapshot('designated_approvers', {
+        telegram: { enabled: true, approvers: [APPROVER.telegram], allowModeChange: true },
+      })
+    )
+
+    const response = await run.command('teams', APPROVER.teams, 'auto')
+
+    expect(response).toMatchObject({ response: REFUSAL_REPLY.not_approver })
+    expect(run.stored('teams', APPROVER.teams)).toBe('manual')
+  })
+
+  it('keeps the channel refusal first when allowModeChange is off', async () => {
+    const run = policyRun(
+      policySnapshot('designated_approvers', {
+        slack: { enabled: true, approvers: [APPROVER.slack], allowModeChange: false },
+      })
+    )
+
+    const response = await run.command('slack', NON_APPROVER.slack, 'auto')
+
+    expect(response).toMatchObject({
+      response:
+        'Approval mode is manual. Effective mode is manual. This channel is limited to manual.',
+    })
+    expect(run.refusals()).toEqual([expect.objectContaining({ reason: 'channel' })])
+    expect(run.refusalMessages()).toEqual(['Approval mode command refused; stored manual'])
+    expect(run.setApprovalMode).toHaveBeenCalledTimes(1)
+    expect(run.l1()).toHaveLength(1)
+  })
+
+  it('logs a refusal with a hashed session and no sender or chat id', async () => {
+    const run = policyRun(policySnapshot('designated_approvers'))
+
+    await run.command('email', NON_APPROVER.email, 'auto')
+
+    const refusals = run.refusals()
+    expect(refusals).toEqual([
+      {
+        event: 'approval_mode_command_refused',
+        session: approvalLogId(run.conversationId('email', NON_APPROVER.email)),
+        channel: 'email',
+        requested: 'auto',
+        reason: 'not_approver',
+      },
+    ])
+    expect(JSON.stringify(refusals)).not.toContain(NON_APPROVER.email)
+    expect(JSON.stringify(refusals)).not.toContain('email-chat')
   })
 })

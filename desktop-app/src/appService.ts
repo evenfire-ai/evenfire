@@ -33,7 +33,12 @@ import {
   type DesktopUploadTransport,
   formatGfsUploadLimit,
 } from './gfs/upload.js'
-import { GfsClient, type GfsResourceView, parseSubjectKey } from './gfs/uriHandler.js'
+import {
+  GfsClient,
+  type GfsResourceView,
+  type ResolvedGfsResource,
+  parseSubjectKey,
+} from './gfs/uriHandler.js'
 import {
   type GfsWatchClient,
   type GfsWatchClientDeps,
@@ -242,9 +247,10 @@ const HOST_MODEL_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.model
 // HOST_FINITE_OPERATION_SCOPES (whose every entry carries wake, asserted by
 // appService.wakeScopeMatrix.issue791.test.ts) for exactly that reason.
 const HOST_SESSION_TITLE_SCOPES: RpcScope[] = ['host:session:write']
-// Mode changes copy the approve route's wake-and-hold, so this call also asks
-// for host:wake:write. Rename stays non-wake on HOST_SESSION_TITLE_SCOPES.
-const HOST_APPROVAL_MODE_SCOPES: RpcScope[] = ['host:session:write', 'host:wake:write']
+// Mode changes use the approve route's scope and copy its wake-and-hold, so
+// this call asks for host:approval:write and host:wake:write. Rename stays
+// non-wake on HOST_SESSION_TITLE_SCOPES.
+const HOST_APPROVAL_MODE_SCOPES: RpcScope[] = ['host:approval:write', 'host:wake:write']
 const HOST_ARTIFACT_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.artifact
 const HOST_APPROVAL_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.approval
 const MCP_SERVERS_LIST_SCOPES: RpcScope[] = ['mcp:servers:list']
@@ -283,6 +289,13 @@ const PREWARM_COOLDOWN_MAX_HOSTS = 256
 // or error. Never a persistent loop, never coupled to the status stream.
 const PREWARM_REEMIT_MAX_ATTEMPTS = 2
 const PREWARM_REEMIT_INTERVAL_MS = 10_000
+
+function retryAfterDelayMs(error: unknown): number {
+  if (!(error instanceof ApiError) || error.status !== 429 || !error.retryAfter) return 0
+  if (!/^\d+$/.test(error.retryAfter.trim())) return 0
+  const seconds = Number(error.retryAfter)
+  return Number.isSafeInteger(seconds) && seconds > 0 ? seconds * 1000 : 0
+}
 
 function compareSemverLike(left: string, right: string): number {
   const parse = (value: string) =>
@@ -877,6 +890,11 @@ export interface AppServiceOptions {
   gfsWatch?: Pick<GfsWatchClientDeps, 'fetch' | 'requestJson' | 'clock' | 'random' | 'log'>
 }
 
+export type GfsNavigationResolution =
+  | { status: 'resolved'; resource: ResolvedGfsResource }
+  | { status: 'superseded' }
+  | { status: 'unavailable' }
+
 export class AppService {
   private readonly authClient = new AuthClient()
   private readonly memberRegistrationServiceClient = new MemberRegistrationServiceClient()
@@ -917,6 +935,11 @@ export class AppService {
   // A transient runWithTeamContext hop temporarily installs another team's
   // token in sessionToken. Existing GFS jobs keep their captured token and
   // scope, but new GFS operations must not capture that temporary token.
+  // Exempt: the click-navigation read (resolveGfsUriForNavigation) may run
+  // with the hop token and is deliberately not gated on this depth. GFS
+  // authority is per user, not per team: the server mints a user-scoped token
+  // and resolves across every active membership, so the hop token reads
+  // exactly what the home token would, and blocking would drop real clicks.
   private gfsTransientTeamHopDepth = 0
   // While a `runWithTeamContext` hop that will restore the original team is in
   // flight, `me.teamId` holds the borrowed team. The chat store (and the delete
@@ -2802,6 +2825,40 @@ export class AppService {
   }
 
   /**
+   * Resolve for a user click that will route the UI. Unlike `resolveGfsUri`
+   * this never throws: the caller needs to tell "the session this click
+   * belonged to is gone" (drop silently) from "nothing to open" (tell the user).
+   *
+   * Authority is `(gfsAuthEpoch, me.id)`, not the token: transient team hops
+   * swap the token without changing GFS authority, which the server scopes to
+   * the user, so comparing tokens would drop legitimate clicks.
+   */
+  async resolveGfsUriForNavigation(uri: string): Promise<GfsNavigationResolution> {
+    const token = this.sessionToken
+    const userId = this.me?.id
+    const epoch = this.gfsAuthEpoch
+    if (!token || !userId || this.gfsDispatchBlocked) return { status: 'superseded' }
+    const stillCurrent = () =>
+      Boolean(this.sessionToken) && this.me?.id === userId && this.gfsAuthEpoch === epoch
+    let resource: ResolvedGfsResource
+    try {
+      resource = await this.gfsClient.resolveUri(uri, token)
+    } catch (error) {
+      if (!stillCurrent()) return { status: 'superseded' }
+      // The renderer shows one generic message for every failure cause. Only
+      // the error class is logged: GfsUriError messages embed the URI the
+      // renderer sent, and a CR/LF in it would forge log lines.
+      console.warn(
+        '[AppService] GFS navigation resolve failed:',
+        error instanceof Error ? error.name : typeof error
+      )
+      return { status: 'unavailable' }
+    }
+    if (!stillCurrent()) return { status: 'superseded' }
+    return { status: 'resolved', resource }
+  }
+
+  /**
    * Resolve then download a gfs:// resource's bytes through the brokered proxy.
    * `maxBytes` bounds the download for the preview path (rejected before an
    * oversized payload materializes); omitting it (save-to-disk, plugin SDK)
@@ -4377,16 +4434,19 @@ export class AppService {
     if (request.fileReferences !== undefined && !Array.isArray(request.fileReferences)) {
       throw new Error('File references must be a list.')
     }
+    if (request.locationReferences !== undefined && !Array.isArray(request.locationReferences)) {
+      throw new Error('Location references must be a list.')
+    }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     // A non-manual hold is stored on the first message, which rpc-proxy accepts
-    // only when the token also has host:session:write. manual stays on the
+    // only when the token also has host:approval:write. manual stays on the
     // usual three message scopes and the field is not forwarded.
     const heldApprovalMode =
       request.approvalMode === 'auto' || request.approvalMode === 'allow_all'
         ? request.approvalMode
         : undefined
     const messageScopes: RpcScope[] = heldApprovalMode
-      ? [...HOST_WAKEABLE_OPERATION_SCOPES, 'host:session:write']
+      ? [...HOST_WAKEABLE_OPERATION_SCOPES, 'host:approval:write']
       : HOST_WAKEABLE_OPERATION_SCOPES
     const rpc = await this.issueRpcTokenForHostRefs(messageScopes, effectiveHostRefs)
     const outgoingAttachmentCount = Array.isArray(request.attachments)
@@ -4419,13 +4479,21 @@ export class AppService {
       // Structured references (#666): parsed at the IPC boundary; rpc-proxy
       // forwards them and mcp-host resolves each one.
       ...(request.fileReferences === undefined ? {} : { fileReferences: request.fileReferences }),
+      ...(request.locationReferences === undefined
+        ? {}
+        : { locationReferences: request.locationReferences }),
     }
+    // One Idempotency-Key per send, shared by the first POST and the refresh
+    // retry below: rpc-proxy uses it as the Host messageId, so a retry of a
+    // message the Host already admitted replays instead of running the turn
+    // twice.
+    const sendOptions = { ...options, idempotencyKey: randomUUID() }
     try {
       return await this.rpcClient.invokeHostMessage(
         rpc.token,
         targetHostRef,
         contextualRequest,
-        options
+        sendOptions
       )
     } catch (error) {
       const availabilityError = AppService.toHostAvailabilityError(targetHostRef, error)
@@ -4438,7 +4506,7 @@ export class AppService {
             retried.token,
             targetHostRef,
             contextualRequest,
-            options
+            sendOptions
           )
         } catch (retryError) {
           const retryAvailabilityError = AppService.toHostAvailabilityError(
@@ -4715,6 +4783,7 @@ export class AppService {
     const connect = async () => {
       if (closed) return
       abortController = new AbortController()
+      let serverRetryAfterMs = 0
       try {
         const rpc = await this.issueRpcTokenForHostRefs(HOST_STATUS_SCOPES, effectiveHostRefs)
         await this.rpcClient.openHostStatusStream(
@@ -4723,7 +4792,9 @@ export class AppService {
           ({ event, data }) => {
             if (closed) return
             if (event === 'open') {
-              backoffMs = 1000
+              // No backoff reset here: rpc-proxy writes `open` before its first
+              // Host poll, so `open` proves only that the stream was accepted.
+              // The reset waits for a `status` event, the proof the Host answers.
               const payload = data as { hostRef?: string; observedAt?: string }
               onEvent({
                 type: 'open',
@@ -4739,8 +4810,9 @@ export class AppService {
               return
             }
             if (event === 'auth-expired') {
-              // Upstream rejected the captured RPC token (TTL is 300s; this
-              // is normal on long-lived sessions). Drop the cached token so
+              // rpc-proxy ends the stream before the held edge assertion
+              // (bounded by the RPC token, TTL 300s) expires, or after the
+              // Host refused three polls in a row. Drop the cached token so
               // the upcoming retry calls authClient.issueRpcToken with the
               // long-lived session and gets a fresh one — no relogin needed.
               this.rpcTokenManager.clear()
@@ -4764,6 +4836,7 @@ export class AppService {
         }
       } catch (error) {
         if (closed) return
+        serverRetryAfterMs = retryAfterDelayMs(error)
         if (error instanceof ApiError && error.status === 401) {
           this.rpcTokenManager.clear()
         }
@@ -4771,10 +4844,13 @@ export class AppService {
       } finally {
         if (closed) return
         clearRetry()
-        retryTimer = setTimeout(() => {
-          backoffMs = Math.min(backoffMs * 2, 15000)
-          void connect()
-        }, backoffMs)
+        retryTimer = setTimeout(
+          () => {
+            backoffMs = Math.min(backoffMs * 2, 15000)
+            void connect()
+          },
+          Math.max(backoffMs, serverRetryAfterMs)
+        )
       }
     }
 
@@ -4841,6 +4917,7 @@ export class AppService {
     const connect = async () => {
       if (closed) return
       abortController = new AbortController()
+      let serverRetryAfterMs = 0
       try {
         const rpc = await this.issueRpcTokenForHostRefs(HOST_ACTIVITY_SCOPES, effectiveHostRefs)
         await this.rpcClient.openHostActivityStream(
@@ -4889,6 +4966,7 @@ export class AppService {
         if (!closed) onEvent({ type: 'error', message: 'Activity stream disconnected' })
       } catch (error) {
         if (closed) return
+        serverRetryAfterMs = retryAfterDelayMs(error)
         if (error instanceof ApiError && error.status === 401) {
           this.rpcTokenManager.clear()
         }
@@ -4896,10 +4974,13 @@ export class AppService {
       } finally {
         if (closed) return
         clearRetry()
-        retryTimer = setTimeout(() => {
-          backoffMs = Math.min(backoffMs * 2, 15000)
-          void connect()
-        }, backoffMs)
+        retryTimer = setTimeout(
+          () => {
+            backoffMs = Math.min(backoffMs * 2, 15000)
+            void connect()
+          },
+          Math.max(backoffMs, serverRetryAfterMs)
+        )
       }
     }
 
@@ -5136,6 +5217,7 @@ export class AppService {
       try {
         while (!closed && !giveUp) {
           abortController = new AbortController()
+          let serverRetryAfterMs = 0
           // F3: this 8s bound guards CONNECTION ESTABLISHMENT only (open request →
           // first server bytes). It's cleared on `waiting` (connection established),
           // which then arms the longer waiting-for-open bound. A server that never
@@ -5151,6 +5233,7 @@ export class AppService {
               abortController.signal
             )
           } catch (error) {
+            serverRetryAfterMs = retryAfterDelayMs(error)
             // F4: a 401 on token re-issue (the 300s RPC token expired mid-stream)
             // clears the cache so the NEXT attempt re-mints a fresh token, then
             // falls through to retry. A single transient 401 must NOT collapse a
@@ -5172,7 +5255,7 @@ export class AppService {
             RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1),
             RECONNECT_MAX_DELAY_MS
           )
-          await new Promise(resolve => setTimeout(resolve, delayMs))
+          await new Promise(resolve => setTimeout(resolve, Math.max(delayMs, serverRetryAfterMs)))
         }
         // Exhausted/gave up without a clean terminal → surface the loss as a
         // structured `gone` (§4.5-2), NOT the generic `error`. The renderer's
@@ -5573,9 +5656,11 @@ export class AppService {
 
   /**
    * Stores the session approval mode. The token is scoped to this one host and
-   * carries session-write plus wake, because the route wakes like approve.
-   * A 400, 401 or 404 leaves the stored mode unchanged; the renderer keeps the
-   * old label. Any other failure is reconciled from the next session read.
+   * carries approve's scopes, approval-write plus wake, because the route
+   * wakes like approve. A 400, 401 or 404 leaves the stored mode unchanged.
+   * The renderer keeps the old label, except that a 404 for a chat whose
+   * session row it has not seen holds the pick for the first send. Any other
+   * failure is reconciled from the next session read.
    */
   async setApprovalMode(
     hostRef: string,

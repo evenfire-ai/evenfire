@@ -139,6 +139,15 @@ connectors, also set `MCP_OAUTH_BROKER_ENABLED: "true"` in `control-api-config`.
 Base leaves it off, and without it the agent asks for consent forever even after
 the user authorizes. See [OAuth connectors](../how-to/connect-oauth-connector.md).
 
+`RPC_PROXY_MCP_SERVER_NAMESPACE` (base Deployment `env`, default `mcp-server`
+when unset) names the namespace of the MCP servers for rpc-proxy. If you move the
+MCP servers, set it to the same value as control-api's
+`CONTROL_API_MCP_SERVERS_NAMESPACE`.
+
+`MCP_HOST_ACTIVITY_MAX_EVENT_BYTES` (default `2048`) caps one Host activity
+event. rpc-proxy reads the same variable to size the activity frames it relays,
+so if you change it, set the same value on the Host and on rpc-proxy.
+
 ## Outbound destinations
 
 The NetworkPolicies are port and CIDR rules, not hostname rules. Agent pods
@@ -216,6 +225,210 @@ It was written for GKE; read it before you run it elsewhere.
 
 ## Install order
 
+The RPC Proxy → MCP Host edge has one protocol, `signed-assertion-v1`, with no
+transitional mode. control-api signs a short-lived edge assertion (RS256, at most
+300 seconds) with the RPC signing key it already holds
+(`CONTROL_API_RPC_JWT_PRIVATE_KEY`), RPC Proxy forwards it as
+`x-clerum-edge-assertion`, and each MCP Host verifies it with the RPC public key
+(`CLERUM_AUTH_JWT_PUBLIC_KEY`). No extra secret is needed.
+
+- **Before the upgrade: RBAC and the HCC env.**
+  - HCC reads `deployment/rpc-proxy` (`get deployments`) and lists its pods
+    (`list pods`) in namespace `rpc-proxy` before every Host create or
+    template move. The rules are in `deploy/base/rpc-proxy/rbac.yaml`. If your
+    CD strips Roles from the overlay apply, run
+    [`deploy/scripts/bootstrap-rbac.sh`](../../deploy/scripts/bootstrap-rbac.sh)
+    with an admin kubeconfig before HCC rolls out:
+
+    ```bash
+    CONTEXT="$KCTX" CONFIRM=yes bash deploy/scripts/bootstrap-rbac.sh
+    ```
+
+    The script applies every `rbac.yaml`, `clusterroles.yaml` and
+    `clusterrolebindings.yaml` under `deploy/base`, not only the RPC Proxy
+    Role. Always pass `CONTEXT`: without it the script applies to the current
+    kubeconfig context and asks for no confirmation. With `CONTEXT` set, it
+    refuses a context whose name contains `clerum` (and none of `example-dev`,
+    `clerum-test`, `minikube` or `kind`) unless `CONFIRM=yes`. Without these
+    rules the read is refused and HCC creates and wakes no Host. Check with:
+
+    ```bash
+    kubectl --context "$KCTX" auth can-i get deployments/rpc-proxy -n rpc-proxy \
+      --as=system:serviceaccount:control-plane:host-context-controller
+    kubectl --context "$KCTX" auth can-i list pods -n rpc-proxy \
+      --as=system:serviceaccount:control-plane:host-context-controller
+    ```
+
+    When the barrier blocks, HCC logs `RpcProxyEdgeCohortBarrierError`. Its
+    message has one of two forms:
+    - `RPC Proxy edge protocol cohort cannot be read`: a read failed. The
+      message names the read (`reading Deployment "rpc-proxy"` or
+      `listing pods "app=rpc-proxy"`), the namespace, and `HTTP <status>`, or
+      `no HTTP status` when the API server returned none (timeout, network
+      error). Two statuses add a hint:
+      - `HTTP 403` on either read: the rules above are missing. The message
+        names the Role, RoleBinding and ServiceAccount; apply them as above.
+      - `HTTP 404` on the Deployment read: no RPC Proxy Deployment in that
+        namespace. Check `CONTEXT_MAPPER_RPC_PROXY_NAMESPACE`.
+
+      Any other status and `no HTTP status` add no hint.
+
+    - `is not fully on signed-assertion-v1`: the RPC Proxy rollout has not
+      finished. The message lists what blocks it (generation not observed,
+      template label, or the unlabelled pods by name). HCC retries on the next
+      reconcile of the Host.
+
+  - HCC refuses to start unless
+    `CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL=signed-assertion-v1`.
+    `deploy/base/control-plane/host-context-controller.yaml` sets it. An
+    install that renders the HCC env, the RPC Proxy pod template or the Roles
+    from its own copy of the manifests must refresh that copy at a base that
+    contains this release before it ships the new HCC image.
+
+- **Upgrade order:** control-api, then RPC Proxy, then HCC and the Hosts. HCC
+  creates no Host Deployment, and moves no Host pod template onto
+  `clerum.io/rpc-proxy-edge-protocol=signed-assertion-v1`, until the whole RPC
+  Proxy pod cohort carries that label. A held Host Deployment that keeps its
+  old pod template (only its replicas change) is updated without that wait.
+  Suspending a Host that still has its old template also moves the template,
+  so that suspension waits too; HCC retries it on its next reconcile of the
+  Host (`CONTEXT_MAPPER_HOST_RESYNC_SEC`, default 300 seconds).
+- **Rollback order:** HCC and the Hosts first, then RPC Proxy, then control-api.
+  RPC Proxy may stop forwarding the assertion only after no Host requires it.
+  A pipeline that applies the whole previous release at once, or control-api
+  first, does not follow this order and cuts Desktop → Host traffic twice:
+  while control-api is old and RPC Proxy is new, every Host route request
+  that control-api authorizes under V1 authority answers 503
+  `authority_unavailable` because control-api returns no edge assertion
+  (with `CONTROL_API_USER_ACCESS_ACTION_CONTEXT_V2` unset that is every Host
+  route except session search, which is V2-only and answers 403 as before)
+  (RPC Proxy logs `control-api answered the host resolve without an edge
+  assertion`); while RPC Proxy is old and
+  the Hosts are new, every Host answers 401 until HCC has replaced them all.
+  Roll back by hand in this order: HCC, wait until the label check below
+  lists nothing, then RPC Proxy, then control-api.
+  - Roll HCC back to its previous Deployment revision, which restores image,
+    env and labels together:
+    `kubectl --context "$KCTX" -n control-plane rollout undo deployment/host-context-controller --to-revision=<n>`.
+    Released HCC versions up to v0.12.1 do not read
+    `CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL`. A `dev` build from before
+    this release accepts only `legacy-headers` or `dedicated-header-v1` and
+    refuses `signed-assertion-v1` at start, so an image-only rollback to such
+    a build leaves no HCC running (one replica, `Recreate` strategy).
+  - Roll RPC Proxy back only after this lists nothing:
+
+    ```bash
+    kubectl --context "$KCTX" -n mcp-host get deployments,pods \
+      -l 'clerum.io/managed-by=host-context-controller,clerum.io/host,clerum.io/rpc-proxy-edge-protocol=signed-assertion-v1'
+    ```
+
+    This is the label part of the gate the Minikube wrapper enforces
+    (`host_cohort_unsigned` in `scripts/minikube/rpc-proxy-edge-rollout-gate.sh`).
+    Hosts held by a blocked suspension, or suspended with a pending resource
+    change, keep `signed-assertion-v1` until the hold clears or the Host
+    wakes, so the list can stay non-empty for them.
+
+- **Keep V2 off.** Leave `CONTROL_API_USER_ACCESS_ACTION_CONTEXT_V2` unset on
+  control-api for the whole life of this release, including through any RPC
+  Proxy rollback. A Host refuses every request that carries V2 authority, and
+  an RPC Proxy older than this release refuses the V2 checkpoint that
+  control-api now returns with the edge assertion.
+- **Issuer.** control-api signs with `CONTROL_API_RPC_JWT_ISSUER` from
+  ConfigMap `control-api-config` (namespace `control-plane`). Each Host checks
+  `CLERUM_AUTH_JWT_ISSUER` from the ConfigMap HCC injects into Hosts
+  (`CONTEXT_MAPPER_HOST_CONFIGMAP_NAME`, default `mcp-host-config`, namespace
+  `mcp-host`); unset means `control-api`. The two values must match.
+- **Completion gate.** The upgrade is complete when this lists nothing:
+
+  ```bash
+  kubectl --context "$KCTX" -n mcp-host get deployments,pods \
+    -l 'clerum.io/managed-by=host-context-controller,clerum.io/host,clerum.io/rpc-proxy-edge-protocol!=signed-assertion-v1'
+  ```
+
+  and the same command with `clerum.io/rpc-proxy-edge-protocol=signed-assertion-v1`
+  lists every Host. The `clerum.io/host` key leaves out the
+  workspace-files-controller Deployments, which HCC also manages but which
+  carry no protocol label. Hosts held by a blocked suspension, or suspended
+  with a pending resource change, keep the old template until the hold clears
+  or the Host wakes, so the gate can stay non-empty for them.
+
+- **Host refusal log.** A Host logs one warning for each edge assertion it
+  refuses, then answers 401. The fields are `event`
+  (`runtime_edge_assertion_refused`), `reason`, `scope` (the route scope),
+  `errorName` (only with `verify-failed`) and `claimError` (only with
+  `claims-rejected`). No token, header value or key is logged. Example:
+
+  ```text
+  {"event":"runtime_edge_assertion_refused","reason":"verify-failed","scope":"host:approval:write","errorName":"JsonWebTokenError","timestamp":"…","level":"warn","msg":"[Server] Refused rpc-proxy edge assertion"}
+  ```
+
+  `reason` is one of `missing`, `not-a-string`, `v2-refused`,
+  `no-verification-key`, `verify-failed`, `typ-mismatch` and
+  `claims-rejected`. `not-a-string` does not occur over HTTP, because Node
+  joins repeated headers into one string. The others mean:
+
+  | What you see                                              | Meaning                                                                                                                                                                                         |
+  | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `missing`                                                 | An RPC Proxy older than this release, or a V2 request with no assertion.                                                                                                                        |
+  | `v2-refused`                                              | The request carries V2 authority: the V2 policy is on. Turn it off.                                                                                                                             |
+  | `no-verification-key`                                     | `CLERUM_AUTH_JWT_PUBLIC_KEY` is empty and `CLERUM_ENABLE_AUTH=false`. With auth on (the default), a Host with no key does not start.                                                            |
+  | `verify-failed` with `JsonWebTokenError` on every request | The Host's key or issuer differs from control-api's signer.                                                                                                                                     |
+  | `verify-failed` with `TokenExpiredError`                  | Clock skew, or a request at the end of its assertion's life.                                                                                                                                    |
+  | `typ-mismatch`                                            | Signed by the right key for the edge audience, but with another header type: control-api and Host versions differ.                                                                              |
+  | `claims-rejected` with `claimError`                       | The assertion's host, user, team or scope does not match this Host or route; `claimError` names which, for example `host mismatch`, `sub mismatch`, `teamId mismatch` or `route scope missing`. |
+  | `claims-rejected` with `claimError: iat is in the future` | The assertion was issued more than 5 seconds ahead of the Host's clock: the Host's clock is behind control-api's. Fix the node's time sync; the Host refuses every RPC Proxy request until then. |
+
+- **Image tags.** Never republish a Host or RPC Proxy image tag. The HCC
+  barrier checks the pod template label, not the image. A republished tag
+  lets a Host pod with the old label start on the new image (wake from zero,
+  eviction, node drain) while RPC Proxy is still old, and that Host answers
+  401.
+- **Host restarts.** The upgrade replaces every Host Deployment. Host
+  Deployments use the `Recreate` strategy, HCC does not wait for one Host to
+  come back before it replaces the next (`HCC_HOST_FULL_RECONCILE_CONCURRENCY`,
+  default 2, limits concurrent reconciles, not downtime), and the Host pod
+  sets no `terminationGracePeriodSeconds`, so in-flight tasks are cut after
+  the Kubernetes default of 30 seconds. Plan a maintenance window.
+- **Retired edge credentials.** No release up to v0.12.1 created or read
+  Secret `rpc-proxy-edge-credentials` (namespace `mcp-host`) or the key
+  `RPC_PROXY_MCP_HOST_EDGE_TOKEN` in Secret `rpc-proxy-secrets` (namespace
+  `rpc-proxy`); only `dev` builds from before this release did. This release
+  reads neither. If your cluster ran such a `dev` build, keep both until the
+  rollback window closes, then delete them: an HCC rolled back to that build
+  with `CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL=dedicated-header-v1` writes
+  Host pods that require the Secret, and that RPC Proxy build uses the key
+  only for V2 Host traffic (it starts without it).
+- **Key sync after every overlay apply.** From this release every Desktop →
+  Host route depends on `CLERUM_AUTH_JWT_PUBLIC_KEY` in `mcp-host-config`;
+  before it, only `POST /v1/runtime/compact` and session search did. An
+  overlay apply overwrites that ConfigMap with the key literal committed in
+  the overlay, so the production orchestrator (owned by
+  `keyper-labs/evenfire-infra`, see above) runs
+  `scripts/minikube/sync-auth-key.sh` right after it. The script patches the
+  key back from `RPC_PROXY_JWT_PUBLIC_KEY` in Secret `rpc-proxy-secrets`,
+  checks that every Deployment in `mcp-host` that binds the key (HCC-managed
+  Hosts included) runs with it, restarts the ones that drifted, and fails
+  otherwise. The orchestrator's phased apply rolls out and verifies
+  control-api before RPC Proxy and HCC change. A Host started between the
+  apply and the sync answers 401 on every Desktop → Host route until the sync
+  restarts it.
+- **Confirm three keys match before the upgrade:** the public half of
+  control-api's RPC signing key (`CONTROL_API_RPC_JWT_PRIVATE_KEY` in Secret
+  `control-api-secrets`, namespace `control-plane`), `RPC_PROXY_JWT_PUBLIC_KEY`
+  in Secret `rpc-proxy-secrets` (namespace `rpc-proxy`), and
+  `CLERUM_AUTH_JWT_PUBLIC_KEY` in ConfigMap `mcp-host-config` (namespace
+  `mcp-host`). Compare SHA-256 digests of the DER public key, and print only
+  the digests. Secret values are base64 in `.data`; ConfigMap values are not.
+  The key may be stored with real newlines or a literal `\n` (the Host
+  accepts both), so normalize it before hashing. At runtime, a Host refusal
+  log with `verify-failed` and `JsonWebTokenError` is the signal that the
+  keys drifted.
+
+The in-repository executable barrier covers the supported Minikube path. Production
+GCP rollout and rollback orchestration is owned by `keyper-labs/evenfire-infra`;
+this OSS repository does not publish its exact workflow path. That orchestrator
+must enforce both orders before this release reaches production.
+
 [minikube.md](minikube.md) and `scripts/minikube/full-setup.sh` show the full
 dependency graph. The minikube scripts are bound to a minikube profile; the
 scripts under [`deploy/scripts`](../../deploy/scripts) take a `CONTEXT` and are
@@ -265,7 +478,10 @@ kubectl --context "$KCTX" cluster-info   # confirm this is the cluster you mean
    Know these before you run them:
    - `gen-jwt-keys.sh` generates **new** keys on every run. Running it again
      rotates every key, including the OAuth encryption key. Run it once and
-     keep the output.
+     keep the output. A second run is a full re-bootstrap that cuts service,
+     not a rotation: it restarts only the Deployments in `mcp-host`, so until
+     you restart control-api and RPC Proxy, every Desktop → Host request
+     returns 401.
    - Set `ADMIN_BOOTSTRAP_PASSWORD_HASH` (a bcrypt hash) before you run it.
      Otherwise it writes a placeholder hash.
    - It writes the `control-postgres` Secret with user `postgres` and password
@@ -276,7 +492,9 @@ kubectl --context "$KCTX" cluster-info   # confirm this is the cluster you mean
      `CLERUM_AUTH_JWT_PUBLIC_KEY`. `gen-jwt-keys.sh` patches it only if the
      ConfigMap already exists, so after your first overlay apply (and after
      any apply that rewrites it) copy `RPC_PROXY_JWT_PUBLIC_KEY` from Secret
-     `rpc-proxy-secrets` (namespace `rpc-proxy`) into it. Never keep the key
+     `rpc-proxy-secrets` (namespace `rpc-proxy`) into it, then restart every
+     Deployment in `mcp-host`: from this release every Desktop → Host route
+     depends on that key. Never keep the key
      from the minikube copy. `control-api-public-key` and
      `clerum-wrc-public-key` are not in base: `gen-jwt-keys.sh` creates them
      and `kubectl apply -k` leaves them alone.

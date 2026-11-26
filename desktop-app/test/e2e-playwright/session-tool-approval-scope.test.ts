@@ -28,8 +28,10 @@
  * Each mode row raises the ceiling on the chatllm Host for itself, waits until
  * mcp-host reports it in a session read, and restores it afterwards. The patch runs under the T2
  * mutation lease and tests the live `spec.approval`, so it never overwrites a
- * concurrent change. No classifier-APPROVE row: the branch profile allowlists
- * only gpt-5.4 family models, on which the shell classifier never runs.
+ * concurrent change. No classifier-APPROVE row. The auto row pins
+ * spec.approval.shellClassifierModel to a model the classifier does not call,
+ * so the shell card still appears. With no pin, a Host that has an OpenAI
+ * credential judges shell with the Host's shell classifier model.
  *
  * Dedicated, explicitly opted-in lane against a real chatllm Host and its
  * configured LLM; nothing is mocked. Run from desktop-app/ with the branch
@@ -88,7 +90,12 @@ function shellCommand(marker: string): string {
   return `echo ${marker}; date`
 }
 
-// Same visible path as qa-recorder-image-capabilities.spec.ts: model chip -> menu -> row.
+// Same path as qa-recorder-image-capabilities.spec.ts: model chip -> menu -> row.
+// The row is clicked with a dispatched click event, not a pointer click: in the docked
+// chat panel the upward menu is clipped and has no scroll, so with a long catalog the
+// row sits outside the visible area and cannot receive a pointer click (#1627). The
+// rows below test approval scope, not the model picker; the chip check below still
+// proves the selection reached the composer.
 async function selectChatModel(page: Page, model: string): Promise<void> {
   const chip = page.getByTestId('selected-chat-model')
   await expect(chip).toBeVisible({ timeout: 30_000 })
@@ -96,7 +103,7 @@ async function selectChatModel(page: Page, model: string): Promise<void> {
   await expect(page.getByRole('menu', { name: 'Select model' })).toBeVisible({ timeout: 20_000 })
   const row = page.getByTestId(`model-option-${model}`)
   await expect(row, `${model} must be offered by the chatllm catalog`).toHaveCount(1)
-  await row.click()
+  await row.dispatchEvent('click')
   await expect(chip).toHaveAttribute('data-model-id', model)
 }
 
@@ -374,7 +381,7 @@ function patchHost(operations: unknown[]): void {
  * instead of being taken as the original. `restore` removes the ceiling again
  * and refuses to overwrite a different value.
  */
-function modeCeilingFixture(ceiling: ApprovalMode) {
+function modeCeilingFixture(ceiling: ApprovalMode, extra: Record<string, string> = {}) {
   const context = process.env.E2E_K8S_CONTEXT
   if (!context || process.env.MINIKUBE_PROFILE !== context) {
     throw new Error(
@@ -389,7 +396,7 @@ function modeCeilingFixture(ceiling: ApprovalMode) {
       )}; the canonical overlay sets none, so an interrupted run left it. Remove it before rerunning.`
     )
   }
-  const raised = { ...original.approval, modeCeiling: ceiling }
+  const raised = { ...original.approval, modeCeiling: ceiling, ...extra }
   return {
     /** The ceiling mcp-host reports once `restore` has run: absent reads manual. */
     restoredCeiling: 'manual' as ApprovalMode,
@@ -398,6 +405,11 @@ function modeCeilingFixture(ceiling: ApprovalMode) {
         { op: 'test', path: '/metadata/uid', value: original.uid },
         { op: 'test', path: '/spec/approval', value: original.approval },
         { op: 'add', path: '/spec/approval/modeCeiling', value: ceiling },
+        ...Object.entries(extra).map(([key, value]) => ({
+          op: 'add',
+          path: `/spec/approval/${key}`,
+          value,
+        })),
       ])
       expect(readHostApproval().approval).toEqual(raised)
       test.info().annotations.push({ type: 'mode-ceiling', description: ceiling })
@@ -412,6 +424,10 @@ function modeCeilingFixture(ceiling: ApprovalMode) {
         { op: 'test', path: '/metadata/uid', value: original.uid },
         { op: 'test', path: '/spec/approval', value: raised },
         { op: 'remove', path: '/spec/approval/modeCeiling' },
+        ...Object.keys(extra).map(key => ({
+          op: 'remove',
+          path: `/spec/approval/${key}`,
+        })),
       ])
       expect(readHostApproval().approval).toEqual(original.approval)
     },
@@ -631,7 +647,7 @@ test.describe.serial('per-task tool approval scope', () => {
     appPage,
   }, testInfo) => {
     const marker = markerFor(testInfo, 'CMD')
-    const ceiling = modeCeilingFixture('auto')
+    const ceiling = modeCeilingFixture('auto', { shellClassifierModel: 'gpt-4.1-mini' })
     let rowFailure: unknown
     try {
       await test.step('an admin raises the Host ceiling to auto', async () => {
@@ -647,6 +663,12 @@ test.describe.serial('per-task tool approval scope', () => {
         expect(await readCardLedger(appPage)).toEqual([])
 
         await humanClick(appPage.getByTestId('approval-mode-picker'))
+        // The menu offers only modes up to the Host ceiling the renderer
+        // knows, and opening it re-reads that ceiling. The direct read above
+        // does not reach the renderer, so wait for the re-read to offer Auto.
+        await expect(appPage.getByTestId('approval-mode-option-auto')).toBeEnabled({
+          timeout: 30_000,
+        })
         await humanClick(appPage.getByTestId('approval-mode-option-auto'))
         await expect(appPage.getByTestId('approval-mode-label')).toHaveText('Auto-approve')
         await expect(appPage.getByTestId('approval-mode-write-error')).toHaveCount(0)
@@ -730,6 +752,10 @@ test.describe.serial('per-task tool approval scope', () => {
         expect(await readCardLedger(appPage)).toEqual([])
 
         await humanClick(appPage.getByTestId('approval-mode-picker'))
+        // Offered once the menu's re-read of the Host ceiling shows allow_all.
+        await expect(appPage.getByTestId('approval-mode-option-allow-all')).toBeEnabled({
+          timeout: 30_000,
+        })
         await humanClick(appPage.getByTestId('approval-mode-option-allow-all'))
         // Allow all asks before it writes.
         await expect(appPage.getByRole('dialog', { name: 'Confirm allow all' })).toBeVisible()

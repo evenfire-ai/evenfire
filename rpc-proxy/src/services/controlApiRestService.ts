@@ -1,6 +1,9 @@
+import { createMessageRetryHostWakeRequest } from '@clerum/action-context-contracts'
+import { type AuthorizedActionV2, actionAuthorityCheckpointRequest } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
 import { ResolvedServerConnection } from '../types.js'
 import {
+  CONTROL_API_HOST_EDGE_ASSERTION_MISSING_ERROR,
   type HostAccessDenial,
   type HostAccessDenialCode,
   hostAccessDenialCodeForReason,
@@ -18,7 +21,15 @@ type UserAllowedHost = {
   hostRef: string
   url: string
   bindingStatus?: 'recorded' | 'unavailable'
+  edgeAssertion: string
 }
+
+/**
+ * A V1 Host connection together with the edge assertion control-api signed for
+ * this user, Host and RPC token. The resolver moves the assertion into the
+ * Host request headers; it is never part of the connection the routes see.
+ */
+export type ResolvedHostConnection = ResolvedServerConnection & { edgeAssertion: string }
 
 function controlApiHeaders(rpcAccessToken: string): Record<string, string> {
   return {
@@ -61,6 +72,19 @@ export class ControlApiHostAccessRejectedError extends Error {
     super(`Control API rejected host access (${status})`)
     this.name = 'ControlApiHostAccessRejectedError'
     this.denialCode = denialCode
+  }
+}
+
+/**
+ * control-api authorized the Host (200) but issued no edge assertion: control-api
+ * is older than rpc-proxy. The Host refuses rpc-proxy traffic without one, so the
+ * request cannot proceed; routes answer it as 503 `authority_unavailable`
+ * (`respondControlApiAuthorityUnavailable`), never with this message.
+ */
+export class ControlApiHostEdgeAssertionMissingError extends Error {
+  constructor() {
+    super('Control API MCP host response has no edge assertion')
+    this.name = CONTROL_API_HOST_EDGE_ASSERTION_MISSING_ERROR
   }
 }
 
@@ -223,7 +247,7 @@ export async function fetchHostConnectionFromControlApi(
     directRunBinding?: DirectRunBindingRequest
     fetchImpl?: typeof fetch
   } = {}
-): Promise<ResolvedServerConnection | HostAccessDenial> {
+): Promise<ResolvedHostConnection | HostAccessDenial> {
   const directRunBinding = options.directRunBinding
   const response = await (options.fetchImpl ?? fetch)(
     `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-hosts/${encodeURIComponent(hostRef)}`,
@@ -274,12 +298,19 @@ export async function fetchHostConnectionFromControlApi(
   ) {
     throw new Error('Control API MCP host binding response was invalid')
   }
+  // The Host accepts rpc-proxy traffic only with this assertion: a control-api
+  // that does not issue one cannot authorize a Host request.
+  const edgeAssertion = parsed.edgeAssertion
+  if (typeof edgeAssertion !== 'string' || edgeAssertion === '') {
+    throw new ControlApiHostEdgeAssertionMissingError()
+  }
 
   return {
     name: resolvedHostRef,
     url,
     headers: {},
     ...(attributionBindingStatus ? { attributionBindingStatus } : {}),
+    edgeAssertion,
   }
 }
 
@@ -291,6 +322,9 @@ export async function fetchHostConnectionFromControlApi(
  *   409 {status:'not-stateless'}             lifecycle kill-switch off
  *   429 {error, retryAfterSeconds}           per-host wake rate limit
  *   401/403                                  rpc access token rejected
+ * V2: 404/409 carry either an authority answer
+ * (`{status: 'not_found'|'access_path_stale', code}`) or the wake answer
+ * (`{status: 'unknown'|'not-stateless'}`); the body decides.
  */
 export type HostWakeApiResponse =
   | { kind: 'active'; wakeGeneration: number | null }
@@ -299,6 +333,7 @@ export type HostWakeApiResponse =
   | { kind: 'unknown' }
   | { kind: 'rate-limited'; retryAfterSeconds: number }
   | { kind: 'auth'; status: number }
+  | { kind: 'authority'; status: 400 | 403 | 404 | 409 | 503; code: string }
 
 /**
  * control-api reports the denial reason in the `x-host-access-denial-reason`
@@ -322,16 +357,83 @@ async function drainBody(response: Response): Promise<void> {
 
 export async function requestHostWakeFromControlApi(
   hostRef: string,
-  rpcAccessToken: string
+  rpcAccessToken: string,
+  options: { authorizedActionV2?: AuthorizedActionV2; wakeReason?: string } = {}
 ): Promise<HostWakeApiResponse> {
+  const v2 = options.authorizedActionV2
+  let v2Body: string | undefined
+  if (v2) {
+    if (v2.claims.exp * 1000 <= Date.now()) {
+      return { kind: 'authority', status: 403, code: 'forbidden' }
+    }
+    if (v2.bound.operationId === 'chat.message.invoke') {
+      if (options.wakeReason !== undefined && options.wakeReason !== 'message_retry') {
+        throw new Error('Invalid derived message wake reason')
+      }
+      v2Body = JSON.stringify(
+        createMessageRetryHostWakeRequest(actionAuthorityCheckpointRequest(v2.claims, v2.bound))
+      )
+    } else {
+      v2Body = JSON.stringify({
+        binding: actionAuthorityCheckpointRequest(v2.claims, v2.bound),
+        wakeReason: options.wakeReason ?? 'explicit',
+      })
+    }
+  }
   const response = await fetch(
-    `${controlApiBaseUrl()}/rpc/hosts/${encodeURIComponent(hostRef)}/wake`,
+    v2
+      ? `${controlApiBaseUrl()}/internal/action-authority/hosts/${encodeURIComponent(hostRef)}/wake`
+      : `${controlApiBaseUrl()}/rpc/hosts/${encodeURIComponent(hostRef)}/wake`,
     {
       method: 'POST',
-      headers: controlApiHeaders(rpcAccessToken),
+      headers: v2
+        ? {
+            authorization: `Bearer ${config.controlApiServiceToken}`,
+            'content-type': 'application/json',
+            'x-service-token': config.controlApiServiceName,
+          }
+        : controlApiHeaders(rpcAccessToken),
+      ...(v2
+        ? {
+            body: v2Body,
+          }
+        : {}),
       signal: upstreamAbortSignal(),
     }
   )
+
+  if (v2 && [400, 403, 404, 409, 503].includes(response.status)) {
+    let parsed: unknown
+    try {
+      parsed = await response.json()
+    } catch {
+      throw new Error('Control API v2 host wake returned an invalid authority response')
+    }
+    const value = parsed as { status?: unknown; code?: unknown }
+    // The wake answers after the authority check passed share these statuses
+    // with authority refusals; each is accepted only on its own status.
+    if (response.status === 404 && value.status === 'unknown') return { kind: 'unknown' }
+    if (response.status === 409 && value.status === 'not-stateless') {
+      return { kind: 'not-stateless' }
+    }
+    if (
+      ![
+        'invalid_binding',
+        'denied',
+        'not_found',
+        'access_path_stale',
+        'authority_unavailable',
+      ].includes(String(value.status)) ||
+      typeof value.code !== 'string'
+    ) {
+      throw new Error('Control API v2 host wake returned an invalid authority response')
+    }
+    return {
+      kind: 'authority',
+      status: response.status as 400 | 403 | 404 | 409 | 503,
+      code: value.code,
+    }
+  }
 
   if (response.status === 401 || response.status === 403) {
     await drainBody(response)

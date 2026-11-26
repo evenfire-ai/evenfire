@@ -3,8 +3,15 @@
  * the enabled allowlist entry for the Host's provider; `models` is `[hostDefault]`
  * (name only) when the allowlist is unavailable (`degraded`).
  */
-import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
-import type { FileReferenceResolution } from '../agent/fileReferenceResolver'
+import type {
+  AuthorityBindingV2,
+  TrustedEdgeActionContextV2,
+} from '@clerum/action-context-contracts'
+import type { FileReferenceV1, LocationReferenceV1 } from '@clerum/gfs-interaction-policy'
+import type {
+  FileReferenceResolution,
+  LocationReferenceResolution,
+} from '../agent/fileReferenceResolver'
 import type { ModelWireEntry } from '../config/modelResolution.js'
 import type { ApprovalMode } from '../core/approval/approvalMode'
 import type { ShellCardDescriptor } from '../core/approval/shellCard'
@@ -61,12 +68,8 @@ export interface IncomingMessage {
    * cannot store a mode with this field.
    */
   approvalMode?: ApprovalMode
-  /**
-   * Set by channel-reader when a polled Slack sender passed the allowlist only
-   * by display username, which is not a stable identity. Such a sender cannot
-   * raise the approval mode. Absent for every other match.
-   */
-  senderMatch?: 'username'
+  /** Server-derived per-effect authority. Client input is always discarded. */
+  authorityV2?: AuthorityBindingV2
   /** Optional CAS base for a visual message's explicit model selection. */
   modelSelectionRevision?: number
   /** Server-owned immutable visual selection; incoming callers cannot set it. */
@@ -78,6 +81,14 @@ export interface IncomingMessage {
   fileReferences?: FileReferenceV1[]
   /** Server-owned: admission's resolution of `fileReferences`; callers cannot set it. */
   fileReferenceResolutions?: FileReferenceResolution[]
+  /**
+   * The Global Files folder the user pointed at as the place this request is
+   * about. The route validates it; admission resolves it against gfsc together
+   * with `fileReferences`.
+   */
+  locationReferences?: LocationReferenceV1[]
+  /** Server-owned: admission's resolution of `locationReferences`; callers cannot set it. */
+  locationReferenceResolutions?: LocationReferenceResolution[]
 }
 
 export type RuntimeCallerKind = 'rpc-proxy' | 'channel-reader' | 'workflow-approval-request-reader'
@@ -91,6 +102,13 @@ export interface RuntimeCallerContext {
   channelType?: string
   channelId?: string
   sender?: string
+  /** Present only after strict parsing of rpc-proxy's v2 trusted-edge envelope. */
+  actionContextV2?: TrustedEdgeActionContextV2
+  /**
+   * Scopes of the verified V1 edge assertion. Set by the runtime edge guard for caller
+   * rpc-proxy only.
+   */
+  edgeAssertionScopes?: readonly string[]
 }
 
 export interface MessageResponse {
@@ -115,6 +133,13 @@ export interface MessageResponse {
    * carried none and on every refusal.
    */
   acceptedFileReferenceIds?: string[]
+  /**
+   * Ids of every location reference the Host resolved and listed in the turn,
+   * whatever its availability. Absent when the message carried none and on
+   * every refusal; a client that sent a folder and gets a success without its
+   * id is talking to a Host that dropped it.
+   */
+  acceptedLocationReferenceIds?: string[]
   /**
    * Issue #654 — the session's model-selection revision after the Host accepted
    * a piggybacked `model`, or the winning revision on a CAS conflict.
@@ -182,18 +207,11 @@ export interface StatusResponse {
     failed: number
   }
   cronJobs: number
-  pendingApprovals?: Array<{
-    requestId: string
-    userId: string
-    toolName: string
-    parameters: Record<string, unknown>
-    description: string
-    since: string
-    // U5 — connect_required discriminator, mirrored from the underlying
-    // PendingApproval. Absent reason ⇒ generic approval (back-compat).
-    reason?: 'approval_required' | 'connect_required'
-    mcpServerName?: string
-  }>
+  /**
+   * One entry per pending approval, with only its start time: this route
+   * serves every user of the Host, so it names no request, user or tool.
+   */
+  pendingApprovals?: Array<{ since: string }>
   /**
    * Per-MCP-server health snapshot (spec §4.2). Omitted by older mcp-host
    * builds; consumers MUST treat absence as "unknown for every server".
@@ -281,6 +299,7 @@ export interface HostActivityEvent {
   severity: HostActivitySeverity
   meta: Record<string, unknown>
   redactions: string[]
+  authorityV2?: AuthorityBindingV2
 }
 
 export interface HostActivitySnapshotResponse {
@@ -290,6 +309,11 @@ export interface HostActivitySnapshotResponse {
   nextCursor: string | null
 }
 
+export type ActivitySnapshotVisibility = Readonly<{
+  userId: string
+  accessPathId: string
+}>
+
 export type MessageHandler = (
   message: IncomingMessage,
   options?: { async?: boolean }
@@ -297,12 +321,16 @@ export type MessageHandler = (
 export type StatusHandler = () => Promise<StatusResponse>
 export type ActivitySnapshotHandler = (
   limit: number,
-  sinceEventId?: string
+  sinceEventId?: string,
+  visibility?: ActivitySnapshotVisibility
 ) => Promise<HostActivitySnapshotResponse>
 export type ActivityStreamHandler = (onEvent: (event: HostActivityEvent) => void) => {
   hostRef: string
   unsubscribe: () => void
 }
+export type ActivityStreamCheckpointHandler = (
+  binding: AuthorityBindingV2
+) => Promise<'allowed' | 'denied' | 'unavailable'>
 export type ApprovalHandler = (
   decision: ApprovalDecision
 ) => Promise<{ success: boolean; error?: string; code?: 'denial_not_saved' }>
@@ -506,10 +534,10 @@ export type CompactionHandler = (request: {
 
 /**
  * T3.1 — Handler for GET /v1/runtime/sessions/search.
- * `userSub` is the verified JWT identity; callers MUST derive it from the
- * request's `auth.sub`, never from query params. The handler reuses the same
- * `SessionSearchService` that drives the native tool, so the result shape is
- * identical across both surfaces.
+ * `userSub` is the user of the verified rpc-proxy edge caller context
+ * (`RuntimeCallerContext.userId`), never a query parameter. The handler reuses
+ * the same `SessionSearchService` that drives the native tool, so the result
+ * shape is identical across both surfaces.
  */
 export interface SessionSearchRequest {
   userSub: string
@@ -574,11 +602,20 @@ export interface SessionStateWire {
   approvalMode: ApprovalMode
   /** Live Host-spec ceiling. An env-only policy is manual outside dev mode. */
   modeCeiling: ApprovalMode
-  /** Live cap from the stored channel type, not from the session key. */
+  /**
+   * Live cap from the stored channel type, not from the session key, and,
+   * for a messaging session, the approver policy for its owner.
+   */
   channelCap: ApprovalMode
   /** min(stored, ceiling, channel cap), computed on this read. */
   effectiveApprovalMode: ApprovalMode
-  /** Pure classifier table for the session's current model. No provider is built. */
+  /**
+   * Classifier table for the pair admission would judge shell with: the
+   * dedicated classifier when the Host's model provider is OpenAI, else the
+   * failover pair while a fallback serves, else the session's current model.
+   * No model is called, but finding the dedicated classifier builds and caches
+   * its provider.
+   */
   shellClassifierAvailable: boolean
 }
 

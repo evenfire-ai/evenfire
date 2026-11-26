@@ -437,6 +437,58 @@ No rows means the database is ready for step 1. If it returns rows:
   when they are present. Run the check query again (no rows), then run the
   migration Job.
 
+## Governed trace retention migrations
+
+`0157_governed_trace_retention_indexed` creates two partial indexes on
+`public.infrastructure_telemetry_events` concurrently. Before its receipt is
+recorded, a repeat of the supported migration Job reuses equivalent valid
+indexes and rebuilds equivalent invalid ones. The runner rejects a same-name
+index with a different definition. Keep external index DDL out of this
+migration window.
+
+If the Job reports `55P03` during a concurrent build, identify the writer or
+old snapshot and the phase in `pg_stat_progress_create_index`. Wait for the
+blocking transaction to finish before rerunning the supported Job. Each lock
+wait has a 10 s bound. Each online index statement has its own 120 s bound,
+within the Job's 300 s deadline and backoff limit of two. A build can exceed
+its statement budget even without contention. Worker wake duration includes
+work outside the database transaction.
+
+`0158_governed_trace_retention_hardening` installs the final retention
+definitions and records its version in one transaction. The
+[migration registry](../../control-api/src/db.ts) accepts the earlier indexed
+and hardening receipts as aliases and records their canonical versions without
+replaying SQL. An existing receipt for the intermediate search-path migration
+documented in the [upgrade tests](../../control-api/test/db.governedTraceRetention.realPostgres.integration.test.ts)
+remains in the database. Use the approved migration image for reconciliation
+because an obsolete checkpoint image could change the routine definitions
+after the final receipt was recorded.
+
+For acceptance, record these observations for the same candidate:
+
+- The same migration Job UID before and after the wait, the successful Pod
+  owned by that UID, its effective image ID, and successful SQL verification.
+- The recorded 0157 and 0158 versions. In `pg_index`, check that
+  `idx_infra_telemetry_retention_samples` and
+  `idx_infra_telemetry_retention_other` are ready and valid. Verify their table,
+  ordered keys and predicates against the migration plan.
+- In `pg_proc`, verify `search_path=pg_catalog, pg_temp` on
+  `governed_trace_prune_expired_events(text,integer)`,
+  `governed_trace_prune_expired_costs(integer)`,
+  `governed_trace_prune_expired_prompts(integer)`,
+  `governed_trace_enforce_append_only()` and
+  `governed_trace_assert_stream_integrity()`. Check their ownership and
+  expected privileges.
+- Successful runtime role reconciliation and actual connections using those
+  roles. Verify the maintenance worker Pod's effective image and a normal
+  cycle that starts after its rollout and the final database and role checks.
+  Verify an authenticated governed-event read.
+
+Once 0157 or its historical alias is recorded, the runner skips its index preparation. A missing,
+invalid or different index at that point blocks acceptance and requires a
+separate recovery decision. A mismatch in the final routine definitions
+also blocks acceptance even when the 0158 receipt exists.
+
 ## What to tell users and operators
 
 - Team budgets no longer cover direct-grant V1 workflow runs. Those runs are
@@ -458,7 +510,10 @@ environment that set them for those builds:
 - `CONTROL_API_USER_ACCESS_CATALOG_ACTIVATION_RECORD`,
   `CONTROL_API_USER_ACCESS_CATALOG_MODE`,
   `CONTROL_API_USER_ACCESS_TEAM_GFS_MEMBERSHIP_ADMISSION_LIMIT`;
-- `CONTROL_API_USER_ACCESS_ACTION_CONTEXT_V2`,
-  `CONTROL_API_USER_ACCESS_RPC_DELEGATION_V2`,
-  `CONTROL_API_USER_ACCESS_DESKTOP_ALL_TEAM_MODE`,
+- `CONTROL_API_USER_ACCESS_DESKTOP_ALL_TEAM_MODE`,
   `CONTROL_API_USER_ACCESS_PROFILE_V2_MODE`.
+
+`CONTROL_API_USER_ACCESS_ACTION_CONTEXT_V2` and
+`CONTROL_API_USER_ACCESS_RPC_DELEGATION_V2` are read (default `false`; the
+second requires the first). Leave both unset: a Host refuses every request
+that carries V2 authority, see [production.md](production.md).

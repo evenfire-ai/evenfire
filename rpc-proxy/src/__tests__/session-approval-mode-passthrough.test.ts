@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import request from 'supertest'
 import { config } from '../config.js'
 import { apiErrorHandler } from '../errorHandler.js'
@@ -8,6 +10,7 @@ import { createRpcRouter } from '../routes/rpc.js'
 const authTokenMock = vi.hoisted(() => ({ verifyRpcToken: vi.fn() }))
 const serviceMock = vi.hoisted(() => ({
   resolveHostConnectionForUser: vi.fn(),
+  refreshV1HostConnection: vi.fn(),
 }))
 const controlApiMock = vi.hoisted(() => ({
   requestHostWakeFromControlApi: vi.fn(),
@@ -17,14 +20,14 @@ vi.mock('../authToken.js', () => authTokenMock)
 vi.mock('../services/mcpProxyService.js', () => serviceMock)
 vi.mock('../services/controlApiRestService.js', () => controlApiMock)
 
-// Same scope as rename. Wake rides on the token, copied from approve, so the
-// happy path carries only host:session:write.
+// Same scope as approve and deny. Wake rides on the token, copied from
+// approve, so the happy path carries only host:approval:write.
 const VALID_CLAIMS = {
   sub: 'user-uuid-123',
   typ: 'user' as const,
   accessScope: 'team' as const,
   teamId: 'team-1',
-  scopes: ['host:session:write'],
+  scopes: ['host:approval:write'],
   hostRefs: ['chatllm'],
   jti: 'j1',
   iat: 1,
@@ -55,6 +58,45 @@ function makeApp() {
   return app
 }
 
+// supertest resolves `.` and `..` segments (and their %2E spellings) before
+// sending, so a dot segment reaches the route only over a raw request.
+async function rawPatch(path: string, body: unknown): Promise<{ status: number; body: unknown }> {
+  const server = makeApp().listen(0, '127.0.0.1')
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.once('listening', resolve)
+    })
+    const { port } = server.address() as AddressInfo
+    const payload = JSON.stringify(body)
+    return await new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          host: '127.0.0.1',
+          port,
+          path,
+          method: 'PATCH',
+          headers: {
+            authorization: 'Bearer user-token',
+            'content-type': 'application/json',
+            'content-length': Buffer.byteLength(payload),
+          },
+        },
+        res => {
+          let text = ''
+          res.setEncoding('utf8')
+          res.on('data', chunk => (text += chunk))
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: JSON.parse(text) }))
+        }
+      )
+      req.once('error', reject)
+      req.end(payload)
+    })
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+}
+
 function jsonResponse(status: number, body: unknown): Response {
   return {
     status,
@@ -70,6 +112,8 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
   beforeEach(() => {
     authTokenMock.verifyRpcToken.mockReturnValue(VALID_CLAIMS)
     serviceMock.resolveHostConnectionForUser.mockResolvedValue(HOST_CONNECTION)
+    serviceMock.refreshV1HostConnection.mockReset()
+    serviceMock.refreshV1HostConnection.mockResolvedValue(null)
     controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({
       kind: 'active',
       wakeGeneration: null,
@@ -168,6 +212,27 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
     expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
   })
 
+  // Each passes the path-segment check but not the Host-create grammar, which
+  // every sibling Host route applies.
+  it.each(['Bad_Ref', 'Host', '-host', 'host-', 'bad.name'])(
+    'returns 400 for the hostRef %s and does not resolve or call the host',
+    async hostRef => {
+      const fetchMock = vi.fn()
+      globalThis.fetch = fetchMock as unknown as typeof fetch
+
+      const res = await request(makeApp())
+        .patch(`/rpc/hosts/${hostRef}/sessions/chatllm/c1/approval-mode`)
+        .set('authorization', 'Bearer user-token')
+        .send({ mode: 'auto' })
+        .expect(400)
+
+      expect(res.body).toEqual({ error: 'Invalid hostRef' })
+      expect(authTokenMock.verifyRpcToken).toHaveBeenCalledTimes(1)
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+    }
+  )
+
   it('returns 400 for a non-object body and does not call the host', async () => {
     const fetchMock = vi.fn()
     globalThis.fetch = fetchMock as unknown as typeof fetch
@@ -183,7 +248,7 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
     expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
   })
 
-  it('returns 403 when the token lacks host:session:write', async () => {
+  it('returns 403 when the token lacks host:approval:write', async () => {
     authTokenMock.verifyRpcToken.mockReturnValue({
       ...VALID_CLAIMS,
       scopes: ['host:session:read'],
@@ -199,6 +264,75 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
 
     expect(fetchMock).not.toHaveBeenCalled()
     expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+  })
+
+  it('returns the rename 403 when the host cannot be resolved, without calling it', async () => {
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+    const fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const res = await request(makeApp())
+      .patch(MODE_PATH)
+      .set('authorization', 'Bearer user-token')
+      .send({ mode: 'auto' })
+      .expect(403)
+
+    expect(res.body).toEqual({ error: 'Forbidden: user cannot access this host' })
+    expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledTimes(1)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('resolves the host with the same edge context as rename', async () => {
+    authTokenMock.verifyRpcToken.mockReturnValue({
+      ...VALID_CLAIMS,
+      accessScope: 'user' as const,
+      teamId: undefined,
+      scopes: ['host:approval:write', 'host:session:write'],
+    })
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { approvalMode: 'auto' })) as unknown as typeof fetch
+
+    await request(makeApp())
+      .patch(MODE_PATH)
+      .set('authorization', 'Bearer user-token')
+      .send({ mode: 'auto' })
+      .expect(200)
+    await request(makeApp())
+      .patch('/rpc/hosts/chatllm/sessions/chatllm/c1/name')
+      .set('authorization', 'Bearer user-token')
+      .send({ title: 'Renamed' })
+      .expect(200)
+
+    const [modeCall, renameCall] = serviceMock.resolveHostConnectionForUser.mock.calls
+    expect(modeCall).toEqual(renameCall)
+    expect(modeCall?.[3]).toEqual({ teamId: null })
+  })
+
+  it('refuses a rename-only host:session:write token that rename still accepts', async () => {
+    authTokenMock.verifyRpcToken.mockReturnValue({
+      ...VALID_CLAIMS,
+      scopes: ['host:session:write'],
+    })
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { title: 'Renamed' }))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .patch(MODE_PATH)
+      .set('authorization', 'Bearer user-token')
+      .send({ mode: 'allow_all' })
+      .expect(403)
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    await request(makeApp())
+      .patch('/rpc/hosts/chatllm/sessions/chatllm/c1/name')
+      .set('authorization', 'Bearer user-token')
+      .send({ title: 'Renamed' })
+      .expect(200)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      'http://chatllm:8080/v1/runtime/sessions/chatllm/c1/name'
+    )
   })
 
   it('returns 403 when the user cannot access the host', async () => {
@@ -238,6 +372,25 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
   })
 
   it.each([
+    '/rpc/hosts/chatllm/sessions/./c1/approval-mode',
+    '/rpc/hosts/chatllm/sessions/../c1/approval-mode',
+    '/rpc/hosts/chatllm/sessions/chatllm/./approval-mode',
+    '/rpc/hosts/chatllm/sessions/chatllm/../approval-mode',
+  ])('refuses a dot segment before resolving the host: %s', async path => {
+    const fetchMock = vi.fn()
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const res = await rawPatch(path, { mode: 'auto' })
+
+    expect(res).toEqual({
+      status: 400,
+      body: { error: 'Invalid hostRef, agent, or chatId' },
+    })
+    expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it.each([
     { status: 400, body: { error: 'invalid mode' } },
     { status: 404, body: { error: 'session not found' } },
   ])('propagates the upstream $status verbatim', async ({ status, body }) => {
@@ -272,7 +425,7 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
   it('wakes and retries the upstream once when the token has host:wake:write', async () => {
     authTokenMock.verifyRpcToken.mockReturnValue({
       ...VALID_CLAIMS,
-      scopes: ['host:session:write', 'host:wake:write'],
+      scopes: ['host:approval:write', 'host:wake:write'],
     })
     const upstream = {
       approvalMode: 'allow_all',
@@ -308,6 +461,73 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
         'x-clerum-edge-user-id': VALID_CLAIMS.sub,
       })
     }
+  })
+
+  it('re-resolves the edge assertion before the wake retry, as approve does', async () => {
+    authTokenMock.verifyRpcToken.mockReturnValue({
+      ...VALID_CLAIMS,
+      scopes: ['host:approval:write', 'host:wake:write'],
+    })
+    // A connection of its own: the refresh rewrites its headers in place.
+    const host = {
+      ...HOST_CONNECTION,
+      headers: { ...HOST_CONNECTION.headers, 'x-clerum-edge-assertion': 'edge-assertion-first' },
+    }
+    serviceMock.resolveHostConnectionForUser.mockResolvedValueOnce(host)
+    serviceMock.refreshV1HostConnection.mockImplementationOnce(
+      async (held: { headers: Record<string, string> }) => {
+        held.headers['x-clerum-edge-assertion'] = 'edge-assertion-refreshed'
+        return null
+      }
+    )
+    const sentAssertions: string[] = []
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      sentAssertions.push((init.headers as Record<string, string>)['x-clerum-edge-assertion']!)
+      if (sentAssertions.length === 1) throw new TypeError('fetch failed')
+      return jsonResponse(200, { approvalMode: 'auto' })
+    })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .patch(MODE_PATH)
+      .set('authorization', 'Bearer user-token')
+      .send({ mode: 'auto' })
+      .expect(200)
+
+    expect(serviceMock.refreshV1HostConnection).toHaveBeenCalledTimes(1)
+    expect(serviceMock.refreshV1HostConnection).toHaveBeenCalledWith(
+      host,
+      VALID_CLAIMS.sub,
+      'chatllm',
+      'user-token'
+    )
+    expect(sentAssertions).toEqual(['edge-assertion-first', 'edge-assertion-refreshed'])
+  })
+
+  it('answers a denial at the retry re-resolve as the first resolve does, without a retry', async () => {
+    authTokenMock.verifyRpcToken.mockReturnValue({
+      ...VALID_CLAIMS,
+      scopes: ['host:approval:write', 'host:wake:write'],
+    })
+    serviceMock.refreshV1HostConnection.mockResolvedValueOnce({
+      denied: true,
+      code: 'host_access_revoked',
+    })
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const res = await request(makeApp())
+      .patch(MODE_PATH)
+      .set('authorization', 'Bearer user-token')
+      .send({ mode: 'auto' })
+      .expect(403)
+
+    expect(res.body).toEqual({
+      error: 'Forbidden: user cannot access this host',
+      code: 'host_access_revoked',
+    })
+    expect(serviceMock.refreshV1HostConnection).toHaveBeenCalledTimes(1)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('sends the first attempt without a client-side deadline', async () => {

@@ -9,6 +9,7 @@ const svc = vi.hoisted(() => ({
   adminDeleteUser: vi.fn(),
   createInvitation: vi.fn(),
   createInvitationForTeams: vi.fn(),
+  createPasswordSetupInvitationForUser: vi.fn(),
   createTeam: vi.fn(),
   findMembership: vi.fn(),
   getAdminUserContext: vi.fn(),
@@ -22,6 +23,10 @@ const svc = vi.hoisted(() => ({
   listUsersByAgent: vi.fn(),
   listUsersByContext: vi.fn(),
   listUsers: vi.fn(),
+  listAllTeams: vi.fn(),
+  listAllPendingInvitationsAdmin: vi.fn(),
+  listTeamAgentsByTeam: vi.fn(),
+  listTeamContextsByTeam: vi.fn(),
   listMembers: vi.fn(),
   listPendingInvitationsForTeam: vi.fn(),
   listTeams: vi.fn(),
@@ -122,6 +127,8 @@ describe('routes/profileAdmin', () => {
     app.use(createAdminRouter(gatewayStub as unknown as K8sGateway))
 
     await request(app).get('/admin/users?q=test').expect(200)
+    // R5-3: the lookup list includes retired users, so a stored id still resolves to a name.
+    expect(svc.listUsers).toHaveBeenCalledWith('test', { includeRetired: true })
     await request(app)
       .put('/admin/users/u1/contexts')
       .send({ contextIds: ['ctx-a'] })
@@ -173,7 +180,9 @@ describe('routes/profileAdmin', () => {
   })
 
   it('rejects Control UI member invitations when an active member already uses the email', async () => {
-    svc.listUsers.mockResolvedValue([{ id: 'user-1', email: 'existing@example.com' }])
+    svc.listUsers.mockResolvedValue([
+      { id: 'user-1', email: 'existing@example.com', lifecycleState: 'active' },
+    ])
 
     const app = express()
     app.use(express.json())
@@ -191,7 +200,73 @@ describe('routes/profileAdmin', () => {
       memberId: 'user-1',
       email: 'existing@example.com',
     })
+    // A retired row still holds its address, so the guard asks for it too.
+    expect(svc.listUsers).toHaveBeenCalledWith('existing@example.com', { includeRetired: true })
     expect(svc.createInvitationForTeams).not.toHaveBeenCalled()
+  })
+
+  const INVITATION_ROUTES = [
+    { route: '/admin/invitations', create: 'createInvitationForTeams' },
+    { route: '/admin/teams/t1/invitations', create: 'createInvitation' },
+  ] as const
+
+  it.each(INVITATION_ROUTES)(
+    'refuses $route for a removed member with member_email_retired and no member to open',
+    async ({ route, create }) => {
+      svc.listUsers.mockResolvedValue([
+        { id: 'user-9', email: 'removed@example.com', lifecycleState: 'retired' },
+      ])
+
+      const app = express()
+      app.use(express.json())
+      app.use(createAdminRouter(gatewayStub as unknown as K8sGateway))
+
+      const res = await request(app)
+        .post(route)
+        .send({ name: 'Removed Member', email: 'Removed@Example.com', role: 'member' })
+        .expect(409)
+
+      expect(res.body).toEqual({
+        error: 'member_email_retired',
+        message: "This email belongs to a removed member and can't be invited again.",
+        email: 'removed@example.com',
+      })
+      expect(svc.listUsers).toHaveBeenCalledWith('removed@example.com', { includeRetired: true })
+      expect(svc[create]).not.toHaveBeenCalled()
+    }
+  )
+
+  it('rejects a team invitation when an active member already uses the email', async () => {
+    svc.listUsers.mockResolvedValue([
+      { id: 'user-1', email: 'existing@example.com', lifecycleState: 'active' },
+    ])
+
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminRouter(gatewayStub as unknown as K8sGateway))
+
+    const res = await request(app)
+      .post('/admin/teams/t1/invitations')
+      .send({ name: 'Existing Member', email: 'existing@example.com', role: 'member' })
+      .expect(409)
+
+    expect(res.body).toMatchObject({ error: 'member_email_exists', memberId: 'user-1' })
+    expect(svc.createInvitation).not.toHaveBeenCalled()
+  })
+
+  it('refuses password setup resend for an OIDC-linked account with 409 oidc_linked', async () => {
+    svc.createPasswordSetupInvitationForUser.mockResolvedValue({ error: 'oidc_linked' })
+
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminRouter(gatewayStub as unknown as K8sGateway))
+
+    const res = await request(app)
+      .post('/admin/users/user-1/invitations/password-setup/resend')
+      .expect(409)
+
+    expect(res.body).toEqual({ error: 'oidc_linked' })
+    expect(svc.createPasswordSetupInvitationForUser).toHaveBeenCalledWith('user-1')
   })
 
   it('returns deleted context history for admin user and team views', async () => {
@@ -463,5 +538,25 @@ describe('routes/profileAdmin', () => {
       .set('Idempotency-Key', 'admin-delete-conflict')
       .send({ reason: 'policy retirement' })
       .expect(409, { error: 'idempotency_conflict' })
+  })
+
+  it('keeps the Users page roster active-only: the overview lists users with the default filter', async () => {
+    svc.listAllTeams.mockResolvedValue([])
+    svc.listUsers.mockResolvedValue([{ id: 'u1', email: 'u@example.com' }])
+    svc.listAllPendingInvitationsAdmin.mockResolvedValue([])
+    svc.listTeamAgentsByTeam.mockResolvedValue({})
+    svc.listTeamContextsByTeam.mockResolvedValue({})
+    ;(gatewayStub.listResource as any).mockResolvedValue([])
+
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminRouter(gatewayStub as unknown as K8sGateway))
+
+    const res = await request(app).get('/admin/profile-admin/overview').expect(200)
+
+    // Positive: the roster reached the response; negative: no includeRetired option.
+    expect(res.body.users).toEqual([{ id: 'u1', email: 'u@example.com' }])
+    expect(svc.listUsers).toHaveBeenCalledTimes(1)
+    expect(svc.listUsers.mock.calls[0]).toEqual([''])
   })
 })

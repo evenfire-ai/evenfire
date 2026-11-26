@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { canApprove, resolveCommunicationChannelRef } from '../src/controlApiClient.js'
+import {
+  canApprove,
+  resolveCommunicationChannelRef,
+  sendTeamsTargetMessage,
+} from '../src/controlApiClient.js'
 import type { ReaderConfig } from '../src/config.js'
 
 const cfg = (overrides: Partial<ReaderConfig> = {}): ReaderConfig =>
@@ -121,5 +125,74 @@ describe('resolveCommunicationChannelRef', () => {
         providerChannelId: 'D123',
       })
     ).resolves.toEqual({ ok: false, error: 'communication_channel_ambiguous' })
+  })
+})
+
+describe('sendTeamsTargetMessage', () => {
+  const message = {
+    targetId: 'teams:eyJuYW1lc3BhY2UiOiJjaGFubmVscyJ9',
+    conversationId: '19:channel-1@thread.tacv2',
+    threadConversationId: '19:channel-1@thread.tacv2;messageid=root-post-1',
+    replyToId: 'root-post-1',
+    serviceUrl: 'https://smba.trafficmanager.net/amer/',
+    text: 'I could not approve this workflow approval. Try again in a moment.',
+  }
+
+  it('posts the message to the control-api Teams send route with the service headers', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, id: 'activity-2' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await sendTeamsTargetMessage(cfg(), message)
+
+    expect(result).toEqual({ ok: true, ts: null, id: 'activity-2' })
+    expect(fetchMock).toHaveBeenCalledOnce()
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(String(url)).toBe(
+      `http://control-api:8090/api/v1/internal/workflow-approval-reader/teams-targets/${encodeURIComponent(
+        message.targetId
+      )}/send-message`
+    )
+    expect(init!.method).toBe('POST')
+    const headers = init!.headers as Record<string, string>
+    expect(headers['x-service-token']).toBe('workflow-approval-reader')
+    expect(headers['Authorization']).toBe('Bearer test-token')
+    expect(JSON.parse(String(init!.body))).toEqual({
+      conversationId: message.conversationId,
+      threadConversationId: message.threadConversationId,
+      replyToId: message.replyToId,
+      serviceUrl: message.serviceUrl,
+      text: message.text,
+    })
+  })
+
+  it('returns the control-api refusal', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 502,
+        json: async () => ({ error: 'teams_send_failed', providerError: 'http_403' }),
+      })
+    )
+
+    await expect(sendTeamsTargetMessage(cfg(), message)).resolves.toEqual({
+      ok: false,
+      status: 502,
+      error: 'teams_send_failed',
+    })
+  })
+
+  it('answers 503 without a call when control-api is not configured', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      sendTeamsTargetMessage(cfg({ controlApiToken: '' }), message)
+    ).resolves.toEqual({ ok: false, status: 503, error: 'control_api_not_configured' })
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

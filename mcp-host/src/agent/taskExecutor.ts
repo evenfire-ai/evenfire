@@ -26,6 +26,7 @@ import type { ApprovalModeInputs } from '../core/approval/gateCause'
 import { approvalLogId } from '../core/approval/grantMemory'
 import type { ShellAction } from '../core/approval/shellCard'
 import {
+  type ShellClassifierCaller,
   classifierServingPair,
   classifyToolCall,
   classifierAvailable as isClassifierAvailable,
@@ -63,6 +64,7 @@ import { DefaultLoopController } from '../core/orchestration/loopConfig'
 import { NativeToolPresentationController } from '../core/orchestration/nativeToolPresentationController'
 import type { SpilloverResolver } from '../core/orchestration/spilloverResolver'
 import { StubSpilloverResolver } from '../core/orchestration/spilloverResolver'
+import { approvedToolResultTransform } from '../core/orchestration/toolCallPolicy'
 import {
   resolveToolPresentation,
   selectDeferredNatives,
@@ -83,6 +85,7 @@ import {
 import { turnStopResult } from '../core/orchestration/toolUseLoopRuntime'
 import {
   type PreparedGfsFile,
+  type TurnContextFolderTools,
   attachedFilesForTurnContext,
   attachedImagesForTurnContext,
   buildTurnContextBlock,
@@ -144,13 +147,24 @@ import {
   progressReporterRegistry,
 } from '../progress/sseProgressReporter.js'
 import type { Task, TaskError, TaskSource } from '../queue/types'
+import {
+  RuntimeActionAuthorityError,
+  type RuntimeActionCheckpoint,
+  withRuntimeActionAuthority,
+  withRuntimeActionAuthorityForContextManager,
+  withRuntimeActionAuthorityForLlmPort,
+  withRuntimeActionAuthorityForToolRegistry,
+} from '../runtime/actionAuthority'
 import { resolveCronTaskSessionKey, serializeSessionKey } from '../session'
 import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
 import type { Workspace } from '../workspace/service'
 import { attachmentContextWindow } from './attachmentContextWindow'
 import type { CronScheduler } from './cronScheduler'
-import { referencedFilesForTurnContext } from './fileReferenceResolver'
+import {
+  referencedFilesForTurnContext,
+  referencedFoldersForTurnContext,
+} from './fileReferenceResolver'
 import {
   gfsManagedWorkspaceExecution,
   gfsStoreCallerIdentity,
@@ -169,6 +183,15 @@ import { sourceMessageForResume } from './sourceMessageForResume'
 import { TaskExecutionBudget, TaskLimitError } from './taskExecutionBudget'
 import { TurnTimingRecorder } from './turnTiming'
 import type { AgentConfig, ExecutorFailoverSupport } from './types'
+
+// The tools that take a referenced folder as `parentResourceId`.
+// clerum__gfs_copy needs gfs.write too, which always registers create_file.
+const FOLDER_WRITE_TOOLS = [
+  'clerum__gfs_create_file',
+  'clerum__gfs_create_folder',
+  GFS_SAVE_ATTACHMENT_TOOL,
+] as const
+const GFS_LIST_TOOL = 'clerum__gfs_list'
 
 export type ExecutorState = 'processing' | 'waiting_approval' | 'completed' | 'failed'
 
@@ -261,9 +284,9 @@ export interface TaskExecutorDeps {
   approvalConfig: ApprovalConfig | undefined
   /**
    * Live approval snapshot. Interactive tasks read tools, the live set, the
-   * ceiling and the channel cap through this. Absent uses `approvalConfig`.
+   * ceiling and the channel cap (switch and approver policy) through this.
    */
-  approvalConfigProvider?: () => ApprovalConfigSnapshot
+  approvalConfigProvider: () => ApprovalConfigSnapshot
   guardrailsConfig?: GuardrailsConfig
   coreEvents: SimpleEventEmitter
   cronScheduler: CronScheduler | null
@@ -329,6 +352,15 @@ export interface TaskExecutorDeps {
    */
   failover?: ExecutorFailoverSupport
 
+  /**
+   * Dedicated shell classifier. When it returns a caller, auto judges shell
+   * with that provider instead of the chat or failover pair. Null keeps the
+   * chat pair. The session read must use the same pair.
+   */
+  shellClassifierProvider?: () => ShellClassifierCaller | null
+
+  /** Live, service-authenticated checkpoint for v2 runtime effects. */
+  actionAuthorityCheckpoint?: RuntimeActionCheckpoint
   /**
    * Issue #654 — live-catalog image-input capability lookup, keyed by the
    * (provider, model) the adapter is about to send. Threaded to the primary
@@ -903,11 +935,12 @@ export class TaskExecutor {
         resolvedCompletedResults
       )
       // The frozen request: its messages plus the batch results before this call.
+      // The result gets the same post_tool_use redaction as a call the loop admits.
       const toolResult = await executeSingleTool(
         suspendedCall,
         loopConfig,
         undefined,
-        undefined,
+        approvedToolResultTransform(suspendedCall, loopConfig),
         requestImageUsage(approval.context_snapshot, batchResults)
       )
       collectToolAttachments([toolResult], this.completedAttachments)
@@ -1096,6 +1129,14 @@ export class TaskExecutor {
    * Anything else → retryable ApiCallFailed with provider from the LLM.
    */
   private toTaskError(error: unknown): TaskError {
+    if (error instanceof RuntimeActionAuthorityError) {
+      return {
+        code: error.code,
+        message: error.code,
+        retryable: error.code === 'authority_unavailable',
+        provider: 'unknown',
+      }
+    }
     if (error instanceof TaskLimitError)
       return {
         code: error.code,
@@ -1362,20 +1403,35 @@ export class TaskExecutor {
     // message of the turn. Only the first user message of the turn gets it;
     // `tool` messages keep their content untouched.
     // #666 — the block is also the only carrier of the `attached_file` and
-    // `referenced_file` lines, so a message with file attachments or resolved
-    // file references gets it with the cache off too; the attachment
-    // condition also registers `clerum__attachment_read`.
+    // `referenced_file` and `referenced_folder` lines, so a message with file
+    // attachments or resolved file or location references gets it with the
+    // cache off too; the attachment condition also registers
+    // `clerum__attachment_read`.
     const hasFileAttachments =
       this.task.sourceMessage?.attachments?.some(attachment => attachment.kind === 'file') === true
     const hasFileReferences = (this.task.sourceMessage?.fileReferenceResolutions?.length ?? 0) > 0
+    const hasLocationReferences =
+      (this.task.sourceMessage?.locationReferenceResolutions?.length ?? 0) > 0
     const promptAssemblyStart = Date.now()
     const loopConfig = await withAbort(() => this.buildLoopConfig(), this.abortController.signal)
     const promptAssemblyMs = Date.now() - promptAssemblyStart
     // The save instruction follows the registry that was actually built, so it
     // appears exactly when the model can call the tool.
     const saveAvailable = loopConfig.toolRegistry.get(GFS_SAVE_ATTACHMENT_TOOL) !== null
-    if (appConfig.promptCacheEnabled || hasFileAttachments || hasFileReferences || saveAvailable) {
-      this.prependTurnContextBlock(messages, saveAvailable)
+    // The folder instruction follows the same registry: a Host with gfs.read
+    // and no gfs.write resolves the folder but has no tool that writes into it.
+    const folderTools: TurnContextFolderTools = {
+      write: FOLDER_WRITE_TOOLS.some(name => loopConfig.toolRegistry.get(name) !== null),
+      list: loopConfig.toolRegistry.get(GFS_LIST_TOOL) !== null,
+    }
+    if (
+      appConfig.promptCacheEnabled ||
+      hasFileAttachments ||
+      hasFileReferences ||
+      hasLocationReferences ||
+      saveAvailable
+    ) {
+      this.prependTurnContextBlock(messages, saveAvailable, folderTools)
     }
     if (this.turnTiming) {
       // buildLoopConfig assembles the tool registry (MCP schemas) and the
@@ -1397,7 +1453,11 @@ export class TaskExecutor {
    * no human user text we inject a synthetic `<cron task>` placeholder so the
    * wire shape stays consistent (P1-004 §5.5).
    */
-  private prependTurnContextBlock(messages: ChatMessage[], saveAvailable: boolean): void {
+  private prependTurnContextBlock(
+    messages: ChatMessage[],
+    saveAvailable: boolean,
+    folderTools: TurnContextFolderTools
+  ): void {
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]
       if (m.role !== 'user') continue
@@ -1420,6 +1480,10 @@ export class TaskExecutor {
         referencedFiles: referencedFilesForTurnContext(
           this.task.sourceMessage?.fileReferenceResolutions
         ),
+        referencedFolders: referencedFoldersForTurnContext(
+          this.task.sourceMessage?.locationReferenceResolutions
+        ),
+        folderTools,
         preparedGfsFiles: this.preparedGfsFiles,
       })
       const isCron = this.task.cronJobId !== undefined
@@ -1675,7 +1739,7 @@ export class TaskExecutor {
         const counter = createTokenCounter(provider, servedModel, {
           offline: appConfig.tokenizerOffline,
         })
-        return new LlmPortAdapter(
+        const fallbackPort = new LlmPortAdapter(
           provider,
           servedModel,
           provider.getProviderType(),
@@ -1691,6 +1755,11 @@ export class TaskExecutor {
           },
           this.deps.imageInput
         )
+        const authorityBinding = this.task.sourceMessage?.authorityV2
+        if (!authorityBinding) return fallbackPort
+        const checkpoint =
+          this.deps.actionAuthorityCheckpoint ?? (async () => 'unavailable' as const)
+        return withRuntimeActionAuthorityForLlmPort(fallbackPort, authorityBinding, checkpoint)
       },
     })
   }
@@ -1769,6 +1838,11 @@ export class TaskExecutor {
     await Promise.all(
       toolCounters.filter(counter => counter !== tokenCounter).map(counter => counter.warmup())
     )
+    const authorityBinding = this.task.sourceMessage?.authorityV2
+    const checkpoint = this.deps.actionAuthorityCheckpoint ?? (async () => 'unavailable' as const)
+    const actionRegistry = authorityBinding
+      ? withRuntimeActionAuthorityForToolRegistry(registry, authorityBinding, checkpoint)
+      : registry
 
     // T2.2 — when the prompt-cache flag is ON and we have the dependencies
     // wired (PromptCache + WorkspaceService), build the tiered
@@ -1789,11 +1863,14 @@ export class TaskExecutor {
       raw => this.deps.conversationManager.recordContextBreakdown(conversation, raw),
       this.contextMaxTokens()
     )
-    const parts = await this.maybeGetOrBuildParts(registry.listDefinitions())
+    const parts = await this.maybeGetOrBuildParts(actionRegistry.listDefinitions())
     const identity = parts ? undefined : await this.buildSystemIdentity(llmPort)
-    const reasoning = parts
+    const unguardedReasoning = parts
       ? reasoningFactory.createWithParts(parts)
       : reasoningFactory.create(identity)
+    const reasoning = authorityBinding
+      ? withRuntimeActionAuthority(unguardedReasoning, authorityBinding, checkpoint)
+      : unguardedReasoning
     // R9-14 / R21-1 — the text of the system prompt `reasoning` sends with a
     // request that presents `tools`, for the context manager to count. The
     // cache path sends the parts it built once, joined as `LlmPortAdapter`
@@ -1814,7 +1891,7 @@ export class TaskExecutor {
       systemPromptFor = tools => promptBuilder.buildSystemPrompt(tools, identity, metadata).content
     }
 
-    const contextManager = new PressureContextManager(
+    const unguardedContextManager = new PressureContextManager(
       this.contextMaxTokens(),
       this.deps.workspaceService,
       hookedLlmPort,
@@ -1852,10 +1929,17 @@ export class TaskExecutor {
         maxMessages: this.contractMaxMessages(),
       }
     )
+    const contextManager = authorityBinding
+      ? withRuntimeActionAuthorityForContextManager(
+          unguardedContextManager,
+          authorityBinding,
+          checkpoint
+        )
+      : unguardedContextManager
 
     const loopConfig = buildLoopConfig({
       reasoning,
-      toolRegistry: registry,
+      toolRegistry: actionRegistry,
       safety: new BasicSafety(this.deps.secretEntriesProvider),
       events: this.buildTrackingEventEmitter(),
       // P.5: conversation is always set by the time buildLoopConfig runs —
@@ -2142,22 +2226,22 @@ export class TaskExecutor {
    * - task.source = 'channel'  → source_kind = 'channel', sender + channel_type from sourceMessage
    * - task.source = 'cron'     → source_kind = 'cron', cron_job_id from task.cronJobId
    * - task.source = 'internal' → source_kind = 'desktop'
+   * - any other source         → source_kind = 'unknown'
    * Workflow-recipe LLM calls go through workflowService and are tagged
    * separately at that call site.
    */
-  private buildDefaultUsageContext(): UsageContext | undefined {
+  private buildDefaultUsageContext(): UsageContext {
     const t = this.task
     if (t.source === 'channel') {
       if (t.sourceMessage?.channelType === 'rpc') {
-        const teamId =
-          typeof t.sourceMessage.metadata?.teamId === 'string'
-            ? t.sourceMessage.metadata.teamId.trim()
-            : ''
+        const authority = t.sourceMessage.authorityV2
+        const rawTeamId = authority ? authority.effectiveTeamId : t.sourceMessage.metadata?.teamId
+        const teamId = typeof rawTeamId === 'string' ? rawTeamId.trim() : ''
         return {
           source_kind: 'desktop',
           traceContext: t.traceContext ?? null,
           team_id: teamId || null,
-          user_id: t.sourceMessage.sender ?? null,
+          user_id: authority?.userId ?? t.sourceMessage.sender ?? null,
           task_id: t.id,
         }
       }
@@ -2357,12 +2441,7 @@ export class TaskExecutor {
   }
 
   private approvalSnapshot(): ApprovalConfigSnapshot {
-    return (
-      this.deps.approvalConfigProvider?.() ?? {
-        effective: this.deps.approvalConfig,
-        hostSpec: this.deps.approvalConfig,
-      }
-    )
+    return this.deps.approvalConfigProvider()
   }
 
   /** Live membership for clerum__gfs_download. Undefined means the set is empty. */
@@ -2383,11 +2462,9 @@ export class TaskExecutor {
    * The model serving this turn. Failover's sticky pair wins; otherwise the
    * Host primary that this task was built with.
    */
-  private classifierCaller(): {
-    provider: Pick<SingleTurnProvider, 'completeSingleTurn'>
-    providerType: string
-    modelName: string
-  } {
+  private classifierCaller(): ShellClassifierCaller {
+    const dedicated = this.deps.shellClassifierProvider?.() ?? null
+    if (dedicated) return dedicated
     const primaryProvider = this.deps.llmProvider.getProviderType()
     const primaryModel = this.deps.modelName
     const served = this.deps.failover?.engine.servedBy()
@@ -2416,13 +2493,22 @@ export class TaskExecutor {
       storedMode: () => normalizeApprovalMode(conversation.approval_mode),
       ceiling: () => readModeCeiling(this.approvalSnapshot()),
       channelCap: () =>
-        readChannelCap(this.approvalSnapshot(), conversation.channel_type ?? undefined),
+        readChannelCap(
+          this.approvalSnapshot(),
+          conversation.channel_type ?? undefined,
+          conversation.user_id
+        ),
       classifierAvailable: args => {
         const caller = this.classifierCaller()
         return isClassifierAvailable(caller.providerType, caller.modelName, args)
       },
       classify: (call, description) => {
         const caller = this.classifierCaller()
+        // `setUsageReporter` sets the reporter and the static context
+        // together. Without both, usage reporting is not wired, and the call
+        // reports nothing rather than billing a placeholder Host.
+        const reporter = this.deps.usageReporter
+        const staticContext = this.deps.usageStaticContext
         return classifyToolCall({
           toolName: call.name,
           description,
@@ -2431,19 +2517,10 @@ export class TaskExecutor {
           providerType: caller.providerType,
           modelName: caller.modelName,
           taskSignal: this.abortController.signal,
-          usage: {
-            reporter: this.deps.usageReporter,
-            context: this.buildDefaultUsageContext() ?? {
-              source_kind: 'unknown',
-              traceContext: null,
-              task_id: this.taskId,
-            },
-            staticContext: this.deps.usageStaticContext ?? {
-              host_ref: '',
-              context_ref: null,
-              llm_secret_name: null,
-            },
-          },
+          usage:
+            reporter && staticContext
+              ? { reporter, context: this.buildDefaultUsageContext(), staticContext }
+              : undefined,
           sessionLogId: approvalLogId(conversation.id),
         })
       },

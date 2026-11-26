@@ -1,8 +1,11 @@
 /**
  * The single owner of a conversation's tool-denial policy.
  *
- * A denial blocks one exact tool name in one conversation until the user who
- * denied it approves that tool again. It survives a restart (persisted on
+ * A denial makes one exact tool name in one conversation ask again, as an
+ * exact-invocation card, until the user who denied it approves that tool
+ * again. While the effective mode is allow_all, a denied tool other than
+ * cron_manage runs with no card (X1); the denial stays recorded and applies
+ * again when the mode drops. It survives a restart (persisted on
  * `sessions.denied_tools` as `[{ tool, userId }]`, migration 018).
  *
  * Every rule lives here, used by both decision lanes (ApprovalController and

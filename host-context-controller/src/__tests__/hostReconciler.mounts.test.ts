@@ -3,7 +3,12 @@ import * as k8s from '@kubernetes/client-node'
 import { createHash } from 'crypto'
 import { makeStubKc } from '../../test/__fixtures__/testMocks'
 import { config as hccConfig } from '../config'
-import { HostReconciler, type ResolvedSfsMount } from '../hostReconciler'
+import {
+  HostReconciler,
+  RPC_PROXY_EDGE_PROTOCOL_LABEL,
+  RPC_PROXY_EDGE_PROTOCOL_V1,
+  type ResolvedSfsMount,
+} from '../hostReconciler'
 import { issueMcpHostRuntimeTokens } from '../mcpHostRuntimeTokenIssuerClient'
 import type { HostCRD } from '../types'
 
@@ -992,6 +997,15 @@ describe('HostReconciler.buildDeployment — SharedFileSystem mounts', () => {
     expect(volNames).toEqual(['mcp-host-runtime-tokens', 'tmp', 'workflow-auth-state', 'workspace'])
   })
 
+  it('labels every Host Deployment with the signed-assertion edge protocol', () => {
+    expect(hccConfig.hostRpcProxyEdgeProtocol).toBe(RPC_PROXY_EDGE_PROTOCOL_V1)
+    const deployment = new HostReconciler(makeStubKc()).buildDeployment(makeHost())
+    expect(deployment.metadata?.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL]).toBe('signed-assertion-v1')
+    expect(deployment.spec!.template!.metadata!.labels?.[RPC_PROXY_EDGE_PROTOCOL_LABEL]).toBe(
+      'signed-assertion-v1'
+    )
+  })
+
   it('adds a pod-template runtime token revision annotation when HCC rotates tokens', () => {
     const reconciler = new HostReconciler(makeStubKc())
     const dep = reconciler.buildDeployment(makeHost(), [], 'runtime-token-revision-1')
@@ -1281,6 +1295,16 @@ describe('HostReconciler.reconcile — uses resolveContextMounts', () => {
       isCommunicationChannelCacheSynced: () => true,
       // Stub APIs to capture the Deployment body and ack everything.
       coreApi: {
+        listNamespacedPod: vi.fn(async () => ({
+          items: [
+            {
+              metadata: {
+                labels: { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: RPC_PROXY_EDGE_PROTOCOL_V1 },
+              },
+              status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] },
+            },
+          ],
+        })),
         readNamespacedSecret: readSecretWithChannelReaderRuntimeAuthLabels(),
         createNamespacedServiceAccount: vi.fn(),
         readNamespacedServiceAccount: vi.fn(async ({ name, namespace }) => ({
@@ -1384,19 +1408,39 @@ describe('HostReconciler.reconcile — uses resolveContextMounts', () => {
           }
           return {}
         }),
-        readNamespacedDeployment: vi.fn(async ({ name, namespace }) => ({
-          metadata: {
-            name,
-            namespace,
-            uid: `uid-${name}`,
-            resourceVersion: '1',
-            labels: {
-              'clerum.io/host': 'team-mission',
-              'clerum.io/managed-by': 'host-context-controller',
-            },
-          },
-          status: { readyReplicas: 1 },
-        })),
+        readNamespacedDeployment: vi.fn(async ({ name, namespace }) =>
+          name === 'rpc-proxy'
+            ? {
+                metadata: { name, namespace, generation: 1 },
+                spec: {
+                  replicas: 1,
+                  template: {
+                    metadata: {
+                      labels: { [RPC_PROXY_EDGE_PROTOCOL_LABEL]: RPC_PROXY_EDGE_PROTOCOL_V1 },
+                    },
+                  },
+                },
+                status: {
+                  observedGeneration: 1,
+                  updatedReplicas: 1,
+                  readyReplicas: 1,
+                  availableReplicas: 1,
+                },
+              }
+            : {
+                metadata: {
+                  name,
+                  namespace,
+                  uid: `uid-${name}`,
+                  resourceVersion: '1',
+                  labels: {
+                    'clerum.io/host': 'team-mission',
+                    'clerum.io/managed-by': 'host-context-controller',
+                  },
+                },
+                status: { readyReplicas: 1 },
+              }
+        ),
       } as unknown as k8s.AppsV1Api,
     })
     await reconciler.reconcile(makeHost())

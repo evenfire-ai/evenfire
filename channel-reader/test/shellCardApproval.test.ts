@@ -152,7 +152,7 @@ describe('shell card approval handler', () => {
     expect(rpc.sendDenial).not.toHaveBeenCalled()
   })
 
-  it('a Teams shell card offers Approve and Deny only', async () => {
+  it('a Teams shell card offers Allow once, Allow this command, Always allow shell and Deny', async () => {
     const { adapter, sent } = capturingAdapter('teams')
     const rpc = makeRpcClient({
       sendMessage: vi.fn(async () => ({
@@ -230,10 +230,12 @@ describe('shell card approval handler', () => {
   )
 
   it('rejects an unknown code without sendDenial', async () => {
-    const { adapter } = capturingAdapter('slack')
+    const { adapter, sent } = capturingAdapter('slack')
+    const authorizeProviderMessage = vi.fn(async () => ({ authorized: true }))
     const rpc = makeRpcClient({
       sendApproval: vi.fn(async () => ({ success: true })),
       sendDenial: vi.fn(async () => ({ success: true })),
+      authorizeProviderMessage,
     })
     const reader = new ChannelReader({
       rpcClient: rpc,
@@ -241,9 +243,13 @@ describe('shell card approval handler', () => {
       channels: [],
       sleep: async () => undefined,
     })
+    const source = slackMessage(`tool:q:${unknownActionCode}`)
 
-    await reader.handleMessages([slackMessage(`tool:q:${unknownActionCode}`)])
+    await reader.handleMessages([source])
 
+    // Liveness: the message reached the provider gate, upstream of the code parse.
+    expect(authorizeProviderMessage).toHaveBeenCalledWith(source.providerIdentity)
+    expect(sent.map(message => message.content)).toEqual(['That approval choice is not supported.'])
     expect(rpc.sendDenial).not.toHaveBeenCalled()
     expect(rpc.sendApproval).not.toHaveBeenCalled()
     expect(rpc.sendMessage).not.toHaveBeenCalled()

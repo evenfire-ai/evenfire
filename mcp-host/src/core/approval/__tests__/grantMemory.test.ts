@@ -8,7 +8,11 @@ import { approvalLogId, syncEffectiveMode } from '../grantMemory'
 
 const SENDER = 'sender-sentinel@example.test'
 const THREAD = 'thread-sentinel@example.test'
-const LIVE_OPEN = { ceiling: 'allow_all' as const, cap: 'allow_all' as const }
+const LIVE_OPEN = {
+  ceiling: 'allow_all' as const,
+  cap: 'allow_all' as const,
+  channelSwitch: 'allow_all' as const,
+}
 
 function seedGrants(conversation: Conversation): void {
   conversation.task_approved_tools = new Set(['http_request', 'cron_manage', 'shell_exec'])
@@ -129,7 +133,11 @@ describe('grant memory', () => {
     const manager = new ConversationManager()
     const conv = await manager.getOrCreate('grant-command-cap')
     const persist = vi.spyOn(manager.getStore(), 'persistApprovalMode')
-    const live = { ceiling: 'allow_all' as const, cap: 'manual' as const }
+    const live = {
+      ceiling: 'allow_all' as const,
+      cap: 'manual' as const,
+      channelSwitch: 'manual' as const,
+    }
 
     const command = await manager.setApprovalMode(conv, 'allow_all', live, 'command')
 
@@ -155,10 +163,20 @@ describe('grant memory', () => {
       effectiveApprovalMode: 'manual',
     })
 
-    await manager.setApprovalMode(conv, 'allow_all', { ceiling: 'manual', cap: 'manual' }, 'route')
+    await manager.setApprovalMode(
+      conv,
+      'allow_all',
+      { ceiling: 'manual', cap: 'manual', channelSwitch: 'manual' },
+      'route'
+    )
     expect(conv.approval_mode).toBe('allow_all')
 
-    await manager.setApprovalMode(conv, 'auto', { ceiling: 'manual', cap: 'allow_all' }, 'command')
+    await manager.setApprovalMode(
+      conv,
+      'auto',
+      { ceiling: 'manual', cap: 'allow_all', channelSwitch: 'allow_all' },
+      'command'
+    )
     expect(conv.approval_mode).toBe('auto')
 
     await manager.setApprovalMode(conv, 'manual', LIVE_OPEN, 'command')
@@ -177,7 +195,12 @@ describe('grant memory', () => {
     const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
     const debug = vi.spyOn(logger, 'debug').mockImplementation(() => undefined)
     try {
-      await manager.setApprovalMode(conv, 'allow_all', { ceiling: 'auto', cap: 'manual' }, 'route')
+      await manager.setApprovalMode(
+        conv,
+        'allow_all',
+        { ceiling: 'auto', cap: 'manual', channelSwitch: 'manual' },
+        'route'
+      )
 
       const l1 = info.mock.calls.filter(call => (call[0] as { event?: string }).event === 'L1')
       expect(l1).toHaveLength(1)

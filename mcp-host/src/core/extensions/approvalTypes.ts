@@ -32,8 +32,10 @@ export interface ChannelApprovalConfig {
   enabled: boolean
   approvers?: string[]
   /**
-   * When true, a telegram, email, slack, or teams session may use a channel
-   * cap of allow_all. Every other channel stays manual. Absent is false.
+   * When true, that channel's cap is allow_all; false, or a non-boolean
+   * value, caps it at manual. Absent is true for telegram, slack and teams
+   * and false for email. rpc is always allow_all; every other channel is
+   * manual.
    */
   allowModeChange?: boolean
 }
@@ -61,6 +63,13 @@ export interface ApprovalConfig {
    * allow_all; an absent or any other value is manual.
    */
   modeCeiling?: string
+  /**
+   * Model the dedicated shell classifier calls when this Host's model
+   * provider is OpenAI. Absent or blank means gpt-5.5. A model the classifier
+   * does not allow shows the shell card. With any other provider, auto keeps
+   * judging shell with the model serving the turn.
+   */
+  shellClassifierModel?: string
 }
 
 // ─── Approval Decision ─────────────────────────────────────

@@ -39,9 +39,9 @@ export function hostAccessDenied(code: HostAccessDenialCode): HostAccessDenial {
 
 /** Narrows `resolveHostConnectionForUser`'s result: true means "respond 403". */
 export function isHostAccessDenied<T extends object>(
-  resolved: T | HostAccessDenial
+  resolved: T | HostAccessDenial | null
 ): resolved is HostAccessDenial {
-  return (resolved as Partial<HostAccessDenial>).denied === true
+  return resolved !== null && (resolved as Partial<HostAccessDenial>).denied === true
 }
 
 const RESERVED_HOST_ACCESS_CODES: ReadonlySet<unknown> = new Set<HostAccessDenialCode>([
@@ -74,6 +74,42 @@ export function withoutReservedHostAccessCode(status: number, body: string): str
     `[RPC_PROXY] dropped reserved host-access code from an upstream 403 body code=${String(code)}`
   )
   return JSON.stringify(rest)
+}
+
+/**
+ * `name` of the error control-api's Host-access client throws when control-api
+ * authorizes a Host (200) without issuing an edge assertion: control-api is
+ * older than rpc-proxy. Declared here so the responder below can recognise the
+ * error without importing the client (which imports this module).
+ */
+export const CONTROL_API_HOST_EDGE_ASSERTION_MISSING_ERROR =
+  'ControlApiHostEdgeAssertionMissingError'
+
+/**
+ * Answers a Host request whose authorization control-api could not complete
+ * because it issued no edge assertion: 503 `authority_unavailable`, the answer
+ * the V2 path and the V1 re-resolve give for an unavailable authority, never
+ * the error's internal message. Called first by the terminal error paths
+ * (respondUpstreamUnavailable, apiErrorHandler) and by the stream routes'
+ * catches. The error is matched by `name`. Returns false, having written
+ * nothing, for every other error; returns true without writing when the
+ * response is already committed.
+ */
+export function respondControlApiAuthorityUnavailable(
+  res: ExpressResponse,
+  error: unknown
+): boolean {
+  if (!(error instanceof Error) || error.name !== CONTROL_API_HOST_EDGE_ASSERTION_MISSING_ERROR) {
+    return false
+  }
+  if (res.headersSent) {
+    console.warn(
+      '[RPC_PROXY] suppressing duplicate terminal response (control-api authority unavailable)'
+    )
+    return true
+  }
+  res.status(503).json({ error: 'authority_unavailable' })
+  return true
 }
 
 /** The single writer of rpc-proxy's own Host authorization 403. */

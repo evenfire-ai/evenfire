@@ -23,7 +23,8 @@ export function publicApiErrorBody(
   correlationId: string,
   code: PublicApiErrorCode,
   message: string,
-  retryable: boolean
+  retryable: boolean,
+  details?: Record<string, unknown>
 ) {
   return {
     error: {
@@ -31,6 +32,7 @@ export function publicApiErrorBody(
       message,
       correlationId,
       retryable,
+      ...(details && Object.keys(details).length > 0 ? { details } : {}),
     },
   }
 }
@@ -41,11 +43,18 @@ export function sendPublicApiError(
   status: number,
   code: PublicApiErrorCode,
   message: string,
-  retryable = false
+  retryable = false,
+  details?: Record<string, unknown>
 ): void {
   res
     .status(status)
     .json(
-      publicApiErrorBody(req.correlationId ?? fallbackCorrelationId(), code, message, retryable)
+      publicApiErrorBody(
+        req.correlationId ?? fallbackCorrelationId(),
+        code,
+        message,
+        retryable,
+        details
+      )
     )
 }

@@ -84,19 +84,19 @@ and `ARGS="..."` through as flags. (`scripts/minikube/setup.sh` is an older
 compatibility path that takes only `--build`; none of the options below apply
 to it.)
 
-| Option | Default | Effect |
-| --- | --- | --- |
-| `SEED_PROFILE=minimal\|e2e` or `ARGS="--seed-profile=e2e"` | `minimal` | `minimal` is a clean install: the `admin@evenfire.local` admin and one agent, no test fixtures. `e2e` adds the E2E fixtures: a test user, `e2e-*` recipes, and demo MCP servers (placeholder credentials unless `.env` or `mcp-servers/<svc>/secret.yaml` supplies real ones). Any other value is an error. |
-| `make minikube-setup-e2e` | — | `minikube-setup SEED_PROFILE=e2e`, then, on a ghcr cluster, builds the two unpublished E2E coordinator fixtures (`make minikube-build-e2e-fixtures`). Use this rather than `--seed-profile=e2e` alone on a ghcr cluster. |
-| `IMAGE_SOURCE=ghcr\|local` or `make minikube-setup-local` | `ghcr` | `ghcr` pulls published images and renders the `minikube-ghcr` overlay. `local` builds every image from source and renders `minikube`. |
-| `MINIKUBE_IMAGE_TAG=<tag>` | committed pin | Render-time override of the ghcr tag in `deploy/components/ghcr-images/kustomization.yaml`; never committed. |
-| `SKIP_UIS=true` or `ARGS="--skip-uis"` | `false` | Skips the Control UI, Profile UI, and Desktop App image builds and the Control UI / Profile UI Deployments, by rendering `minikube-no-uis` (or `minikube-no-uis-ghcr`). Run the frontends locally with `npm run ui`. |
-| `ARGS="--skip-build"` | off | Re-deploys without acquiring images (~1 min). The overlay follows the mode recorded in `deploy/minikube/.image-manifest.json`, not `IMAGE_SOURCE`. It does not change the DB default: on an existing cluster pair it with `REUSE_DB=true` unless you want the DB rebuilt too. |
-| `REUSE_DB=true` or `ARGS="--keep-db"` | off | Keeps the existing `control-postgres-data` volume instead of rebuilding the DB. |
-| `ARGS="--reset-db"` | on | Rebuilds the DB (already the default). On a cluster that already has the volume it also needs `CONTROL_DB_RESET_PVC_UID` (see below). |
-| `ARGS="--defer-bootstrap-seed"` or `MINIKUBE_DEFER_BOOTSTRAP_SEED=true` | off | Skips the admin/user seed so the first admin is created through the Control UI setup screen (`/api/v1/admin/auth/setup`). Requires `IMAGE_SOURCE=local` and the `minimal` seed profile; `ADMIN_PASSWORD` is then not needed. |
-| `ARGS="--force-keys"` | off | Regenerates all JWT signing keys; invalidates existing tokens. |
-| `MINIKUBE_MEMORY=<MB>`, `MINIKUBE_CPUS=<n>` | `10240`, `6` | Size of the minikube VM when setup has to start it (`scripts/minikube/start.sh`). |
+| Option                                                                  | Default       | Effect                                                                                                                                                                                                                                                                                                      |
+| ----------------------------------------------------------------------- | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SEED_PROFILE=minimal\|e2e` or `ARGS="--seed-profile=e2e"`              | `minimal`     | `minimal` is a clean install: the `admin@evenfire.local` admin and one agent, no test fixtures. `e2e` adds the E2E fixtures: a test user, `e2e-*` recipes, and demo MCP servers (placeholder credentials unless `.env` or `mcp-servers/<svc>/secret.yaml` supplies real ones). Any other value is an error. |
+| `make minikube-setup-e2e`                                               | —             | `minikube-setup SEED_PROFILE=e2e`, then, on a ghcr cluster, builds the two unpublished E2E coordinator fixtures (`make minikube-build-e2e-fixtures`). Use this rather than `--seed-profile=e2e` alone on a ghcr cluster.                                                                                    |
+| `IMAGE_SOURCE=ghcr\|local` or `make minikube-setup-local`               | `ghcr`        | `ghcr` pulls published images and renders the `minikube-ghcr` overlay. `local` builds every image from source and renders `minikube`.                                                                                                                                                                       |
+| `MINIKUBE_IMAGE_TAG=<tag>`                                              | committed pin | Render-time override of the ghcr tag in `deploy/components/ghcr-images/kustomization.yaml`; never committed.                                                                                                                                                                                                |
+| `SKIP_UIS=true` or `ARGS="--skip-uis"`                                  | `false`       | Skips the Control UI, Profile UI, and Desktop App image builds and the Control UI / Profile UI Deployments, by rendering `minikube-no-uis` (or `minikube-no-uis-ghcr`). Run the frontends locally with `npm run ui`.                                                                                        |
+| `ARGS="--skip-build"`                                                   | off           | Re-deploys without acquiring images (~1 min). The overlay follows the mode recorded in `deploy/minikube/.image-manifest.json`, not `IMAGE_SOURCE`. It does not change the DB default: on an existing cluster pair it with `REUSE_DB=true` unless you want the DB rebuilt too.                               |
+| `REUSE_DB=true` or `ARGS="--keep-db"`                                   | off           | Keeps the existing `control-postgres-data` volume instead of rebuilding the DB.                                                                                                                                                                                                                             |
+| `ARGS="--reset-db"`                                                     | on            | Rebuilds the DB (already the default). On a cluster that already has the volume it also needs `CONTROL_DB_RESET_PVC_UID` (see below).                                                                                                                                                                       |
+| `ARGS="--defer-bootstrap-seed"` or `MINIKUBE_DEFER_BOOTSTRAP_SEED=true` | off           | Skips the admin/user seed so the first admin is created through the Control UI setup screen (`/api/v1/admin/auth/setup`). Requires `IMAGE_SOURCE=local` and the `minimal` seed profile; `ADMIN_PASSWORD` is then not needed.                                                                                |
+| `ARGS="--force-keys"`                                                   | off           | Regenerates all JWT signing keys; invalidates existing tokens.                                                                                                                                                                                                                                              |
+| `MINIKUBE_MEMORY=<MB>`, `MINIKUBE_CPUS=<n>`                             | `10240`, `6`  | Size of the minikube VM when setup has to start it (`scripts/minikube/start.sh`).                                                                                                                                                                                                                           |
 
 The E2E profile selects demo connectors only when `context1` is first created.
 On an existing context, setup preserves the connector selection; use Control UI
@@ -270,19 +270,19 @@ apply only when a kubeconfig context named after the profile exists: a missing
 context is allowed, because `minikube start` creates it and nothing can reach a
 cluster through it.
 
-| Action | Required commands (checked before dispatch) | Local endpoint | Profile known to minikube | Cluster identity | Other guards |
-|---|---|---|---|---|---|
-| `start` | minikube kubectl helm python3 node | yes | yes | after `minikube start` | Docker ready, ports free; an EXIT/INT/TERM trap around `minikube start` restores the global current-context if minikube moved it onto the profile, even when the start fails |
-| `status` | minikube kubectl python3 node | yes | no | when the cluster answers | |
-| `pf` | minikube kubectl python3 node curl | yes | no | required; an unreachable cluster is an error | port-forward ownership records |
-| `health` | minikube kubectl python3 node curl | yes | no | required; an unreachable cluster is an error | |
-| `pf-health` | minikube kubectl python3 node curl | as `pf`, then `health` | no | as `pf` | an EXIT trap stops the forwards it started |
-| `stop` | minikube kubectl python3 node | yes | yes | when the cluster answers | clears verified port-forward records before `minikube stop` |
-| `delete` | minikube kubectl python3 node | yes | yes | when the cluster answers | `CONFIRM_DELETE=<profile>`; clears verified records before `minikube delete` |
-| `setup` | minikube kubectl helm perl python3 node | yes | yes | no (hands the profile to `full-setup.sh`) | `CONFIRM_PROFILE=<profile>`, Docker ready; re-copies the script and deploy shims from the current tree on every run |
-| `preflight` | its own check: git minikube kubectl helm shasum | no | no | no | Docker ready, ports free |
-| `prepare-shims` | its own check: git shasum perl | no | no | no | shim symlink and rewrite checks |
-| `stop-pf` | none beyond the common ones | no | no | no | port-forward ownership records |
+| Action          | Required commands (checked before dispatch)     | Local endpoint         | Profile known to minikube | Cluster identity                             | Other guards                                                                                                                                                                 |
+| --------------- | ----------------------------------------------- | ---------------------- | ------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start`         | minikube kubectl helm python3 node              | yes                    | yes                       | after `minikube start`                       | Docker ready, ports free; an EXIT/INT/TERM trap around `minikube start` restores the global current-context if minikube moved it onto the profile, even when the start fails |
+| `status`        | minikube kubectl python3 node                   | yes                    | no                        | when the cluster answers                     |                                                                                                                                                                              |
+| `pf`            | minikube kubectl python3 node curl              | yes                    | no                        | required; an unreachable cluster is an error | port-forward ownership records                                                                                                                                               |
+| `health`        | minikube kubectl python3 node curl              | yes                    | no                        | required; an unreachable cluster is an error |                                                                                                                                                                              |
+| `pf-health`     | minikube kubectl python3 node curl              | as `pf`, then `health` | no                        | as `pf`                                      | an EXIT trap stops the forwards it started                                                                                                                                   |
+| `stop`          | minikube kubectl python3 node                   | yes                    | yes                       | when the cluster answers                     | clears verified port-forward records before `minikube stop`                                                                                                                  |
+| `delete`        | minikube kubectl python3 node                   | yes                    | yes                       | when the cluster answers                     | `CONFIRM_DELETE=<profile>`; clears verified records before `minikube delete`                                                                                                 |
+| `setup`         | minikube kubectl helm perl python3 node         | yes                    | yes                       | no (hands the profile to `full-setup.sh`)    | `CONFIRM_PROFILE=<profile>`, Docker ready; re-copies the script and deploy shims from the current tree on every run                                                          |
+| `preflight`     | its own check: git minikube kubectl helm shasum | no                     | no                        | no                                           | Docker ready, ports free                                                                                                                                                     |
+| `prepare-shims` | its own check: git shasum perl                  | no                     | no                        | no                                           | shim symlink and rewrite checks                                                                                                                                              |
+| `stop-pf`       | none beyond the common ones                     | no                     | no                        | no                                           | port-forward ownership records                                                                                                                                               |
 
 Every action also needs `git`, `awk` and `shasum` (profile resolution), and
 refuses a shared or protected profile name, a `HOST` other than `127.0.0.1`,
@@ -300,63 +300,63 @@ unknown, not a foreign match, so the recovery action may continue.
 
 **Recovery identity decision table.**
 
-| API reachability | Minikube IP | Node identity | Result |
-|---|---|---|---|
-| unreachable | not called | not called | continue profile stop or teardown |
-| reachable | fails or times out | not called | warn that identity is unobservable and continue |
-| reachable | readable | fails or times out | warn that identity is unobservable and continue |
-| reachable | readable | matches this profile | continue |
-| reachable | readable | names another profile | `BRANCH_PROFILE_CONTEXT_IDENTITY`; no records are cleared and the profile command does not run |
+| API reachability | Minikube IP        | Node identity         | Result                                                                                         |
+| ---------------- | ------------------ | --------------------- | ---------------------------------------------------------------------------------------------- |
+| unreachable      | not called         | not called            | continue profile stop or teardown                                                              |
+| reachable        | fails or times out | not called            | warn that identity is unobservable and continue                                                |
+| reachable        | readable           | fails or times out    | warn that identity is unobservable and continue                                                |
+| reachable        | readable           | matches this profile  | continue                                                                                       |
+| reachable        | readable           | names another profile | `BRANCH_PROFILE_CONTEXT_IDENTITY`; no records are cleared and the profile command does not run |
 
 **Kubeconfig read.** The context guards read the kubeconfig only; they never
 contact a cluster.
 
-| Kubeconfig state | Result |
-|---|---|
-| `kubectl config get-contexts` fails | `BRANCH_PROFILE_KUBECONFIG_UNREADABLE` |
-| no context named after the profile | the context guards pass |
-| `kubectl config view --minify --context=<profile>` fails (the context names an undefined cluster or user) | `BRANCH_PROFILE_CONTEXT_DANGLING` |
-| the context's cluster has an empty server | `BRANCH_PROFILE_CONTEXT_DANGLING` |
-| the server is not local (a public address, or a DNS name other than `localhost` and `*.minikube`) | `BRANCH_PROFILE_REMOTE_CONTEXT` |
-| the server is loopback, `localhost`, `*.minikube`, or a private or link-local IP address | the next guard runs |
+| Kubeconfig state                                                                                          | Result                                 |
+| --------------------------------------------------------------------------------------------------------- | -------------------------------------- |
+| `kubectl config get-contexts` fails                                                                       | `BRANCH_PROFILE_KUBECONFIG_UNREADABLE` |
+| no context named after the profile                                                                        | the context guards pass                |
+| `kubectl config view --minify --context=<profile>` fails (the context names an undefined cluster or user) | `BRANCH_PROFILE_CONTEXT_DANGLING`      |
+| the context's cluster has an empty server                                                                 | `BRANCH_PROFILE_CONTEXT_DANGLING`      |
+| the server is not local (a public address, or a DNS name other than `localhost` and `*.minikube`)         | `BRANCH_PROFILE_REMOTE_CONTEXT`        |
+| the server is loopback, `localhost`, `*.minikube`, or a private or link-local IP address                  | the next guard runs                    |
 
 **Profile-list decision table.** "Profile known to minikube" reads
 `minikube profile list -o json` through
 `minikube_profile_list_names` (`scripts/minikube/context-identity.sh`).
 
-| `minikube profile list -o json` | Parser status | Result |
-|---|---|---|
-| no context named after the profile | not called | proceed |
-| the command fails or times out | not called | `BRANCH_PROFILE_MINIKUBE_PROFILES_UNREADABLE` |
-| output is not `{"invalid": [...], "valid": [...]}` with a non-empty string `Name` in every entry | 2 | `BRANCH_PROFILE_MINIKUBE_PROFILES_UNREADABLE` |
-| the profile is listed as valid or invalid | 0 | proceed |
-| the profile is not listed | 1 | `BRANCH_PROFILE_UNKNOWN_MINIKUBE_PROFILE` |
+| `minikube profile list -o json`                                                                  | Parser status | Result                                        |
+| ------------------------------------------------------------------------------------------------ | ------------- | --------------------------------------------- |
+| no context named after the profile                                                               | not called    | proceed                                       |
+| the command fails or times out                                                                   | not called    | `BRANCH_PROFILE_MINIKUBE_PROFILES_UNREADABLE` |
+| output is not `{"invalid": [...], "valid": [...]}` with a non-empty string `Name` in every entry | 2             | `BRANCH_PROFILE_MINIKUBE_PROFILES_UNREADABLE` |
+| the profile is listed as valid or invalid                                                        | 0             | proceed                                       |
+| the profile is not listed                                                                        | 1             | `BRANCH_PROFILE_UNKNOWN_MINIKUBE_PROFILE`     |
 
 An unreadable list is a refusal, never an empty list.
 
 **Refusal tokens.**
 
-| Token or message | Meaning |
-|---|---|
-| `missing required command(s): <list>` | a command in the action's row above is not on `PATH`; every missing one is named |
-| `BRANCH_PROFILE_SHARED_CONTEXT` | the profile name is shared or protected |
-| `HOST must be 127.0.0.1` | branch-profile forwards bind only `127.0.0.1` |
-| `CACHE_ROOT ...` | the profile cache root is unscoped, a symlink, not a directory, or contains a control character |
-| `PROFILE_METADATA_MISSING` | `profile.env` of an existing profile is missing or unreadable; it is never regenerated |
-| `PROFILE_NOT_FOUND: explicit profile ... was never created` | `MINIKUBE_PROFILE` names a profile that does not exist and is not this branch's derived profile; `branch-profile-start` creates only the derived one |
-| `PROFILE_PORTS_MISSING`, `PROFILE_PORTS_INVALID` | `ports.env` is missing or disagrees with its port base and `HOST` |
-| `BRANCH_PROFILE_KUBECONFIG_UNREADABLE` | the kubeconfig contexts cannot be read |
-| `BRANCH_PROFILE_CONTEXT_DANGLING` | the profile's context has no resolvable cluster or no server |
-| `BRANCH_PROFILE_REMOTE_CONTEXT` | the profile's context points at a non-local API server |
-| `BRANCH_PROFILE_MINIKUBE_PROFILES_UNREADABLE` | `minikube profile list` failed or printed no readable lists |
-| `BRANCH_PROFILE_UNKNOWN_MINIKUBE_PROFILE` | a context named after the profile exists, but minikube lists no such profile |
-| `BRANCH_PROFILE_CONTEXT_IDENTITY` | strict actions refuse an unreadable identity or one that names another profile; recovery actions refuse only a readable identity that names another profile |
-| `CONTEXT_IDENTITY_UNAVAILABLE`, `CONTEXT_IDENTITY_API_INVALID` | `scripts/minikube/context-identity.sh` is missing or lacks a predicate |
-| `PORT_FORWARD_OWNER_UNAVAILABLE`, `PORT_FORWARD_OWNER_API_INVALID`, `PORT_FORWARD_OWNER_BINDING_INVALID` | `scripts/minikube/port-forward-owner.sh` is missing or incomplete, or a record would bind another host |
-| `PORT_FORWARD_OWNERSHIP_ERROR` | a port-forward process does not match its record; it is never signalled |
-| `BRANCH_PROFILE_SHIM_SYMLINK`, `BRANCH_PROFILE_SHIM_REWRITE_FAILED`, `BRANCH_PROFILE_SHIM_REWRITE_NOOP` | a shim path is a symlink or escapes the cache, or a shim rewrite failed or matched nothing |
-| `refusing delete. Re-run with CONFIRM_DELETE=<profile>` | `delete` without its confirmation |
-| `refusing setup. Re-run with CONFIRM_PROFILE=<profile>` | `setup` without its confirmation |
+| Token or message                                                                                         | Meaning                                                                                                                                                     |
+| -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `missing required command(s): <list>`                                                                    | a command in the action's row above is not on `PATH`; every missing one is named                                                                            |
+| `BRANCH_PROFILE_SHARED_CONTEXT`                                                                          | the profile name is shared or protected                                                                                                                     |
+| `HOST must be 127.0.0.1`                                                                                 | branch-profile forwards bind only `127.0.0.1`                                                                                                               |
+| `CACHE_ROOT ...`                                                                                         | the profile cache root is unscoped, a symlink, not a directory, or contains a control character                                                             |
+| `PROFILE_METADATA_MISSING`                                                                               | `profile.env` of an existing profile is missing or unreadable; it is never regenerated                                                                      |
+| `PROFILE_NOT_FOUND: explicit profile ... was never created`                                              | `MINIKUBE_PROFILE` names a profile that does not exist and is not this branch's derived profile; `branch-profile-start` creates only the derived one        |
+| `PROFILE_PORTS_MISSING`, `PROFILE_PORTS_INVALID`                                                         | `ports.env` is missing or disagrees with its port base and `HOST`                                                                                           |
+| `BRANCH_PROFILE_KUBECONFIG_UNREADABLE`                                                                   | the kubeconfig contexts cannot be read                                                                                                                      |
+| `BRANCH_PROFILE_CONTEXT_DANGLING`                                                                        | the profile's context has no resolvable cluster or no server                                                                                                |
+| `BRANCH_PROFILE_REMOTE_CONTEXT`                                                                          | the profile's context points at a non-local API server                                                                                                      |
+| `BRANCH_PROFILE_MINIKUBE_PROFILES_UNREADABLE`                                                            | `minikube profile list` failed or printed no readable lists                                                                                                 |
+| `BRANCH_PROFILE_UNKNOWN_MINIKUBE_PROFILE`                                                                | a context named after the profile exists, but minikube lists no such profile                                                                                |
+| `BRANCH_PROFILE_CONTEXT_IDENTITY`                                                                        | strict actions refuse an unreadable identity or one that names another profile; recovery actions refuse only a readable identity that names another profile |
+| `CONTEXT_IDENTITY_UNAVAILABLE`, `CONTEXT_IDENTITY_API_INVALID`                                           | `scripts/minikube/context-identity.sh` is missing or lacks a predicate                                                                                      |
+| `PORT_FORWARD_OWNER_UNAVAILABLE`, `PORT_FORWARD_OWNER_API_INVALID`, `PORT_FORWARD_OWNER_BINDING_INVALID` | `scripts/minikube/port-forward-owner.sh` is missing or incomplete, or a record would bind another host                                                      |
+| `PORT_FORWARD_OWNERSHIP_ERROR`                                                                           | a port-forward process does not match its record; it is never signalled                                                                                     |
+| `BRANCH_PROFILE_SHIM_SYMLINK`, `BRANCH_PROFILE_SHIM_REWRITE_FAILED`, `BRANCH_PROFILE_SHIM_REWRITE_NOOP`  | a shim path is a symlink or escapes the cache, or a shim rewrite failed or matched nothing                                                                  |
+| `refusing delete. Re-run with CONFIRM_DELETE=<profile>`                                                  | `delete` without its confirmation                                                                                                                           |
+| `refusing setup. Re-run with CONFIRM_PROFILE=<profile>`                                                  | `setup` without its confirmation                                                                                                                            |
 
 When a context guard refuses, the context it names may belong to another
 session or cluster: stop and ask before renaming or removing it.
@@ -443,23 +443,53 @@ Desktop App
   → rpc-proxy:8094
       validates rpc_token  (issuer=control-api, aud=rpc-proxy)
       → control-api:8090  GET /rpc/access/users/{id}/mcp-hosts/chatllm
-          ← { url: "http://chatllm.mcp-host.svc:8080", hostRef: "chatllm" }
+          ← { url: "http://chatllm.mcp-host.svc:8080", hostRef: "chatllm",
+              edgeAssertion: <RS256 JWT, aud: "evenfire-host-runtime-edge", ≤300s> }
       → chatllm:8080  GET /v1/runtime/status   ← NO Authorization header
+          x-clerum-edge-assertion: <edgeAssertion>
           x-clerum-edge-caller: rpc-proxy
           x-clerum-edge-host-ref: chatllm
           x-clerum-edge-user-id: <userId>
-          mcp-host's runtimeEdgeGuard validates the edge headers
+          x-clerum-edge-team-id / x-clerum-edge-access-scope
+          mcp-host's runtimeEdgeGuard verifies the assertion and checks that it
+          binds these headers and grants the route's scope (host:status:read)
           ← status JSON
 ```
 
 ### Critical Invariants
 
-| Invariant                    | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Same RSA key**             | `rpc-proxy-secrets.RPC_PROXY_JWT_PUBLIC_KEY` == `mcp-host-config.CLERUM_AUTH_JWT_PUBLIC_KEY` == `gfs-config.jwt-public-key` == public pair of `control-api-secrets.CONTROL_API_RPC_JWT_PRIVATE_KEY`. `scripts/minikube/generate-keys.sh` writes the two Secrets into `deploy/minikube/secrets/jwt-signing-keys.yaml`; the ConfigMap values are **not** in that manifest — `scripts/minikube/sync-auth-key.sh` copies the public key from the live `rpc-proxy-secrets` Secret into both live consumer ConfigMaps. |
-| **Token stops at rpc-proxy** | The RPC token (`aud: "rpc-proxy"`) is validated by rpc-proxy and is NOT forwarded. `/v1/runtime/*` routes on mcp-host are wrapped in `runtimeEdgeGuard`, which returns `401 Authorization is not accepted on this direct mcp-host runtime route` if an `Authorization` header is present.                                                                                                                                                                                                                        |
-| **Issuer**                   | All RPC tokens have `iss: "control-api"`. mcp-host must have `CLERUM_AUTH_JWT_ISSUER=control-api`                                                                                                                                                                                                                                                                                                                                                                                                                |
-| **Edge headers**             | `rpc-proxy/src/services/controlApiRestService.ts` returns `headers: {}` on purpose; `mcpProxyService.ts` then adds `x-clerum-edge-caller: rpc-proxy`, `x-clerum-edge-host-ref`, `x-clerum-edge-user-id`. Adding an `Authorization` header here would make every mcp-host call fail 401.                                                                                                                                                                                                                          |
+| Invariant                    | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Same RSA key**             | `rpc-proxy-secrets.RPC_PROXY_JWT_PUBLIC_KEY` == `mcp-host-config.CLERUM_AUTH_JWT_PUBLIC_KEY` == `gfs-config.jwt-public-key` == public pair of `control-api-secrets.CONTROL_API_RPC_JWT_PRIVATE_KEY`. `scripts/minikube/generate-keys.sh` writes the two Secrets into `deploy/minikube/secrets/jwt-signing-keys.yaml`; the ConfigMap values are **not** in that manifest — `scripts/minikube/sync-auth-key.sh` copies the public key from the live `rpc-proxy-secrets` Secret into both live consumer ConfigMaps.                                               |
+| **Token stops at rpc-proxy** | The RPC token (`aud: "rpc-proxy"`) is validated by rpc-proxy and is NOT forwarded. `/v1/runtime/*` routes on mcp-host are wrapped in `runtimeEdgeGuard`, which returns `401 Authorization is not accepted on this direct mcp-host runtime route` if an `Authorization` header is present.                                                                                                                                                                                                                                                                      |
+| **Issuer**                   | All RPC tokens have `iss: "control-api"`. mcp-host must have `CLERUM_AUTH_JWT_ISSUER=control-api`                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| **Edge headers**             | `rpc-proxy/src/services/mcpProxyService.ts` forwards the `edgeAssertion` that control-api returned with the Host connection as `x-clerum-edge-assertion`, and adds `x-clerum-edge-caller: rpc-proxy`, `x-clerum-edge-host-ref`, `x-clerum-edge-user-id`, `x-clerum-edge-team-id` and `x-clerum-edge-access-scope`. mcp-host refuses caller `rpc-proxy` without a valid assertion that binds those headers (`401 Missing runtime edge assertion` / `Invalid runtime edge assertion`). Adding an `Authorization` header would make every mcp-host call fail 401. |
+
+### Authenticated Proxy/Host rollout order
+
+The edge has one protocol, `signed-assertion-v1`. HCC accepts no other value for
+`CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL`, and the RPC Proxy Deployment pod
+template carries the non-secret `clerum.io/rpc-proxy-edge-protocol=signed-assertion-v1`
+cohort marker. HCC creates no Host Deployment, and moves no Host pod template onto
+the marker, until every RPC Proxy pod that is not `Succeeded` or `Failed` carries
+the marker and the Proxy Deployment has observed its current generation. A held
+Host Deployment that keeps its old pod template (only its replicas change) is
+updated without that wait. `make minikube-restart-all` and the pre-gate incremental path
+restart in that order: Proxy, cohort proof, HCC, then Hosts. Do not manually roll
+a Proxy back while Hosts still require the assertion. The supported local
+rollback wrapper restores HCC/Hosts first, waits until no Host requires the
+assertion, and only then restores the Proxy:
+
+```bash
+MINIKUBE_PROFILE=<owned-profile> HCC_TO_REVISION=<legacy-hcc-revision> \
+  RPC_PROXY_TO_REVISION=<proxy-revision> make minikube-rollback-rpc-proxy
+```
+
+The wrapper uses the branch-owned mutation lease, explicit Kubernetes context,
+bounded rollout waits, and fails closed if a strict Host Deployment or Pod is
+still present. The Proxy revision it restores may carry the marker or not.
+Production GCP rollout/rollback orchestration is owned by the
+separate `keyper-labs/evenfire-infra` repository.
 
 ### GFS Upload v2 local/T2 profile
 
@@ -530,13 +560,19 @@ CLERUM_AUTH_JWT_PUBLIC_KEY    = <same public key as rpc-proxy-secrets>
 ```
 
 > **Where does mcp-host still validate a bearer token?**
-> Only on the two runtime routes that are not behind `runtimeEdgeGuard`:
-> `GET /v1/runtime/sessions/search` (scope `host:session:read`) and
-> `POST /v1/runtime/compact` (scope `host:compaction:invoke`). These use
-> `requireScope`, which verifies an RS256 token issued by control-api with
-> `aud: "rpc-proxy"` — hence the audience value above. Every other
-> `/v1/runtime/*` route is edge-header authenticated and **rejects** an
-> `Authorization` header with 401.
+> Only on `POST /v1/runtime/compact` (scope `host:compaction:invoke`), the one
+> runtime route that is not behind `runtimeEdgeGuard`. It uses `requireScope`,
+> which verifies an RS256 token issued by control-api with `aud: "rpc-proxy"` —
+> hence the audience value above. `GET /v1/runtime/sessions/search` is no longer
+> a bearer route: it accepts only caller `rpc-proxy` with declared V2 authority
+> and answers anything else with `401 V2 runtime authority required`. In this
+> release the Host then refuses every request that carries V2 authority (logged
+> as `runtime_edge_assertion_refused`, reason `v2-refused`), so the route answers
+> no search until a later release accepts V2 edge assertions. The
+> `clerum__session_search` tool is not affected. Every other
+> `/v1/runtime/*` route is edge authenticated and **rejects** an `Authorization`
+> header with 401. The edge assertion is verified with the same public key and
+> issuer, but with its own audience, `evenfire-host-runtime-edge`.
 
 ---
 
@@ -547,17 +583,27 @@ The Desktop App maintains an SSE stream to rpc-proxy to receive agent status upd
 ```
 Desktop App opens SSE stream with token T1 (TTL=300s)
   rpc-proxy validates T1 once, then resolves and captures the host connection
-    (url + x-clerum-edge-* headers — the RPC token itself is NOT forwarded)
+    (url, edge assertion and x-clerum-edge-* headers — the RPC token itself is
+     NOT forwarded; the assertion expires no later than the RPC token)
   Every 3s: forwardHostStatus(host) → GET chatllm:8080/v1/runtime/status
 
-  RECOVERY MECHANISM (since commit c06c6a6):
+  NORMAL ROTATION (before each poll):
+    The stream does not renew the held edge assertion. When the assertion is
+    within RPC_PROXY_UPSTREAM_TIMEOUT_MS + 2s of its exp (10s with the 8s
+    default, 62s with the minikube overlay's 60000):
+      no poll is sent; cleanup("auth-expired") → stream closed with SSE event
+      → Desktop App receives "auth-expired", clears its RPC token cache
+      → reconnects with a new token T2 → cycle continues cleanly
+    With a fresh token the cycle is about 290s by default, about 238s on
+    minikube. No poll reaches the Host with an expired assertion.
+
+  RECOVERY MECHANISM (since commit c06c6a6), for a Host that refuses polls:
     If the upstream host starts rejecting polls with 401/403:
     consecutiveAuthFailures++
     After 3 consecutive auth failures (~9s):
       cleanup("auth-expired") → stream closed with SSE event
-      → Desktop App receives "closed", calls getOrIssue() with expired token
-      → getOrIssue() detects expiration → issueRpcToken() → new token T2
-      → Opens new stream with T2 → cycle continues cleanly
+      → Desktop App receives "auth-expired", clears its RPC token cache
+      → reconnects with a new token T2
 ```
 
 **Without the fix**: the stream waited for the 60s idle timeout (20 polls × 3s) before closing.
@@ -624,9 +670,8 @@ docker build -t ghcr.io/evenfire-ai/rpc-proxy:<tag> rpc-proxy/
 #    local mode:
 docker build -t clerum/rpc-proxy:test rpc-proxy/
 
-# 4. Restart deployment
-kubectl rollout restart deployment/rpc-proxy -n rpc-proxy --context clerum-test
-kubectl rollout status deployment/rpc-proxy -n rpc-proxy --timeout=60s
+# 4. Restart through the ordered edge-protocol coordinator
+MINIKUBE_PROFILE=clerum-test make minikube-restart-deploy SVC=rpc-proxy NS=rpc-proxy
 ```
 
 > A multi-node profile (`MINIKUBE_MULTI_NODE=true`) has no shared daemon to
@@ -637,7 +682,7 @@ kubectl rollout status deployment/rpc-proxy -n rpc-proxy --timeout=60s
 
 ```bash
 kubectl apply -f deploy/overlays/minikube/configmaps/rpc-proxy-config.yaml --context clerum-test
-kubectl rollout restart deployment/rpc-proxy -n rpc-proxy --context clerum-test
+MINIKUBE_PROFILE=clerum-test make minikube-restart-deploy SVC=rpc-proxy NS=rpc-proxy
 ```
 
 > **Important**: Pods read ConfigMaps **at startup** (via `envFrom`).
@@ -1101,17 +1146,21 @@ make minikube-logs SVC=control-api NS=control-plane
 
 ### End-to-End Auth Test From Inside the Cluster
 
-`/v1/runtime/status` is edge-header authenticated, not bearer authenticated: it
-**rejects** an `Authorization` header with 401. Reproduce what rpc-proxy sends:
+`/v1/runtime/status` is edge authenticated, not bearer authenticated: it
+**rejects** an `Authorization` header with 401, and caller `rpc-proxy` needs an
+edge assertion that only control-api can sign. Test the path end to end through
+rpc-proxy with an RPC token instead of calling the Host directly:
 
 ```bash
-kubectl exec -n mcp-host deployment/chatllm -- \
-  wget -qO- \
-  --header="x-clerum-edge-caller: rpc-proxy" \
-  --header="x-clerum-edge-host-ref: chatllm" \
-  --header="x-clerum-edge-user-id: test-user" \
-  http://chatllm.mcp-host.svc.cluster.local:8080/v1/runtime/status
+curl -sS -H "Authorization: Bearer <rpc_token>" \
+  "$RPC_PROXY_URL/api/v1/rpc/hosts/chatllm/status"
 ```
+
+`RPC_PROXY_URL` is the base URL of your rpc-proxy port-forward.
+
+A direct call to the Host with only the `x-clerum-edge-*` headers of caller
+`rpc-proxy` returns `401 Missing runtime edge assertion`, which shows the guard is
+active.
 
 `rpc-proxy-secrets` holds only public/verification material plus the control-api
 service token (`RPC_PROXY_JWT_PUBLIC_KEY`, `RPC_PROXY_CONTROL_API_SERVICE_TOKEN`).
@@ -1207,27 +1256,29 @@ make minikube-restart-all                 # Restart all pods to pick up new keys
 
 ## Known Issues and Solutions
 
-| Symptom                                                                      | Cause                                                                                                                                                                                                                                                                              | Solution                                                                                                                                                                         |
-| ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `401: "Invalid token"` from chatllm                                          | Only the two bearer routes (`GET /v1/runtime/sessions/search`, `POST /v1/runtime/compact`) can emit this — `requireScope` rejected the RS256 token (expired, wrong issuer, or wrong audience). The SSE poll of `/v1/runtime/status` carries no bearer token and cannot produce it. | Verify `CLERUM_AUTH_JWT_ISSUER=control-api` and `CLERUM_AUTH_JWT_AUDIENCE=rpc-proxy` in mcp-host-config, and that the public key matches. Restart chatllm.                       |
-| `401: "Authorization is not accepted on this direct mcp-host runtime route"` | Something added an `Authorization` header to a `/v1/runtime/*` call. `controlApiRestService.ts` returns `headers: {}` on purpose                                                                                                                                                   | Do not forward the RPC token to mcp-host. Runtime calls must carry only the `x-clerum-edge-*` headers                                                                            |
-| `401: "Missing runtime edge caller context"` from chatllm                    | Call reached mcp-host without a valid `x-clerum-edge-caller` (must be `rpc-proxy`, `channel-reader` or `workflow-approval-request-reader`)                                                                                                                                         | Call through rpc-proxy instead of hitting mcp-host directly                                                                                                                      |
-| `401: "Invalid token"` in rpc-proxy when opening stream                      | Session token expired in Desktop App                                                                                                                                                                                                                                               | Close and reopen the app, do logout/login                                                                                                                                        |
-| `403: "Forbidden: user cannot access this host"`                             | hostRef does not match what is authorized in control-api, or the Host CRD does not exist                                                                                                                                                                                           | Verify `kubectl get host chatllm -n mcp-host`, verify host assignment to team                                                                                                    |
-| Pod in `ImagePullBackOff`                                                    | The cluster does not hold an image it was told to run                                                                                                                                                                                                                              | `make minikube-verify-images` to see the mode and the missing refs, then `make minikube-pull-images` (ghcr) or `make minikube-build-images` (local). See the section above.      |
-| Port forward dropped after pod restart                                       | Kubernetes closes the tunnel when the pod restarts                                                                                                                                                                                                                                 | `make minikube-pf-desktop`                                                                                                                                                       |
-| `409 Conflict` on first setup                                                | Previous data in postgres                                                                                                                                                                                                                                                          | `make minikube-db-reset` with `CONTROL_DB_RESET_PVC_UID` set (see Restart With Database Wipe)                                                                                    |
-| SSE stream closes with `"auth-expired"`                                      | mcp-host rejected 3 consecutive `/v1/runtime/status` polls with 401/403. Those polls carry only `x-clerum-edge-*` headers (no bearer token), so this is an edge-guard/host-access rejection, not RPC-token expiry.                                                                 | The Desktop App clears its token cache and reconnects automatically. If it repeats, check chatllm logs for `Missing runtime edge caller context` / `Runtime edge host mismatch`. |
-| **Workflow** — `WRC returned 404 on GET status`                              | Stale rollout, old WRC, or a legacy recipe CRD outside `sandbox-recipes`                                                                                                                                                                                                           | Run the clean pre-gate sync, verify `kubectl get workflowrecipes -n sandbox-recipes`, and delete any legacy `workflowrecipes` in `mcp-server`.                                   |
-| **Workflow** — `Failed to connect to MCP servers`                            | NP-01: incorrect egress label (`{workloadId}` instead of `{recipeName}-{workloadId}`) or NP-02: missing ingress in `mcp-server`                                                                                                                                                    | List the recipe's NPs with `kubectl get netpol -n sandbox-recipes` and `-n mcp-server`. Reset workflow.                                                                          |
-| **Workflow** — step aborts early with `AbortError` on `/execute`             | The step's own timeout elapsed. `/execute` is aborted at `timeoutSeconds * 1000 + 5000` ms (`packages/workflow-runtime-core/src/mcp-host-client/client.ts`)                                                                                                                        | Raise the step's `timeoutSeconds` (max 5400) or `MCP_HOST_STEP_TIMEOUT_SECONDS`; the buffer on top of the step timeout is only 5s.                                               |
-| **Workflow** — step timeout at 300s (no explicit error)                      | NP-03: missing egress NP for external LLM (ports 443/80)                                                                                                                                                                                                                           | Reset workflow + verify NP `{name}-mcp-host-to-llm-api` exists in `sandbox-recipes`.                                                                                             |
-| **Workflow** — `401` in coordinator when reporting status                    | Coordinator JWT token expired (WRC restarted or token TTL expired)                                                                                                                                                                                                                 | Delete Secret `wf-{name}-coordinator-token` + pods + reset status. See "Full Workflow Reset" section.                                                                            |
-| **Workflow** — CRD phase stuck on `deploying`                                | Bug fixed in `workflowReconciler.ts`. Ensure updated WRC image.                                                                                                                                                                                                                    | `kubectl rollout restart deployment/workflow-recipes -n control-plane`                                                                                                           |
-| **Workflow** — `{{inputs.topic}}` in instruction (literal)                   | The reconciler did not execute `resolveInputs()` before the early return                                                                                                                                                                                                           | Updated WRC image fixes this. Delete workflow ConfigMap + reset.                                                                                                                 |
-| **Workflow** — step does not receive data from previous step                 | Missing `{{stepId:output}}` in the instruction (common in old templates)                                                                                                                                                                                                           | Edit the step instruction in the CRD. `dependsOn` does not inject data.                                                                                                          |
-| `field is immutable` on PVC when applying manifests                          | `storageRequest` changed in manifest for existing PVC                                                                                                                                                                                                                              | `bash scripts/minikube/ensure-pvcs.sh` before `kubectl apply`                                                                                                                    |
-| `clerum-wrc-public-key not found` in coordinator logs                        | Public key ConfigMap does not exist in `sandbox-recipes`                                                                                                                                                                                                                           | `FORCE_REGEN=true make minikube-gen-keys` — plain `minikube-gen-keys` skips (and writes nothing) once `control-api-secrets` exists                                               |
+| Symptom                                                                                   | Cause                                                                                                                                                                                                                                                                                                                                                     | Solution                                                                                                                                                                                                                                                            |
+| ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `401: "Invalid token"` from chatllm                                                       | Only the bearer route `POST /v1/runtime/compact` can emit this — `requireScope` rejected the RS256 token (expired, wrong issuer, or wrong audience). The SSE poll of `/v1/runtime/status` carries no bearer token and cannot produce it.                                                                                                                  | Verify `CLERUM_AUTH_JWT_ISSUER=control-api` and `CLERUM_AUTH_JWT_AUDIENCE=rpc-proxy` in mcp-host-config, and that the public key matches. Restart chatllm.                                                                                                          |
+| `401: "Missing runtime edge assertion"` / `"Invalid runtime edge assertion"` from chatllm | A caller `rpc-proxy` request reached the Host without the `x-clerum-edge-assertion` header, or with one that does not verify: expired, signed with another key, wrong issuer or audience, a scope that does not cover the route, clear headers that differ from its claims, or an `iat` more than 5 seconds ahead of the Host's clock.                    | Call through rpc-proxy instead of hitting mcp-host directly. If rpc-proxy itself gets it, check that `CLERUM_AUTH_JWT_PUBLIC_KEY` matches `CONTROL_API_RPC_JWT_PRIVATE_KEY` (`make minikube-sync-auth-key`).                                                        |
+| `401: "Authorization is not accepted on this direct mcp-host runtime route"`              | Something added an `Authorization` header to a `/v1/runtime/*` call. `controlApiRestService.ts` returns `headers: {}` on purpose                                                                                                                                                                                                                          | Do not forward the RPC token to mcp-host. Runtime calls must carry only the `x-clerum-edge-*` headers                                                                                                                                                               |
+| `401: "Missing runtime edge caller context"` from chatllm                                 | Call reached mcp-host without a valid `x-clerum-edge-caller` (must be `rpc-proxy`, `channel-reader` or `workflow-approval-request-reader`)                                                                                                                                                                                                                | Call through rpc-proxy instead of hitting mcp-host directly                                                                                                                                                                                                         |
+| `401: "Missing authenticated rpc-proxy service context"` from chatllm                     | The request declared V2 runtime authority (`x-clerum-edge-action-context`) with a caller other than `rpc-proxy`. Only rpc-proxy may declare V2 authority.                                                                                                                                                                                                 | Route the call through rpc-proxy.                                                                                                                                                                                                                                   |
+| `401: "Invalid token"` in rpc-proxy when opening stream                                   | Session token expired in Desktop App                                                                                                                                                                                                                                                                                                                      | Close and reopen the app, do logout/login                                                                                                                                                                                                                           |
+| `403: "Forbidden: user cannot access this host"`                                          | hostRef does not match what is authorized in control-api, or the Host CRD does not exist                                                                                                                                                                                                                                                                  | Verify `kubectl get host chatllm -n mcp-host`, verify host assignment to team                                                                                                                                                                                       |
+| Pod in `ImagePullBackOff`                                                                 | The cluster does not hold an image it was told to run                                                                                                                                                                                                                                                                                                     | `make minikube-verify-images` to see the mode and the missing refs, then `make minikube-pull-images` (ghcr) or `make minikube-build-images` (local). See the section above.                                                                                         |
+| Port forward dropped after pod restart                                                    | Kubernetes closes the tunnel when the pod restarts                                                                                                                                                                                                                                                                                                        | `make minikube-pf-desktop`                                                                                                                                                                                                                                          |
+| `409 Conflict` on first setup                                                             | Previous data in postgres                                                                                                                                                                                                                                                                                                                                 | `make minikube-db-reset` with `CONTROL_DB_RESET_PVC_UID` set (see Restart With Database Wipe)                                                                                                                                                                       |
+| SSE stream closes with `"auth-expired"`                                                   | Normal rotation: rpc-proxy ends the stream before the held edge assertion expires (`RPC_PROXY_UPSTREAM_TIMEOUT_MS` + 2 s before `exp`), about every 290 s by default, about 238 s on minikube. Or mcp-host refused 3 consecutive `/v1/runtime/status` polls with 401/403. Polls carry the edge assertion and `x-clerum-edge-*` headers (no bearer token). | The Desktop App clears its token cache and reconnects automatically. If it repeats without `status` in between, check chatllm logs for `runtime_edge_assertion_refused` (with its `reason`), `Missing runtime edge caller context` or `Runtime edge host mismatch`. |
+| **Workflow** — `WRC returned 404 on GET status`                                           | Stale rollout, old WRC, or a legacy recipe CRD outside `sandbox-recipes`                                                                                                                                                                                                                                                                                  | Run the clean pre-gate sync, verify `kubectl get workflowrecipes -n sandbox-recipes`, and delete any legacy `workflowrecipes` in `mcp-server`.                                                                                                                      |
+| **Workflow** — `Failed to connect to MCP servers`                                         | NP-01: incorrect egress label (`{workloadId}` instead of `{recipeName}-{workloadId}`) or NP-02: missing ingress in `mcp-server`                                                                                                                                                                                                                           | List the recipe's NPs with `kubectl get netpol -n sandbox-recipes` and `-n mcp-server`. Reset workflow.                                                                                                                                                             |
+| **Workflow** — step aborts early with `AbortError` on `/execute`                          | The step's own timeout elapsed. `/execute` is aborted at `timeoutSeconds * 1000 + 5000` ms (`packages/workflow-runtime-core/src/mcp-host-client/client.ts`)                                                                                                                                                                                               | Raise the step's `timeoutSeconds` (max 5400) or `MCP_HOST_STEP_TIMEOUT_SECONDS`; the buffer on top of the step timeout is only 5s.                                                                                                                                  |
+| **Workflow** — step timeout at 300s (no explicit error)                                   | NP-03: missing egress NP for external LLM (ports 443/80)                                                                                                                                                                                                                                                                                                  | Reset workflow + verify NP `{name}-mcp-host-to-llm-api` exists in `sandbox-recipes`.                                                                                                                                                                                |
+| **Workflow** — `401` in coordinator when reporting status                                 | Coordinator JWT token expired (WRC restarted or token TTL expired)                                                                                                                                                                                                                                                                                        | Delete Secret `wf-{name}-coordinator-token` + pods + reset status. See "Full Workflow Reset" section.                                                                                                                                                               |
+| **Workflow** — CRD phase stuck on `deploying`                                             | Bug fixed in `workflowReconciler.ts`. Ensure updated WRC image.                                                                                                                                                                                                                                                                                           | `kubectl rollout restart deployment/workflow-recipes -n control-plane`                                                                                                                                                                                              |
+| **Workflow** — `{{inputs.topic}}` in instruction (literal)                                | The reconciler did not execute `resolveInputs()` before the early return                                                                                                                                                                                                                                                                                  | Updated WRC image fixes this. Delete workflow ConfigMap + reset.                                                                                                                                                                                                    |
+| **Workflow** — step does not receive data from previous step                              | Missing `{{stepId:output}}` in the instruction (common in old templates)                                                                                                                                                                                                                                                                                  | Edit the step instruction in the CRD. `dependsOn` does not inject data.                                                                                                                                                                                             |
+| `field is immutable` on PVC when applying manifests                                       | `storageRequest` changed in manifest for existing PVC                                                                                                                                                                                                                                                                                                     | `bash scripts/minikube/ensure-pvcs.sh` before `kubectl apply`                                                                                                                                                                                                       |
+| `clerum-wrc-public-key not found` in coordinator logs                                     | Public key ConfigMap does not exist in `sandbox-recipes`                                                                                                                                                                                                                                                                                                  | `FORCE_REGEN=true make minikube-gen-keys` — plain `minikube-gen-keys` skips (and writes nothing) once `control-api-secrets` exists                                                                                                                                  |
 
 ---
 
@@ -1248,11 +1299,8 @@ make minikube-setup ARGS="--force-keys"
 `make minikube-sync-auth-key`. **After regenerating keys**, restart the consumers:
 
 ```bash
-# Restart all pods that use the keys:
-kubectl rollout restart deployment/rpc-proxy -n rpc-proxy
-kubectl rollout restart deployment/chatllm -n mcp-host
-kubectl rollout restart deployment/control-api -n control-plane
-kubectl rollout restart deployment/external-rest-api -n profiles
+# Restart through the ordered edge-protocol coordinator and restart other services:
+MINIKUBE_PROFILE=clerum-test make minikube-restart-all
 ```
 
 The chained auth-key sync restarts the GFSC writer and reader itself when their

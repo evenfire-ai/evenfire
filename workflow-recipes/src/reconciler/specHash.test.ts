@@ -49,10 +49,10 @@ describe('computeSpecHash', () => {
 
   it('changes when the spec changes', () => {
     const a = {
-      spec: { replicas: 1, template: { spec: { containers: [{ image: 'nginx:1.30.6-alpine' }] } } },
+      spec: { replicas: 1, template: { spec: { containers: [{ image: 'nginx:1.30.7-alpine' }] } } },
     }
     const b = {
-      spec: { replicas: 1, template: { spec: { containers: [{ image: 'nginx:1.31.8-alpine' }] } } },
+      spec: { replicas: 1, template: { spec: { containers: [{ image: 'nginx:1.31.9-alpine' }] } } },
     }
     expect(computeSpecHash(a)).not.toBe(computeSpecHash(b))
   })

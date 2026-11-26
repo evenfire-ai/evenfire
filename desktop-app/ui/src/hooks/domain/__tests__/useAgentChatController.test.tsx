@@ -35,6 +35,10 @@ import type {
   ComposerImageAttachment,
   ReadyComposerFileAttachment,
 } from '../../../uiTypes'
+import {
+  fileView,
+  suggestedCandidate,
+} from '../../__tests__/__fixtures__/tabReferenceSuggestionFixtures'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -752,6 +756,256 @@ describe('useAgentChatController — characterization (D.0)', () => {
         expect(transport.setApprovalMode).toHaveBeenCalledWith('agent-x', chatId, 'manual')
         expect(readHostApprovalMode('agent-x', chatId).firstSendMode).toBeNull()
       })
+
+      it('reads the new session after the first send’s ack, so the label shows the mode the Host runs', async () => {
+        clerum.rpc.invokeHostMessage.mockResolvedValueOnce({ taskId: 'task-abc' })
+        clerum.rpc.getTaskResult.mockResolvedValue({ response: 'ok' })
+        // The Host stores the pick and runs it capped by its manual ceiling.
+        clerum.rpc.loadSessionMessages.mockImplementation(
+          async (_hostRef: string, agent: string, chatId: string) => ({
+            agent,
+            chatId,
+            state: 'idle',
+            turns: [],
+            approvalMode: 'allow_all',
+            modeCeiling: 'manual',
+            channelCap: 'allow_all',
+            effectiveApprovalMode: 'manual',
+            shellClassifierAvailable: true,
+          })
+        )
+        const transport = approvalTransport()
+        const { result } = renderController()
+        await settleMount()
+        await act(async () => {
+          await selectHostApprovalMode(transport, 'agent-x', null, 'allow_all')
+        })
+
+        const sendPromise = result.current.handleSendAgentMessage('first message')
+        await waitForProgressHandler('task-abc')
+        const chatId = sentThreadId()!
+        expect(clerum.rpc.invokeHostMessage.mock.calls[0]?.[1]).toMatchObject({
+          approvalMode: 'allow_all',
+        })
+
+        await waitFor(() =>
+          expect(readHostApprovalMode('agent-x', chatId).effectiveMode).toBe('manual')
+        )
+        expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+          'agent-x',
+          'agent-x',
+          chatId,
+          undefined,
+          { limit: 1 }
+        )
+        expect(readHostApprovalMode('agent-x', chatId).label).toBeNull()
+        expect(readHostApprovalMode('agent-x', chatId).storedMode).toBe('allow_all')
+        expect(readHostApprovalMode('agent-x', chatId).modeLimit).toBe('manual')
+
+        await act(async () => {
+          clerum.emitTaskProgress('task-abc', {
+            type: 'terminal',
+            data: { taskId: 'task-abc', status: 'completed' },
+          })
+        })
+        await act(async () => {
+          await sendPromise
+        })
+      })
+
+      describe('the read after the first send’s ack (R36)', () => {
+        /** The Host's answer for the new chat: it stores and runs the held Allow all. */
+        const heldAllowAllSession = (agent: string, chatId: string) => ({
+          agent,
+          chatId,
+          state: 'idle',
+          turns: [],
+          approvalMode: 'allow_all',
+          modeCeiling: 'allow_all',
+          channelCap: 'allow_all',
+          effectiveApprovalMode: 'allow_all',
+          shellClassifierAvailable: true,
+        })
+
+        /**
+         * Holds the one-turn read of the chat the first send creates; every
+         * other read answers with no approval fields.
+         */
+        function holdReadAfterAck() {
+          const read = deferred<ReturnType<typeof heldAllowAllSession>>()
+          let held = false
+          clerum.rpc.loadSessionMessages.mockImplementation(
+            async (
+              _hostRef: string,
+              _agent: string,
+              chatId: string,
+              _hostRefs?: unknown,
+              query?: { limit?: number }
+            ) => {
+              if (!held && chatId === sentThreadId() && query?.limit === 1) {
+                held = true
+                return read.promise
+              }
+              return { agent: '', chatId: '', turns: [] }
+            }
+          )
+          return read
+        }
+
+        async function sendHeldAllowAll(taskId: string) {
+          clerum.rpc.invokeHostMessage.mockResolvedValueOnce({ taskId })
+          clerum.rpc.getTaskResult.mockResolvedValue({ response: 'ok' })
+          const read = holdReadAfterAck()
+          const transport = approvalTransport()
+          const controller = renderController()
+          await settleMount()
+          await act(async () => {
+            await selectHostApprovalMode(transport, 'agent-x', null, 'allow_all')
+          })
+          const sendPromise = controller.result.current.handleSendAgentMessage('first message')
+          await waitForProgressHandler(taskId)
+          const chatId = sentThreadId()!
+          await waitFor(() =>
+            expect(clerum.rpc.loadSessionMessages).toHaveBeenCalledWith(
+              'agent-x',
+              'agent-x',
+              chatId,
+              undefined,
+              { limit: 1 }
+            )
+          )
+          const finishSend = async () => {
+            await act(async () => {
+              clerum.emitTaskProgress(taskId, {
+                type: 'terminal',
+                data: { taskId, status: 'completed' },
+              })
+            })
+            await act(async () => {
+              await sendPromise
+            })
+          }
+          return { controller, transport, read, chatId, finishSend }
+        }
+
+        it('keeps a pick that lands while the read is in flight', async () => {
+          const { transport, read, chatId, finishSend } = await sendHeldAllowAll('task-pick')
+          expect(readHostApprovalMode('agent-x', chatId).label).toBe('Allow all')
+
+          // The pick starts after the read left and is answered before it.
+          transport.setApprovalMode.mockResolvedValueOnce(approvalSnapshot('manual'))
+          let accepted: boolean | undefined
+          await act(async () => {
+            accepted = await selectHostApprovalMode(transport, 'agent-x', chatId, 'manual')
+          })
+          expect(accepted).toBe(true)
+          expect(readHostApprovalMode('agent-x', chatId).label).toBeNull()
+
+          // The Host answered the read before the PATCH landed.
+          await act(async () => {
+            read.resolve(heldAllowAllSession('agent-x', chatId))
+            await new Promise(resolve => setTimeout(resolve, 0))
+          })
+
+          expect(readHostApprovalMode('agent-x', chatId).storedMode).toBe('manual')
+          expect(readHostApprovalMode('agent-x', chatId).label).toBeNull()
+          await finishSend()
+        })
+
+        it('drops the read when the auth scope changes while it is in flight', async () => {
+          const { controller, read, chatId, finishSend } = await sendHeldAllowAll('task-scope')
+          await finishSend()
+          expect(readHostApprovalMode('agent-x', chatId).label).toBe('Allow all')
+
+          // Another team: the store starts over and the same ids name its chat.
+          controller.rerender({ currentTeamId: 'team-after', chatAuthorityTeamId: 'team-after' })
+          await waitFor(() => expect(readHostApprovalMode('agent-x', chatId).label).toBeNull())
+
+          await act(async () => {
+            read.resolve(heldAllowAllSession('agent-x', chatId))
+            await new Promise(resolve => setTimeout(resolve, 0))
+          })
+
+          const view = readHostApprovalMode('agent-x', chatId)
+          expect(view.storedMode).toBe('manual')
+          expect(view.label).toBeNull()
+          expect(view.modeLimit).toBeNull()
+        })
+      })
+
+      it('later messages carry no mode and do not lock the picker once the first send is acknowledged', async () => {
+        clerum.rpc.invokeHostMessage.mockResolvedValueOnce({ taskId: 'task-first' })
+        clerum.rpc.getTaskResult.mockResolvedValue({ status: 'completed', response: 'ok' })
+        // The read after the ack carries no approval fields here, so only the
+        // ack's confirmation can mark the chat's row as known.
+        clerum.rpc.loadSessionMessages.mockResolvedValue({ agent: '', chatId: '', turns: [] })
+        const transport = approvalTransport()
+        const { result } = renderController()
+        await settleMount()
+        await act(async () => {
+          await selectHostApprovalMode(transport, 'agent-x', null, 'allow_all')
+        })
+
+        const firstSend = result.current.handleSendAgentMessage('first message')
+        await waitForProgressHandler('task-first')
+        const chatId = sentThreadId()!
+        expect(clerum.rpc.invokeHostMessage.mock.calls[0]?.[1]).toMatchObject({
+          approvalMode: 'allow_all',
+        })
+        await act(async () => {
+          clerum.emitTaskProgress('task-first', {
+            type: 'terminal',
+            data: { taskId: 'task-first', status: 'completed' },
+          })
+        })
+        await act(async () => {
+          await firstSend
+        })
+        expect(readHostApprovalMode('agent-x', chatId).firstSendMode).toBeNull()
+        expect(result.current.activeChatId).toBe(chatId)
+
+        const second = deferred<{ taskId: string }>()
+        clerum.rpc.invokeHostMessage.mockImplementationOnce(() => second.promise)
+        // The chat takes a new message once the first task's reply is in and
+        // the chat is idle again.
+        await waitFor(() =>
+          expect(result.current.chatMessages.map(message => message.role)).toEqual([
+            'user',
+            'assistant',
+          ])
+        )
+        await waitFor(() =>
+          expect(result.current.sessionStateByChatKey[makeTaskKey('agent-x', chatId)]?.state).toBe(
+            'idle'
+          )
+        )
+        const secondSend = result.current.handleSendAgentMessage('second message')
+        await waitFor(() => expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(2))
+
+        const secondRequest = clerum.rpc.invokeHostMessage.mock.calls[1]?.[1] as Record<
+          string,
+          unknown
+        >
+        expect(secondRequest.threadId).toBe(chatId)
+        expect(secondRequest.content).toBe('second message')
+        expect(secondRequest).not.toHaveProperty('approvalMode')
+        // The picker stays usable while the second message is in flight.
+        expect(readHostApprovalMode('agent-x', chatId).firstSendInFlight).toBe(false)
+
+        await act(async () => {
+          second.resolve({ taskId: 'task-second' })
+        })
+        await waitForProgressHandler('task-second')
+        await act(async () => {
+          clerum.emitTaskProgress('task-second', {
+            type: 'terminal',
+            data: { taskId: 'task-second', status: 'completed' },
+          })
+        })
+        await act(async () => {
+          await secondSend
+        })
+      })
     })
 
     it('4.5 surfaces a failed terminal as an error assistant message', async () => {
@@ -1263,7 +1517,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
       const { result, spies } = renderController()
       await settleMount()
 
-      const sendPromise = result.current.handleSendAgentMessage('q1').catch(() => undefined)
+      await act(async () => {
+        await result.current.handleSendAgentMessage('q1')
+      })
       await waitForProgressHandler('task-abc')
 
       // First stream loss → reconcile → rejoin (re-subscribes the SSE).
@@ -1325,7 +1581,6 @@ describe('useAgentChatController — characterization (D.0)', () => {
       )
       expect(spies.pushToast).not.toHaveBeenCalledWith(expect.stringContaining('failed'), 'error')
       expect(result.current.failedAgentSend).toBeNull()
-      await sendPromise
     })
 
     it('SR-7 renders the durable failed task result (budget deny) on stream loss with no session turn', async () => {
@@ -1354,7 +1609,9 @@ describe('useAgentChatController — characterization (D.0)', () => {
       const { result, spies } = renderController()
       await settleMount()
 
-      const sendPromise = result.current.handleSendAgentMessage('hola').catch(() => undefined)
+      await act(async () => {
+        await result.current.handleSendAgentMessage('hola')
+      })
       await waitForProgressHandler('task-abc')
       await act(async () => {
         clerum.emitTaskProgress('task-abc', {
@@ -1400,7 +1657,6 @@ describe('useAgentChatController — characterization (D.0)', () => {
       expect(
         Object.values(result.current.sessionStateByChatKey).some(s => s.state === 'processing')
       ).toBe(false)
-      await sendPromise
     })
 
     it('SR-8 renders a durable success reply with no session turn on stream loss', async () => {
@@ -2739,6 +2995,7 @@ describe('sendAgentMessage — per-message limits for documents (#678)', () => {
       composerNonImageShareBytes({
         content: request.content,
         fileReferences: request.fileReferences,
+        locationReferences: [],
         hostRef: 'agent-x',
         files: [{ filename: 'doc.txt' }],
         images: [],
@@ -2777,5 +3034,66 @@ describe('sendAgentMessage — per-message limits for documents (#678)', () => {
     expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
     const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as { content: string }
     expect(request.content).toHaveLength(Math.floor(2.9 * MIB))
+  })
+})
+
+describe('sendAgentMessage — a suggestion accepted while the send is prepared', () => {
+  it('keeps the file suggested during the user-turn write in the composer and out of the request', async () => {
+    const candidate = await suggestedCandidate(await fileView(7, 'report.md'))
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-abc' })
+    clerum.rpc.getTaskResult.mockResolvedValue({ response: 'ok' })
+    // Hold the store write of the outgoing turn (the last await before the
+    // send marks itself as sending), then let it reach the real ChatStore.
+    const userTurnWrite = deferred<void>()
+    const writeToStore = clerum.chat.upsertMessages.getMockImplementation()!
+    clerum.chat.upsertMessages.mockImplementation(
+      async (agentRef: string, chatId: string, messages: Array<{ role?: string }>) => {
+        if (messages[0]?.role === 'user') await userTurnWrite.promise
+        return writeToStore(agentRef, chatId, messages)
+      }
+    )
+    const { result } = renderController()
+    await settleMount()
+
+    const sendPromise = result.current.handleSendAgentMessage('summarize this')
+    await waitFor(() => expect(clerum.chat.upsertMessages).toHaveBeenCalledTimes(1))
+    // The composer is still open to the suggestion chip at this point.
+    expect(result.current.agentSending).toBe(false)
+    let outcome: string | undefined
+    act(() => {
+      outcome = result.current.addSuggestedFileReference(candidate)
+    })
+    expect(outcome).toBe('added')
+
+    await act(async () => {
+      userTurnWrite.resolve()
+    })
+    await waitForProgressHandler('task-abc')
+    await act(async () => {
+      clerum.emitTaskProgress('task-abc', {
+        type: 'terminal',
+        data: { taskId: 'task-abc', status: 'completed' },
+      })
+    })
+    await act(async () => {
+      await sendPromise
+    })
+
+    // What was sent is what the user had when they pressed send.
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    const request = clerum.rpc.invokeHostMessage.mock.calls[0]?.[1] as {
+      content: string
+      fileReferences?: unknown
+    }
+    expect(request.content).toBe(buildComposerRequestContent('summarize this', []))
+    expect(JSON.stringify(request)).not.toContain(candidate.gfsUri)
+    const chatId = result.current.activeChatId!
+    const [sentTurn] = await clerum.persistedMessages('agent-x', chatId)
+    expect(sentTurn).toMatchObject({ role: 'user', content: 'summarize this' })
+    expect(sentTurn?.attachments).toBeUndefined()
+    // The suggestion accepted mid-send is still in the composer for the next message.
+    expect(result.current.composerReferenceAttachments).toEqual([
+      { ...candidate, addedOrder: expect.any(Number) },
+    ])
   })
 })

@@ -15,10 +15,12 @@ import {
   type TeamsTargetMessageResult,
   resolveTeamsTarget,
   sendSlackTargetMessage,
+  sendTeamsTargetMessage,
   updateSlackTargetMessage,
   updateTeamsTargetMessage,
   verifySlackTargetSignature,
 } from './controlApiClient.js'
+import { planDecisionFeedback } from './decisionFeedback.js'
 import {
   normalizeProviderDecision,
   normalizeProviderEnrollment,
@@ -27,8 +29,13 @@ import {
   normalizeTeamsFileConsent,
 } from './decisionHandler.js'
 import { readerLogger } from './logger.js'
-import { submitMcpHostDecision, submitMcpHostEnrollment } from './mcpHostClient.js'
+import {
+  type McpHostDecisionResult,
+  submitMcpHostDecision,
+  submitMcpHostEnrollment,
+} from './mcpHostClient.js'
 import { verifyTeamsAuthorization } from './teamsAuth.js'
+import { isToolApprovalActionValue } from './toolApprovalAction.js'
 
 const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024
 const PROVIDER_EVENT_DEDUPE_TTL_MS = 10 * 60 * 1000
@@ -61,10 +68,16 @@ type SlackDecisionFeedbackContext = {
   channelId: string
   messageTs: string
   threadTs?: string | null
+  /** The target's `slackSettings.replyInThreads`, as verified by control-api. */
+  replyInThreads: boolean
 }
 type TeamsDecisionFeedbackContext = {
   targetId: string
+  /** The provider channel id; control-api reads the group's settings with it. */
   conversationId: string
+  /** The invoke payload's `conversation.id` (a channel thread carries its root). */
+  threadConversationId: string
+  /** The approval card's activity id. */
   messageId: string
   serviceUrl: string
 }
@@ -239,7 +252,7 @@ function teamsIsWorkflowResultAction(payload: unknown): boolean {
 }
 
 export function teamsIsToolApprovalAction(payload: unknown): boolean {
-  return /^tool:[aldcs]:[A-Za-z0-9_-]{16}$/.test(teamsActionValue(payload))
+  return isToolApprovalActionValue(teamsActionValue(payload))
 }
 
 function teamsIsWorkflowApprovalAction(payload: unknown): boolean {
@@ -353,26 +366,6 @@ function markProviderEventSeen(providerEventId: string): boolean {
   return true
 }
 
-function slackDecisionActionLabel(
-  command: NonNullable<ReturnType<typeof normalizeProviderDecision>>
-): string {
-  return command.decision === 'deny' ? 'Denied' : 'Approved'
-}
-
-function slackDecisionFailureText(
-  command: NonNullable<ReturnType<typeof normalizeProviderDecision>>,
-  result: { status?: number; error?: string }
-): string {
-  if (result.error === 'approval_not_pending' || result.error === 'approval_route_not_found') {
-    return 'This workflow approval is no longer pending. Trigger the workflow again to request approval.'
-  }
-  if (result.status === 403 || result.error === 'not_authorized') {
-    return 'You are not allowed to decide this workflow approval from this Slack conversation.'
-  }
-  const action = command.decision === 'deny' ? 'deny' : 'approve'
-  return `I could not ${action} this workflow approval. Try again in a moment.`
-}
-
 async function logSlackDecisionFeedbackFailure(
   result: SlackTargetMessageResult,
   params: { approvalRequestId?: string; providerEventId: string; action: string }
@@ -387,139 +380,174 @@ async function logSlackDecisionFeedbackFailure(
   })
 }
 
+type ProviderDecisionCommand = NonNullable<ReturnType<typeof normalizeProviderDecision>>
+
+function logDecisionSubmissionCrash(command: ProviderDecisionCommand, err: unknown): void {
+  log.error('provider decision submission crashed after acknowledgement', {
+    medium: command.medium,
+    approvalRequestId: command.approvalRequestId,
+    providerEventId: command.providerEventId,
+    error: err instanceof Error ? err.name : 'unknown_error',
+  })
+}
+
+/**
+ * Where a Slack decision notice goes: under the approval message (its own
+ * thread when it is a reply) only when the channel replies in threads;
+ * otherwise at the top level of the channel.
+ */
+function slackNoticeThreadTs(feedback: SlackDecisionFeedbackContext): string | undefined {
+  return feedback.replyInThreads ? feedback.threadTs || feedback.messageTs : undefined
+}
+
+async function sendSlackDecisionNotice(
+  cfg: typeof config,
+  command: ProviderDecisionCommand,
+  feedback: SlackDecisionFeedbackContext,
+  text: string,
+  action: string
+): Promise<void> {
+  const sendResult = await sendSlackTargetMessage(cfg, {
+    targetId: feedback.targetId,
+    channelId: feedback.channelId,
+    text: `<@${command.providerUserId}> ${text}`,
+    threadTs: slackNoticeThreadTs(feedback),
+  })
+  await logSlackDecisionFeedbackFailure(sendResult, {
+    approvalRequestId: command.approvalRequestId,
+    providerEventId: command.providerEventId,
+    action,
+  })
+}
+
+/**
+ * Posts a Teams decision notice as a new plain-text message. control-api
+ * places it from the channel's reply-in-threads setting; the reader passes
+ * the card's ids only.
+ */
+async function sendTeamsDecisionNotice(
+  cfg: typeof config,
+  command: ProviderDecisionCommand,
+  feedback: TeamsDecisionFeedbackContext,
+  text: string,
+  action: string
+): Promise<void> {
+  const sendResult = await sendTeamsTargetMessage(cfg, {
+    targetId: feedback.targetId,
+    conversationId: feedback.conversationId,
+    threadConversationId: feedback.threadConversationId,
+    replyToId: feedback.messageId,
+    serviceUrl: feedback.serviceUrl,
+    text,
+  })
+  await logTeamsDecisionFeedbackFailure(sendResult, {
+    approvalRequestId: command.approvalRequestId,
+    providerEventId: command.providerEventId,
+    action,
+  })
+}
+
+function feedbackDecision(command: ProviderDecisionCommand): 'approve' | 'deny' {
+  return command.decision === 'deny' ? 'deny' : 'approve'
+}
+
+function logDecisionSubmissionFailure(
+  command: ProviderDecisionCommand,
+  result: McpHostDecisionResult
+): void {
+  log.warn('provider decision submission failed after acknowledgement', {
+    medium: command.medium,
+    approvalRequestId: command.approvalRequestId,
+    providerEventId: command.providerEventId,
+    status: result.status,
+    error: result.error,
+  })
+}
+
 function submitSlackDecisionInBackground(
   cfg: typeof config,
-  command: NonNullable<ReturnType<typeof normalizeProviderDecision>>,
+  command: ProviderDecisionCommand,
   feedback: SlackDecisionFeedbackContext | null
 ): void {
   void submitMcpHostDecision(cfg, command)
-    .then(async result => {
-      if (result.ok) {
-        if (feedback) {
-          const action = slackDecisionActionLabel(command)
-          const updateResult = await updateSlackTargetMessage(cfg, {
-            targetId: feedback.targetId,
-            channelId: feedback.channelId,
-            messageTs: feedback.messageTs,
-            text: `${action}. Workflow approval recorded.`,
-            blocks: [],
-          })
-          await logSlackDecisionFeedbackFailure(updateResult, {
-            approvalRequestId: command.approvalRequestId,
-            providerEventId: command.providerEventId,
-            action: 'update_success',
-          })
-        }
-        return
-      }
+    .then(result => handleSlackDecisionResult(cfg, command, feedback, result))
+    .catch(err => logDecisionSubmissionCrash(command, err))
+}
 
-      log.warn('provider decision submission failed after acknowledgement', {
-        medium: command.medium,
-        approvalRequestId: command.approvalRequestId,
-        providerEventId: command.providerEventId,
-        status: result.status,
-        error: result.error,
-      })
-      if (!feedback) return
+async function handleSlackDecisionResult(
+  cfg: typeof config,
+  command: ProviderDecisionCommand,
+  feedback: SlackDecisionFeedbackContext | null,
+  result: McpHostDecisionResult
+): Promise<void> {
+  if (!result.ok) logDecisionSubmissionFailure(command, result)
+  if (!feedback) return
 
-      const text = slackDecisionFailureText(command, result)
-      if (result.error === 'approval_not_pending' || result.error === 'approval_route_not_found') {
-        const updateResult = await updateSlackTargetMessage(cfg, {
-          targetId: feedback.targetId,
-          channelId: feedback.channelId,
-          messageTs: feedback.messageTs,
-          text,
-          blocks: [],
-        })
-        await logSlackDecisionFeedbackFailure(updateResult, {
-          approvalRequestId: command.approvalRequestId,
-          providerEventId: command.providerEventId,
-          action: 'update_stale',
-        })
-        return
-      }
-
-      const sendResult = await sendSlackTargetMessage(cfg, {
-        targetId: feedback.targetId,
-        channelId: feedback.channelId,
-        text: `<@${command.providerUserId}> ${text}`,
-        threadTs: feedback.threadTs || feedback.messageTs,
-      })
-      await logSlackDecisionFeedbackFailure(sendResult, {
-        approvalRequestId: command.approvalRequestId,
-        providerEventId: command.providerEventId,
-        action: 'send_failure',
-      })
+  const plan = planDecisionFeedback({
+    medium: 'slack',
+    decision: feedbackDecision(command),
+    result,
+  })
+  if (plan.shared) {
+    const updateResult = await updateSlackTargetMessage(cfg, {
+      targetId: feedback.targetId,
+      channelId: feedback.channelId,
+      messageTs: feedback.messageTs,
+      text: plan.shared.text,
+      blocks: [],
     })
-    .catch(err => {
-      log.error('provider decision submission crashed after acknowledgement', {
-        medium: command.medium,
-        approvalRequestId: command.approvalRequestId,
-        providerEventId: command.providerEventId,
-        error: err instanceof Error ? err.name : 'unknown_error',
-      })
+    await logSlackDecisionFeedbackFailure(updateResult, {
+      approvalRequestId: command.approvalRequestId,
+      providerEventId: command.providerEventId,
+      action: plan.shared.action,
     })
+    return
+  }
+  await sendSlackDecisionNotice(cfg, command, feedback, plan.notice.text, plan.notice.action)
 }
 
 function submitTeamsDecisionInBackground(
   cfg: typeof config,
-  command: NonNullable<ReturnType<typeof normalizeProviderDecision>>,
+  command: ProviderDecisionCommand,
   feedback: TeamsDecisionFeedbackContext | null
 ): void {
   void submitMcpHostDecision(cfg, command)
-    .then(async result => {
-      if (result.ok) {
-        if (feedback) {
-          const action = teamsDecisionActionLabel(command)
-          const updateResult = await updateTeamsTargetMessage(cfg, {
-            targetId: feedback.targetId,
-            conversationId: feedback.conversationId,
-            messageId: feedback.messageId,
-            serviceUrl: feedback.serviceUrl,
-            text: `${action}. Workflow approval recorded.`,
-          })
-          await logTeamsDecisionFeedbackFailure(updateResult, {
-            approvalRequestId: command.approvalRequestId,
-            providerEventId: command.providerEventId,
-            action: 'update_success',
-          })
-        }
-        return
-      }
+    .then(result => handleTeamsDecisionResult(cfg, command, feedback, result))
+    .catch(err => logDecisionSubmissionCrash(command, err))
+}
 
-      log.warn('provider decision submission failed after acknowledgement', {
-        medium: command.medium,
-        approvalRequestId: command.approvalRequestId,
-        providerEventId: command.providerEventId,
-        status: result.status,
-        error: result.error,
-      })
-      if (!feedback) return
+async function handleTeamsDecisionResult(
+  cfg: typeof config,
+  command: ProviderDecisionCommand,
+  feedback: TeamsDecisionFeedbackContext | null,
+  result: McpHostDecisionResult
+): Promise<void> {
+  if (!result.ok) logDecisionSubmissionFailure(command, result)
+  if (!feedback) return
 
-      const updateResult = await updateTeamsTargetMessage(cfg, {
-        targetId: feedback.targetId,
-        conversationId: feedback.conversationId,
-        messageId: feedback.messageId,
-        serviceUrl: feedback.serviceUrl,
-        text: teamsDecisionFailureText(command, result),
-      })
-      await logTeamsDecisionFeedbackFailure(updateResult, {
-        approvalRequestId: command.approvalRequestId,
-        providerEventId: command.providerEventId,
-        action:
-          result.error === 'approval_not_pending' || result.error === 'approval_route_not_found'
-            ? 'update_stale'
-            : 'update_failure',
-      })
+  const plan = planDecisionFeedback({
+    medium: 'teams',
+    decision: feedbackDecision(command),
+    result,
+  })
+  if (plan.shared) {
+    // Replacing the card removes its buttons: only on a recorded decision or
+    // an approval that is no longer pending.
+    const updateResult = await updateTeamsTargetMessage(cfg, {
+      targetId: feedback.targetId,
+      conversationId: feedback.conversationId,
+      messageId: feedback.messageId,
+      serviceUrl: feedback.serviceUrl,
+      text: plan.shared.text,
     })
-    .catch(err => {
-      log.error('provider decision submission crashed after acknowledgement', {
-        medium: command.medium,
-        approvalRequestId: command.approvalRequestId,
-        providerEventId: command.providerEventId,
-        error: err instanceof Error ? err.name : 'unknown_error',
-      })
+    await logTeamsDecisionFeedbackFailure(updateResult, {
+      approvalRequestId: command.approvalRequestId,
+      providerEventId: command.providerEventId,
+      action: plan.shared.action,
     })
+    return
+  }
+  await sendTeamsDecisionNotice(cfg, command, feedback, plan.notice.text, plan.notice.action)
 }
 
 async function providerAuthorized(
@@ -634,7 +662,8 @@ function slackEventThreadTs(payload: unknown): string | null {
 function slackDecisionFeedbackContext(
   targetId: string | null,
   payload: unknown,
-  command: ReturnType<typeof normalizeProviderDecision>
+  command: ReturnType<typeof normalizeProviderDecision>,
+  replyInThreads: boolean
 ): SlackDecisionFeedbackContext | null {
   const messageTs = slackEventMessageTs(payload)
   if (!targetId || !command?.providerChannelId || !messageTs) return null
@@ -643,27 +672,8 @@ function slackDecisionFeedbackContext(
     channelId: command.providerChannelId,
     messageTs,
     threadTs: slackEventThreadTs(payload),
+    replyInThreads,
   }
-}
-
-function teamsDecisionActionLabel(
-  command: NonNullable<ReturnType<typeof normalizeProviderDecision>>
-): string {
-  return command.decision === 'deny' ? 'Denied' : 'Approved'
-}
-
-function teamsDecisionFailureText(
-  command: NonNullable<ReturnType<typeof normalizeProviderDecision>>,
-  result: { status?: number; error?: string }
-): string {
-  if (result.error === 'approval_not_pending' || result.error === 'approval_route_not_found') {
-    return 'This workflow approval is no longer pending. Trigger the workflow again to request approval.'
-  }
-  if (result.status === 403 || result.error === 'not_authorized') {
-    return 'You are not allowed to decide this workflow approval from this Teams conversation.'
-  }
-  const action = command.decision === 'deny' ? 'deny' : 'approve'
-  return `I could not ${action} this workflow approval. Try again in a moment.`
 }
 
 async function logTeamsDecisionFeedbackFailure(
@@ -691,6 +701,7 @@ function teamsDecisionFeedbackContext(
   return {
     targetId,
     conversationId: command.providerChannelId,
+    threadConversationId: asString(asRecord(asRecord(payload).conversation).id),
     messageId,
     serviceUrl,
   }
@@ -968,7 +979,12 @@ export function createServer(cfg = config): http.Server {
         submitSlackDecisionInBackground(
           cfg,
           routedCommand,
-          slackDecisionFeedbackContext(targetId, payload, routedCommand)
+          slackDecisionFeedbackContext(
+            targetId,
+            payload,
+            routedCommand,
+            auth.slackTarget?.replyInThreads === true
+          )
         )
         writeJson(res, 200, { ok: true })
         return

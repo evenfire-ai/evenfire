@@ -13,10 +13,14 @@ import {
   type ApprovalConfigSnapshot,
   type ApprovalMode,
   effectiveApprovalMode,
+  normalizeApprovalMode,
   parseApprovalModeCommand,
+  raisesApprovalMode,
   readChannelCap,
+  readChannelSwitch,
   readModeCeiling,
 } from '../core/approval/approvalMode'
+import { type ApproverPolicyRefusal, approverPolicyRefusal } from '../core/approval/approverPolicy'
 import { approvalLogId, syncEffectiveMode } from '../core/approval/grantMemory'
 import type { ConversationManager } from '../core/conversation/conversation'
 import { FileReferenceErrorCode, LlmErrorCode } from '../core/errors'
@@ -32,8 +36,8 @@ import { serializeSessionKey } from '../session/types.js'
 import type { FileReferenceGfsAccess } from './fileReferenceGfsGate'
 import {
   type FileReferenceCheckFailure,
-  type FileReferenceResolutionResult,
-  resolveFileReferences,
+  type MessageReferenceResolutionResult,
+  resolveMessageReferences,
 } from './fileReferenceResolver'
 import type { GfsSurfaceRuntimeCapability } from './gfsReferenceSurfaces'
 import { type IncomingAttachmentLimits, validateIncomingAttachments } from './incomingAttachments'
@@ -95,8 +99,11 @@ export interface IncomingAdmissionDeps {
   }
   /** Live session store for the first-message mode and the messaging command. */
   getConversationManager?: () => ConversationManager
-  /** Live ceiling and channel cap. Read when a writer runs, not at wiring time. */
-  approvalSnapshot?: () => ApprovalConfigSnapshot
+  /**
+   * Live ceiling, channel switch and approver policy. Read when a writer runs,
+   * not at wiring time.
+   */
+  approvalSnapshot: () => ApprovalConfigSnapshot
 }
 
 const MESSAGING_CHANNELS = new Set(['telegram', 'email', 'slack', 'teams'])
@@ -125,11 +132,13 @@ function carriedApprovalMode(message: IncomingMessage): ApprovalMode | undefined
   return undefined
 }
 
-type ApprovalModeRefusal = 'channel' | 'slack_username'
+type ApprovalModeRefusal = 'channel' | ApproverPolicyRefusal
 
 const APPROVAL_MODE_REFUSAL_TEXT: Record<ApprovalModeRefusal, string> = {
   channel: 'This channel is limited to manual.',
-  slack_username: 'Only an allowlisted Slack user ID can raise the mode.',
+  policy_cli_only: "This Host's approval policy does not let a messaging channel raise the mode.",
+  not_approver: 'Only a designated approver can raise the mode.',
+  policy_invalid: "This Host's approval policy is not valid, so the mode cannot be raised.",
 }
 
 function approvalModeReply(
@@ -141,9 +150,22 @@ function approvalModeReply(
   return refusal ? `${base} ${APPROVAL_MODE_REFUSAL_TEXT[refusal]}` : base
 }
 
-/** A Slack display-username match is not a stable identity, so it cannot raise. */
-function slackUsernameOnly(message: IncomingMessage): boolean {
-  return message.channelType === 'slack' && message.senderMatch === 'username'
+/**
+ * Log fields for a mode write that failed. The error's message can name the
+ * conversation id (the SQLite store's persistApprovalMode does), so only the
+ * error's class, a string code and the hashed session id are logged. The
+ * session id is absent when the failure came before the session was read.
+ */
+function approvalModeStoreFailureFields(
+  err: unknown,
+  sessionLogId: string | undefined
+): Record<string, unknown> {
+  const code = (err as { code?: unknown } | null | undefined)?.code
+  return {
+    errorClass: err instanceof Error ? err.constructor.name : typeof err,
+    ...(typeof code === 'string' ? { code } : {}),
+    ...(sessionLogId !== undefined ? { session: sessionLogId } : {}),
+  }
 }
 
 function approvalModeStoreFailure(provider: string | undefined): MessageResponse {
@@ -161,10 +183,16 @@ function approvalModeStoreFailure(provider: string | undefined): MessageResponse
 /**
  * The message a replayed delivery is dispatched with. Admission does not run
  * on a replay, so the fields only admission may set are cleared: a caller can
- * never supply a visual execution identity or file reference resolutions.
+ * never supply a visual execution identity or file or location reference
+ * resolutions.
  */
 export function replayedIncomingMessage(message: IncomingMessage): IncomingMessage {
-  return { ...message, imageModel: undefined, fileReferenceResolutions: undefined }
+  return {
+    ...message,
+    imageModel: undefined,
+    fileReferenceResolutions: undefined,
+    locationReferenceResolutions: undefined,
+  }
 }
 
 export type IncomingAdmission = (
@@ -253,9 +281,12 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       imageModel: undefined,
       // Resolutions are the Host's own answer; a caller cannot pre-fill them.
       fileReferenceResolutions: undefined,
+      locationReferenceResolutions: undefined,
     }
     const fileReferences = message.fileReferences ?? []
+    const locationReferences = message.locationReferences ?? []
     let acceptedFileReferenceIds: string[] = []
+    let acceptedLocationReferenceIds: string[] = []
     deps.logger.info(
       {
         channel: normalizedMessage.channelType,
@@ -311,6 +342,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       }
       if (!deps.getConversationManager) return approvalModeStoreFailure(deps.hostProvider())
       return (async () => {
+        let sessionLogId: string | undefined
         try {
           const manager = deps.getConversationManager!()
           const key = serializeSessionKey({
@@ -326,37 +358,91 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
             threadId: normalizedMessage.threadId,
             source: normalizedMessage.channelType,
           })
-          const live = deps.approvalSnapshot?.() ?? { effective: undefined, hostSpec: undefined }
-          const channelCap = readChannelCap(live, conversation.channel_type)
-          const usernameOnly = slackUsernameOnly(normalizedMessage)
-          const cap: ApprovalMode = usernameOnly ? 'manual' : channelCap
+          sessionLogId = approvalLogId(conversation.id)
+          const live = deps.approvalSnapshot()
+          // The switch decides what the command stores and whether the reply
+          // names the channel. The cap, which adds the approver policy for
+          // this session's owner, decides the effective mode.
+          const channelSwitch = readChannelSwitch(live, conversation.channel_type)
+          const channelCap = readChannelCap(live, conversation.channel_type, conversation.user_id)
+          const ceiling = readModeCeiling(live)
+          const current = normalizeApprovalMode(conversation.approval_mode)
+          const logCommandRefusal = (reason: ApprovalModeRefusal, outcome: string): void => {
+            logger.info(
+              {
+                event: 'approval_mode_command_refused',
+                session: approvalLogId(conversation.id),
+                channel: normalizedMessage.channelType,
+                requested: command,
+                reason,
+              },
+              `Approval mode command refused; ${outcome}`
+            )
+          }
+          // The command refuses a raise the approver policy does not allow,
+          // after the channel check. A mode at or below the stored one, and
+          // manual, always pass. The policy is the one in force (`effective`),
+          // as notifications use, applied to the session's owner and stored
+          // channel type exactly as `readChannelCap` applies it. A refused
+          // raise stores nothing: the stored mode stays as it was. The policy
+          // also caps the running mode, so the reply's effective mode reads
+          // the cap.
+          const sessionChannel = conversation.channel_type
+          const policyRefusal =
+            channelSwitch === 'allow_all' &&
+            sessionChannel !== undefined &&
+            raisesApprovalMode(current, command)
+              ? approverPolicyRefusal(live.effective, {
+                  userId: conversation.user_id,
+                  channelType: sessionChannel,
+                })
+              : null
+          if (policyRefusal === 'policy_invalid') {
+            logger.warn(
+              { event: 'approval_config_invalid', field: 'defaultPolicy' },
+              'defaultPolicy is not cli_only, channel_users or designated_approvers; a messaging channel cannot raise the mode'
+            )
+          }
+          if (policyRefusal) {
+            logCommandRefusal(policyRefusal, 'stored mode unchanged')
+            return {
+              success: true,
+              status: 'completed' as const,
+              response: approvalModeReply(
+                current,
+                effectiveApprovalMode(current, ceiling, channelCap),
+                policyRefusal
+              ),
+            }
+          }
           const stored = await manager.setApprovalMode(
             conversation,
             command,
-            {
-              ceiling: readModeCeiling(live),
-              cap,
-            },
+            { ceiling, cap: channelCap, channelSwitch },
             'command',
             normalizedMessage.sender
           )
-          let refusal: ApprovalModeRefusal | null = null
-          if (command !== 'manual' && channelCap !== 'allow_all') refusal = 'channel'
-          else if (command !== 'manual' && usernameOnly) refusal = 'slack_username'
+          // With the channel switch off, the command stores manual.
+          const refusal: ApprovalModeRefusal | null =
+            command !== 'manual' && channelSwitch !== 'allow_all' ? 'channel' : null
+          if (refusal) logCommandRefusal(refusal, 'stored manual')
           return {
             success: true,
             status: 'completed' as const,
             response: approvalModeReply(stored.approvalMode, stored.effectiveApprovalMode, refusal),
           }
         } catch (err) {
-          logger.warn({ err }, 'Approval mode command could not be stored')
+          logger.warn(
+            approvalModeStoreFailureFields(err, sessionLogId),
+            'Approval mode command could not be stored'
+          )
           return approvalModeStoreFailure(deps.hostProvider())
         }
       })()
     }
 
-    // A successful response names every attachment and file reference the Host
-    // accepted, on the sync response and on the async ack alike. Their absence
+    // A successful response names every attachment, file and location reference
+    // the Host accepted, on the sync response and on the async ack alike. Their absence
     // on a send that carried them is how a client detects a Host that dropped
     // them.
     const withAcceptedAttachments = (response: MessageResponse): MessageResponse => {
@@ -377,11 +463,14 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
           'Host runtime event'
         )
       }
-      return acceptedAttachmentIds.length || acceptedFileReferenceIds.length
+      return acceptedAttachmentIds.length ||
+        acceptedFileReferenceIds.length ||
+        acceptedLocationReferenceIds.length
         ? {
             ...response,
             ...(acceptedAttachmentIds.length ? { acceptedAttachmentIds } : {}),
             ...(acceptedFileReferenceIds.length ? { acceptedFileReferenceIds } : {}),
+            ...(acceptedLocationReferenceIds.length ? { acceptedLocationReferenceIds } : {}),
           }
         : response
     }
@@ -484,6 +573,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       const requested = carriedApprovalMode(normalizedMessage)
       if (!requested) return undefined
       if (!deps.getConversationManager) return approvalModeStoreFailure(deps.hostProvider())
+      let sessionLogId: string | undefined
       try {
         const manager = deps.getConversationManager()
         const key = serializeSessionKey({
@@ -500,10 +590,11 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
           source: 'rpc',
           approvalMode: requested,
         })
+        sessionLogId = approvalLogId(conversation.id)
         if (!created) return undefined
-        const live = deps.approvalSnapshot?.() ?? { effective: undefined, hostSpec: undefined }
+        const live = deps.approvalSnapshot()
         const ceiling = readModeCeiling(live)
-        const cap = readChannelCap(live, conversation.channel_type)
+        const cap = readChannelCap(live, conversation.channel_type, conversation.user_id)
         const effective = effectiveApprovalMode(requested, ceiling, cap)
         logger.info(
           {
@@ -521,7 +612,10 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
         syncEffectiveMode(conversation, effective)
         return undefined
       } catch (err) {
-        logger.warn({ err }, 'First-message approval mode could not be stored')
+        logger.warn(
+          approvalModeStoreFailureFields(err, sessionLogId),
+          'First-message approval mode could not be stored'
+        )
         return approvalModeStoreFailure(deps.hostProvider())
       }
     }
@@ -675,25 +769,28 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       return runHandler()
     }
 
-    if (!fileReferences.length) return admitAndRun()
+    if (!fileReferences.length && !locationReferences.length) return admitAndRun()
     // Issue #666 — every reference is re-authorized under the Host principal
-    // before the task exists. An unavailable file is still a valid turn: it is
-    // listed with its availability. Only a failure to ask gfsc refuses it.
+    // before the task exists. An unavailable file or folder is still a valid
+    // turn: it is listed with its availability. Only a failure to ask gfsc
+    // refuses it: a request to write into a folder must not run somewhere else.
     return (async () => {
-      // Only a GFS reference needs the Host's GFS token.
-      const access: FileReferenceGfsAccess = fileReferences.some(ref => ref.source.kind === 'gfs')
-        ? deps.fileReferenceGfs()
-        : { status: 'unsupported' }
+      // Only a GFS reference needs the Host's GFS token; every location is one.
+      const access: FileReferenceGfsAccess =
+        locationReferences.length || fileReferences.some(ref => ref.source.kind === 'gfs')
+          ? deps.fileReferenceGfs()
+          : { status: 'unsupported' }
       const runtimeSurfaces = deps.gfsSurfaceRuntimeCapability?.(normalizedMessage) ?? {
         workspaceFile: false,
         localExecutor: false,
         visual: false,
       }
-      const resolved: FileReferenceResolutionResult =
+      const resolved: MessageReferenceResolutionResult =
         access.status === 'credentials_failed'
           ? { ok: false, failure: 'credentials', errorClass: access.errorClass }
-          : await resolveFileReferences(
+          : await resolveMessageReferences(
               fileReferences,
+              locationReferences,
               access.status === 'available' ? access.client : null,
               undefined,
               runtimeSurfaces
@@ -704,6 +801,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
             event: 'file_reference_refused',
             channel: normalizedMessage.channelType,
             referenceCount: fileReferences.length,
+            locationCount: locationReferences.length,
             failure: resolved.failure,
             errorClass: resolved.errorClass,
             status: resolved.status ?? null,
@@ -712,9 +810,15 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
         )
         return { success: false, error: fileReferenceFailure(resolved.failure) }
       }
-      normalizedMessage.fileReferenceResolutions = resolved.resolutions
-      acceptedFileReferenceIds = resolved.resolutions.map(r => r.reference.id)
-      // Classes, sizes and availabilities only: never a file name.
+      if (fileReferences.length) {
+        normalizedMessage.fileReferenceResolutions = resolved.resolutions
+        acceptedFileReferenceIds = resolved.resolutions.map(r => r.reference.id)
+      }
+      if (locationReferences.length) {
+        normalizedMessage.locationReferenceResolutions = resolved.locationResolutions
+        acceptedLocationReferenceIds = resolved.locationResolutions.map(r => r.reference.id)
+      }
+      // Classes, sizes and availabilities only: never a file or folder name.
       deps.logger.info(
         {
           event: 'file_reference_resolved',
@@ -723,6 +827,8 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
           fileClasses: resolved.resolutions.map(r => r.reference.class),
           availabilities: resolved.resolutions.map(r => r.availability),
           byteLength: resolved.resolutions.reduce((sum, r) => sum + r.reference.byteLength, 0),
+          locationCount: resolved.locationResolutions.length,
+          locationAvailabilities: resolved.locationResolutions.map(r => r.availability),
         },
         'Host runtime event'
       )
@@ -731,19 +837,42 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
 
     function fileReferenceFailure(failure: FileReferenceCheckFailure): TaskError {
       const provider = deps.hostProvider() ?? 'unknown'
+      const folders = locationReferences.length === 1 ? 'folder' : 'folders'
+      // The failure does not say which reference caused it, so the text names
+      // every kind the message carried. The file-only texts are what clients
+      // already show and must stay as they are.
+      const messages: Record<FileReferenceCheckFailure, string> = !locationReferences.length
+        ? {
+            invalid: 'A referenced file does not match the file it names. Pick the file again.',
+            transient: 'The referenced files could not be checked. Send the message again.',
+            contract: 'The file service returned an unexpected answer for a referenced file.',
+            credentials:
+              'The Host could not authenticate to the file service to check the referenced files.',
+          }
+        : !fileReferences.length
+          ? {
+              invalid:
+                'A referenced folder does not match the folder it names. Pick the folder again.',
+              transient: `The referenced ${folders} could not be checked. Send the message again.`,
+              contract: 'The file service returned an unexpected answer for a referenced folder.',
+              credentials: `The Host could not authenticate to the file service to check the referenced ${folders}.`,
+            }
+          : {
+              invalid: 'A referenced file or folder does not match what it names. Pick it again.',
+              transient:
+                'The referenced files and folders could not be checked. Send the message again.',
+              contract:
+                'The file service returned an unexpected answer for a referenced file or folder.',
+              credentials:
+                'The Host could not authenticate to the file service to check the referenced files and folders.',
+            }
       if (failure === 'invalid')
         return {
           code: FileReferenceErrorCode.Invalid,
-          message: 'A referenced file does not match the file it names. Pick the file again.',
+          message: messages.invalid,
           retryable: false,
           provider,
         }
-      const messages: Record<Exclude<FileReferenceCheckFailure, 'invalid'>, string> = {
-        transient: 'The referenced files could not be checked. Send the message again.',
-        contract: 'The file service returned an unexpected answer for a referenced file.',
-        credentials:
-          'The Host could not authenticate to the file service to check the referenced files.',
-      }
       return {
         code: FileReferenceErrorCode.CheckFailed,
         message: messages[failure],

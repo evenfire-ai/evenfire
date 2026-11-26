@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, expectTypeOf, it, vi } from 'vitest'
 import type { HostCRD } from '../../../types'
 import type { ApprovalConfig } from '../../extensions/approvalTypes'
 import { readChannelCap, readModeCeiling } from '../approvalMode'
@@ -87,9 +87,35 @@ describe('applyHostChange', () => {
     const raced = await race(policy('allow_all', true), policy('allow_all', false))
 
     expect(readModeCeiling(raced.snapshot)).toBe('allow_all')
-    expect(readChannelCap(raced.snapshot, 'slack')).toBe('manual')
+    expect(readChannelCap(raced.snapshot, 'slack', 'user-1')).toBe('manual')
     expect(raced.currentHost).toBe(raced.e2)
     expect(raced.commitHost.mock.calls.map(call => call[0])).toEqual([raced.e2])
     expect(raced.setApprovalConfig.mock.calls.length).toBe(raced.callsAfterE2)
+  })
+
+  // Compile-time: `npx tsc --noEmit` fails here if commitHost is typed `void`,
+  // which would let an async implementation's rejection fall outside the type.
+  it('types commitHost as sync or async', () => {
+    type CommitHost = Parameters<typeof applyHostChange>[1]['commitHost']
+    expectTypeOf<ReturnType<CommitHost>>().toEqualTypeOf<void | Promise<void>>()
+  })
+
+  it('rejects when an async commitHost rejects', async () => {
+    const failure = new Error('fixture commit failure')
+    const commitHost: Parameters<typeof applyHostChange>[1]['commitHost'] = vi.fn(async () => {
+      throw failure
+    })
+    const ensureConfigStore = vi.fn(async () => undefined)
+
+    await expect(
+      applyHostChange(host('e1', policy('manual', true)), {
+        gate: createHostEventGate(),
+        publishApproval: vi.fn(),
+        ensureConfigStore,
+        commitHost,
+      })
+    ).rejects.toBe(failure)
+    expect(ensureConfigStore).toHaveBeenCalledTimes(1)
+    expect(commitHost).toHaveBeenCalledTimes(1)
   })
 })

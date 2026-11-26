@@ -11,7 +11,6 @@ const serviceMock = vi.hoisted(() => ({
   resolveHostConnectionForUser: vi.fn(),
   forwardHostMessageToHost: vi.fn(),
 }))
-
 vi.mock('../authToken.js', () => authTokenMock)
 vi.mock('../services/mcpProxyService.js', () => serviceMock)
 
@@ -230,6 +229,50 @@ describe('POST /rpc/hosts/:hostRef/messages — structured file references (#666
     })
   })
 
+  it('forwards folder references verbatim without inspecting their shape', async () => {
+    const locationReference = {
+      schemaVersion: 1,
+      id: 'gfs-folder:team-drive:0f1e2d3c4b5a69788796a5b4c3d2e1f0',
+      name: 'Reports',
+      source: {
+        kind: 'gfs',
+        drive: 'team-drive',
+        resourceId: '0f1e2d3c4b5a69788796a5b4c3d2e1f0',
+        gfsUri: 'gfs://team-drive/0f1e2d3c4b5a69788796a5b4c3d2e1f0',
+      },
+    }
+    serviceMock.forwardHostMessageToHost.mockResolvedValue({
+      success: true,
+      status: 'pending',
+      taskId: 'task-1',
+    })
+    await request(makeApp())
+      .post('/rpc/hosts/chatllm/messages')
+      .set('authorization', 'Bearer token')
+      .send({
+        content: 'Create a file here',
+        threadId: 'chat-1',
+        locationReferences: [locationReference],
+      })
+      .expect(200)
+
+    const forwardedBody = serviceMock.forwardHostMessageToHost.mock.calls[0][1]
+    expect(forwardedBody.locationReferences).toEqual([locationReference])
+  })
+
+  it('leaves a malformed folder value for mcp-host to refuse with its typed code', async () => {
+    serviceMock.forwardHostMessageToHost.mockResolvedValue({ success: true, status: 'completed' })
+    await request(makeApp())
+      .post('/rpc/hosts/chatllm/messages')
+      .set('authorization', 'Bearer token')
+      .send({ content: 'hi', locationReferences: 'not-a-list' })
+      .expect(200)
+
+    expect(serviceMock.forwardHostMessageToHost.mock.calls[0][1].locationReferences).toBe(
+      'not-a-list'
+    )
+  })
+
   it('omits the field when the client sends no references', async () => {
     serviceMock.forwardHostMessageToHost.mockResolvedValue({ success: true, status: 'completed' })
     await request(makeApp())
@@ -243,6 +286,7 @@ describe('POST /rpc/hosts/:hostRef/messages — structured file references (#666
     const forwardedBody = serviceMock.forwardHostMessageToHost.mock.calls[0][1]
     expect(forwardedBody.content).toBe('hi')
     expect(forwardedBody).not.toHaveProperty('fileReferences')
+    expect(forwardedBody).not.toHaveProperty('locationReferences')
   })
 })
 

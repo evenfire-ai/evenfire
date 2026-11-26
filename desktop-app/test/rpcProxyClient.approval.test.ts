@@ -76,7 +76,7 @@ describe('RpcProxyClient — approveToolCall()', () => {
     })
   })
 
-  it('forwards a shell card action and omits an invalid one', async () => {
+  it('forwards a shell card action and refuses an invalid one', async () => {
     fetchSpy.mockResolvedValueOnce(okResponse())
     await client.approveToolCall('rpc-token', 'chatllm', 'task-123', 'tc-456', false, 'command')
     const [, commandInit] = fetchSpy.mock.calls[0] as [string, RequestInit]
@@ -86,20 +86,11 @@ describe('RpcProxyClient — approveToolCall()', () => {
       shellAction: 'command',
     })
 
-    fetchSpy.mockResolvedValueOnce(okResponse())
-    await client.approveToolCall(
-      'rpc-token',
-      'chatllm',
-      'task-123',
-      'tc-456',
-      false,
-      'nope' as 'once'
-    )
-    const [, invalidInit] = fetchSpy.mock.calls[1] as [string, RequestInit]
-    expect(JSON.parse(invalidInit.body as string)).toEqual({
-      taskId: 'task-123',
-      toolCallId: 'tc-456',
-    })
+    // A typo is not sent as a plain approve.
+    await expect(
+      client.approveToolCall('rpc-token', 'chatllm', 'task-123', 'tc-456', false, 'nope' as 'once')
+    ).rejects.toThrow('Invalid shellAction')
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
 
   it('sends alwaysApprove when the desktop asks to allowlist the tool', async () => {
@@ -194,11 +185,29 @@ describe('RpcProxyClient — setApprovalMode()', () => {
     })
   })
 
-  it('keeps a 404 in the error message and does not treat it as success', async () => {
-    fetchSpy.mockResolvedValueOnce(errorResponse(404, 'missing'))
-    await expect(
-      client.setApprovalMode('rpc-token', 'chatllm', 'chatllm', 'chat-1', 'auto')
-    ).rejects.toThrow('Set approval mode failed (404)')
+  it('keeps a 404 in the error message for the Host’s missing-session answer', async () => {
+    // mcp-host's body for a missing or foreign session (handleSetApprovalModeRoute).
+    fetchSpy.mockResolvedValueOnce(
+      errorResponse(404, JSON.stringify({ error: 'session not found' }))
+    )
+    const failure = client.setApprovalMode('rpc-token', 'chatllm', 'chatllm', 'chat-1', 'auto')
+    await expect(failure).rejects.toThrow(/^Set approval mode failed \(404\)$/)
+    await expect(failure).rejects.toMatchObject({ status: 404 })
+  })
+
+  it.each([
+    // rpc-proxy's fallback for a route it does not have (app.ts).
+    ['a route rpc-proxy lacks', JSON.stringify({ error: 'Not Found' })],
+    // rpc-proxy's answer when the Host is gone (wakeAndHold.ts).
+    ['a Host that is gone', JSON.stringify({ error: 'Host not found or not accessible' })],
+    ['a body that is not JSON', 'missing'],
+  ])('does not report a 404 for %s as a missing session', async (_case, body) => {
+    fetchSpy.mockResolvedValueOnce(errorResponse(404, body))
+    const failure = client.setApprovalMode('rpc-token', 'chatllm', 'chatllm', 'chat-1', 'auto')
+    await expect(failure).rejects.toThrow(
+      /^Set approval mode failed \(404, not a session answer\)$/
+    )
+    await expect(failure).rejects.toMatchObject({ status: 404 })
   })
 })
 

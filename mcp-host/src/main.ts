@@ -12,6 +12,7 @@
  *
  * Phase 6: Added approval handler wiring and approval config propagation.
  */
+import { createHash } from 'node:crypto'
 import * as path from 'node:path'
 import { HostActivityHub } from './activityHub'
 import { AgentStateMachine, CronScheduler, wireCronDispatch } from './agent'
@@ -44,6 +45,10 @@ import {
 import { ContextMapperClient, getContextMapperClient } from './contextMapperClient'
 import { applyHostChange } from './core/approval/hostChange'
 import { createHostEventGate } from './core/approval/hostEventGate'
+import {
+  type ShellClassifierCaller,
+  configuredShellClassifierModel,
+} from './core/approval/shellClassifier'
 import {
   type ConversationStoreHandle,
   SqliteColdStartLoader,
@@ -145,10 +150,17 @@ import { sanitizeError } from './progress/intentExtraction'
 import { progressReporterRegistry } from './progress/sseProgressReporter'
 import { MessageQueue, Task } from './queue'
 import { ResultStore } from './resultStore'
+import {
+  checkpointMcpHostActionAuthority,
+  checkpointMcpHostActivityStreamAuthority,
+  runtimeActionCheckpointDecision,
+} from './runtime/actionAuthorityCheckpointClient'
 import { markFileAttachmentsDelivered } from './runtime/fileAttachmentDelivery'
+import { startPr2ReadinessReporter } from './runtime/pr2ReadinessReporter'
 import { isUndeliveredResult, markResultDelivered } from './runtime/resultDelivery'
 import { dispatchMcpHostRuntime } from './runtimeDispatch'
 import {
+  ActivitySnapshotVisibility,
   HostActivityEvent,
   HostActivitySnapshotResponse,
   IncomingMessage,
@@ -168,6 +180,7 @@ import {
   WorkflowApprovalNotificationTerminal,
 } from './server'
 import { createSessionRouteHandlers } from './server/sessionRouteHandlers'
+import { pendingApprovalsForStatus } from './server/statusProjection'
 import { projectContextBreakdown } from './server/wireProjections'
 import { SessionProcessor } from './session'
 import { serializeSessionKey } from './session/types.js'
@@ -286,6 +299,7 @@ let statelessHeartbeat: StatelessHeartbeat | null = null
 // consumer (UsageReporter, WorkflowService) so refresh-on-401 propagates.
 // Null when env is absent (dev mode without HCC/WRC).
 let runtimeAuth: McpHostRuntimeAuth | null = null
+let stopPr2ReadinessReporter: (() => void) | null = null
 setCodexPlatformJwtReader(() =>
   (runtimeAuth?.accessToken || config.mcpHostRuntimeAccessToken || '').trim()
 )
@@ -366,6 +380,7 @@ function publishActivity(input: {
     title: input.title,
     severity: input.severity || 'info',
     meta: input.meta,
+    authorityV2: input.task?.sourceMessage?.authorityV2,
   })
 }
 
@@ -634,6 +649,53 @@ const resolveImageInput: ImageInputResolver = (provider, model) => {
  */
 function hostAllowlistView(): AllowlistView {
   return hostSubsetAllowlistView(allowlistView(), currentHost?.spec.allowedModels)
+}
+
+let shellClassifierCache: {
+  fingerprint: string
+  model: string
+  caller: ShellClassifierCaller
+} | null = null
+
+/**
+ * Dedicated shell classifier for a Host whose model provider is OpenAI. The
+ * ConfigStore holds only the Host provider's credentials
+ * (`apiKeysFromConfigStore`), so any other provider has no OpenAI key here.
+ * Dev mode reads every provider's key from the env, so an OPENAI_API_KEY
+ * there is used whatever the Host model. The chat model is not the judge. No
+ * OpenAI key, or a provider that cannot be built, returns null and admission
+ * keeps the chat or failover pair. The credential is hashed only as a cache
+ * key and is never logged.
+ */
+function shellClassifierCaller(): ShellClassifierCaller | null {
+  const keys = configStore ? apiKeysFromConfigStore(configStore) : currentKeys
+  const credential = keys.openai?.['openai-api-key']
+  if (typeof credential !== 'string' || credential.length === 0) {
+    shellClassifierCache = null
+    return null
+  }
+  const model = configuredShellClassifierModel(currentHost?.spec.approval?.shellClassifierModel)
+  const fingerprint = createHash('sha256').update(credential).digest('hex')
+  if (shellClassifierCache?.fingerprint === fingerprint && shellClassifierCache.model === model) {
+    return shellClassifierCache.caller
+  }
+  const provider = createLLMProvider(
+    keys,
+    { provider: 'openai', name: model },
+    { env: hostProviderEnv('openai') }
+  )
+  if (!provider) {
+    // createLLMProvider already logged the construction failure.
+    shellClassifierCache = null
+    return null
+  }
+  const caller: ShellClassifierCaller = {
+    provider,
+    providerType: provider.getProviderType(),
+    modelName: model,
+  }
+  shellClassifierCache = { fingerprint, model, caller }
+  return caller
 }
 
 /**
@@ -911,8 +973,9 @@ async function initializeProvider(
 
 /**
  * Publish this host's approval policy. Effective tools stay
- * `spec.approval || CLERUM_APPROVAL_CONFIG`. The ceiling and channel cap read
- * `spec.approval` alone, except dev mode, which passes the env config.
+ * `spec.approval || CLERUM_APPROVAL_CONFIG`. The ceiling and the channel switch
+ * read `spec.approval` alone, except dev mode, which passes the env config. The
+ * approver policy in the channel cap reads the effective policy.
  * Runs before credential reconciliation so a later event cannot be overwritten
  * by an older completion.
  */
@@ -1876,6 +1939,34 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
 }
 
 /**
+ * The agent state machine, with the per-task sources it reads from this
+ * module.
+ */
+function createAgent(queue: MessageQueue, lifecycle: TaskLifecycle): AgentStateMachine {
+  const created = new AgentStateMachine(queue, lifecycle, {
+    maxTaskDuration: config.agentMaxTaskDuration,
+    maxToolCallsPerTask: config.agentMaxToolCallsPerTask,
+    autoStart: true,
+    taskDelay: config.agentTaskDelay,
+    approvalTimeout: config.agentApprovalTimeout,
+  })
+
+  // R2 — inject the per-task model resolver. Closes over the module globals
+  // (currentHost + configStore) so it always reads the live keys/allowlist; a
+  // key rotation or allowlist reload is picked up on the next task with no
+  // re-wiring.
+  created.setTaskModelResolver(resolveTaskModel)
+  created.setImageInputResolver(resolveImageInput)
+
+  // R5 — inject the provider-fallback support. Closes over the module globals
+  // (currentPolicy/failoverEngine/bootFallbackEntry + configStore) so each task
+  // reads the live policy + sticky failover state. Null when no policy.
+  created.setFailoverSupport(currentFailoverSupport)
+  created.setShellClassifierProvider(shellClassifierCaller)
+  return created
+}
+
+/**
  * Initialize the message queue and agent.
  */
 async function initializeAgent(): Promise<void> {
@@ -1889,14 +1980,8 @@ async function initializeAgent(): Promise<void> {
   taskLifecycle = new TaskLifecycle()
   messageQueue.setLifecycle(taskLifecycle)
 
-  // Create agent state machine
-  agent = new AgentStateMachine(messageQueue, taskLifecycle, {
-    maxTaskDuration: config.agentMaxTaskDuration,
-    maxToolCallsPerTask: config.agentMaxToolCallsPerTask,
-    autoStart: true,
-    taskDelay: config.agentTaskDelay,
-    approvalTimeout: config.agentApprovalTimeout,
-  })
+  // Create agent state machine. Set once here (the agent is created once).
+  agent = createAgent(messageQueue, taskLifecycle)
 
   logger.info(
     {
@@ -1908,18 +1993,6 @@ async function initializeAgent(): Promise<void> {
     },
     '[Main] Agent config: taskDelay=ms, maxTaskDuration=ms, maxToolCalls=, maxQueueSize=, approvalTimeout=ms'
   )
-
-  // R2 — inject the per-task model resolver. Closes over the module globals
-  // (currentHost + configStore) so it always reads the live keys/allowlist; a
-  // key rotation or allowlist reload is picked up on the next task with no
-  // re-wiring. Set once here (the agent is created once).
-  agent.setTaskModelResolver(resolveTaskModel)
-  agent.setImageInputResolver(resolveImageInput)
-
-  // R5 — inject the provider-fallback support. Closes over the module globals
-  // (currentPolicy/failoverEngine/bootFallbackEntry + configStore) so each task
-  // reads the live policy + sticky failover state. Null when no policy.
-  agent.setFailoverSupport(currentFailoverSupport)
 
   // Phase 6: publish approval once. Host changes publish again from onHostChange,
   // before credential reconciliation. initializeProvider does not.
@@ -1955,6 +2028,12 @@ async function initializeAgent(): Promise<void> {
   // print the value gets it redacted before it leaves mcp-host.
   agent.setDynamicEnvProvider(() => agentToolEnvProvider(configStore))
   agent.setSecretEntriesProvider(() => configStore?.listSecretEntries() ?? [])
+  agent.setActionAuthorityCheckpoint(async binding => {
+    const auth = runtimeAuth
+    if (!auth) return 'unavailable'
+    const result = await checkpointMcpHostActionAuthority(binding, auth)
+    return runtimeActionCheckpointDecision(result)
+  })
 
   const gfsRuntime = await bootstrapGfsRuntime(config.nativeTool.workspacePath)
   gfsWorkspaceProvider = gfsRuntime.workspaceProvider
@@ -2754,8 +2833,8 @@ async function getStatus(): Promise<StatusResponse> {
 
   const cronJobs = cronScheduler?.getAllJobs().length || 0
 
-  // Phase 6: Include pending approvals
-  const pendingApprovals = agent?.getPendingApprovals() || []
+  // Phase 6: Include pending approvals, projected to their start time only
+  const pendingApprovals = pendingApprovalsForStatus(agent)
 
   const mcpServers = mcpManager ? mcpManager.status.snapshot() : []
   const degraded = computeDegradedReason()
@@ -2838,13 +2917,14 @@ function computeDegradedReason(): StatusResponse['degraded'] {
 
 async function getActivitySnapshot(
   limit: number,
-  sinceEventId?: string
+  sinceEventId?: string,
+  visibility?: ActivitySnapshotVisibility
 ): Promise<HostActivitySnapshotResponse> {
   const hostRef = resolveHostRef()
   if (!activityHub) {
     return { hostRef, version: '1.0', items: [], nextCursor: null }
   }
-  return activityHub.snapshot(hostRef, limit, sinceEventId)
+  return activityHub.snapshot(hostRef, limit, sinceEventId, visibility)
 }
 
 function subscribeActivity(onEvent: (event: HostActivityEvent) => void): {
@@ -2934,6 +3014,10 @@ async function startRPCServer(): Promise<void> {
         : { providerType: 'unknown', modelName: 'unknown' }
     },
     servedModel: () => failoverEngine?.servedBy() ?? null,
+    shellClassifierPair: () => {
+      const caller = shellClassifierCaller()
+      return caller ? { providerType: caller.providerType, modelName: caller.modelName } : null
+    },
   })
 
   const handleContextBreakdown = async (userSub: string, agentName: string, chatId: string) => {
@@ -3054,6 +3138,17 @@ async function startRPCServer(): Promise<void> {
   rpcServer.onStatus(getStatus)
   rpcServer.onActivitySnapshot(getActivitySnapshot)
   rpcServer.onActivityStream(subscribeActivity)
+  rpcServer.onActivityStreamCheckpoint(async binding => {
+    const auth = runtimeAuth
+    if (!auth) return 'unavailable'
+    try {
+      return runtimeActionCheckpointDecision(
+        await checkpointMcpHostActivityStreamAuthority(binding, auth)
+      )
+    } catch {
+      return 'unavailable'
+    }
+  })
   rpcServer.onApproval(handleApprovalDecision)
   wireWorkflowApprovalRuntimeRoutes(rpcServer, {
     providerMessageAuthorization: handleProviderMessageAuthorization,
@@ -3077,7 +3172,9 @@ async function startRPCServer(): Promise<void> {
   rpcServer.onSetApprovalMode(handleSetApprovalMode)
   // T3.1 — session search REST endpoint. Only wired when the feature is
   // enabled and the SQLite backend is live; otherwise the route returns 501
-  // through `handleSessionSearchRoute`.
+  // through `handleSessionSearchRoute`; in this release the edge guard answers
+  // 401 before the handler runs, so the route returns neither 200 nor 501
+  // until V2 edge assertions are accepted.
   if (sessionSearchService) {
     const service = sessionSearchService
     rpcServer.onSessionSearch(async req => {
@@ -3340,6 +3437,7 @@ async function shutdown(signal: string): Promise<void> {
 
   // Stop components in order
   stopRuntimeAuthProactiveRefresh()
+  stopPr2ReadinessReporter?.()
   hostWatcher?.stop()
   llmHookWatcher?.stop()
   configStore?.stop()
@@ -3917,6 +4015,7 @@ async function main(): Promise<void> {
       }
     },
   })
+  if (runtimeAuth) stopPr2ReadinessReporter = startPr2ReadinessReporter(runtimeAuth)
 }
 
 // Run main only when this module is the executable entry point. Keeping imports
@@ -3930,6 +4029,10 @@ async function main(): Promise<void> {
 export const mainRpcTestSeams = {
   setAgent(next: AgentStateMachine | null): void {
     agent = next
+  },
+  /** The agent initializeAgent builds, without the rest of the boot. */
+  createAgent(queue: MessageQueue, lifecycle: TaskLifecycle): AgentStateMachine {
+    return createAgent(queue, lifecycle)
   },
   setMessageQueue(next: MessageQueue | null): void {
     messageQueue = next

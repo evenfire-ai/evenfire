@@ -831,11 +831,24 @@ if [[ "${cluster_changed}" == "true" ]]; then
   assert_workflow_gateway_prompt_bridge_finalization_route
   assert_hcc_gateway_np08_routes
 
+  hcc_edge_protocol="$(${KC} get deployment host-context-controller -n control-plane -o json | \
+    jq -er '[.spec.template.spec.containers[]?.env[]? |
+      select(.name == "CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL") | .value] |
+      if length == 1 then .[0] else error("protocol selector must be explicit") end')"
+  if [[ "${hcc_edge_protocol}" != "signed-assertion-v1" ]]; then
+    log "ERROR: HCC Host edge protocol selector must be signed-assertion-v1; refusing rollout"
+    exit 1
+  fi
+  # Upgrade order: control-api (restored above) signs the edge assertion, the
+  # RPC Proxy cohort that forwards it must be fully Ready before HCC can
+  # converge any Host Deployment, and the Hosts roll last.
+  rollout_if_present rpc-proxy rpc-proxy
+  bash "${SCRIPT_DIR}/rpc-proxy-edge-rollout-gate.sh" wait-proxy \
+    --context "${PROFILE}" --timeout-seconds 120
   rollout_if_present control-plane host-context-controller
   rollout_if_present control-plane workflow-recipes
   rollout_if_present control-plane control-ui
   rollout_if_present profiles external-rest-api
-  rollout_if_present rpc-proxy rpc-proxy
   rollout_namespace_deployments mcp-host
   rollout_if_present channels clerum-channel-reader
   rollout_if_present channels clerum-workflow-approval-request-reader

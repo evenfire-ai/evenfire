@@ -1,15 +1,34 @@
 import { Router } from 'express'
 import type { Response as ExpressResponse, NextFunction } from 'express'
 import { randomUUID } from 'crypto'
+import {
+  HOST_EDGE_ASSERTION_HEADER,
+  HOST_EDGE_RPC_PROXY_ROUTE_SCOPES,
+} from '@clerum/action-context-contracts'
+import {
+  ActionAuthorityCheckpointError,
+  actionAuthorityCacheKey,
+  authorizeActionV2,
+} from '../actionAuthorityV2.js'
 import { config } from '../config.js'
+import { getHostRpcPreflight, safeAgentSegment, safePathSegment } from '../hostRpcPreflight.js'
 import {
   type AuthedRequest,
+  bindHostRpcScope,
   extractAuthToken,
+  requireHostRefCheckpointScope,
+  requireHostRpcJsonBodyPreflightScope,
+  requireHostRpcPreflightScope,
   requireRpcAuth,
   requireScope,
+  requireV2SessionSearch,
+  runHostRefCheckpoint,
+  runHostRpcPreflightCheckpoint,
 } from '../middleware/auth.js'
 import { chatJsonBody } from '../middleware/chatJsonBody.js'
+import { validateHostRef } from '../middleware/hostRefValidation.js'
 import { jsonBody } from '../middleware/jsonBody.js'
+import { runtimeHostEdgeContext, sendCheckpointError } from '../routeActionBindingV2.js'
 import { rpcInvocationContext } from '../rpcAccessContext.js'
 import {
   ControlApiConnectorsRejectedError,
@@ -18,8 +37,10 @@ import {
   requestHostWakeFromControlApi,
 } from '../services/controlApiRestService.js'
 import {
+  type HostAccessDenial,
   type HostAccessDenialCode,
   isHostAccessDenied,
+  respondControlApiAuthorityUnavailable,
   respondHostAccessDenied,
   withoutReservedHostAccessCode,
 } from '../services/hostAccessDenial.js'
@@ -33,8 +54,10 @@ import {
   forwardRpcToServer,
   forwardTaskResultFromHost,
   listAllowedServersForUser,
+  refreshV1HostConnection,
   resolveHostConnectionForUser,
   resolveServerConnectionForUser,
+  v2HostEdgeAssertion,
   validateRpcRequest,
 } from '../services/mcpProxyService.js'
 import { readMutatingResponseBody } from '../services/upstreamBody.js'
@@ -47,35 +70,9 @@ import {
   sanitizeHostRefForLog,
 } from '../services/wakeAndHold.js'
 import { mintOrReuseDirectTraceContext } from '../traceContext.js'
+import type { ResolvedServerConnection } from '../types.js'
 
 const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
-
-// Edge caps on the client-supplied page size before forwarding upstream. The
-// host enforces its own identical caps independently; these are the proxy's
-// own copy (the two services share no package, so each names its own).
-const SESSIONS_LIMIT_CAP = 100
-const MESSAGES_LIMIT_CAP = 200
-
-function isSafeUpstreamPathSegment(value: string): boolean {
-  return (
-    value.length > 0 &&
-    value !== '.' &&
-    value !== '..' &&
-    value.length <= 500 &&
-    !/[/\\\u0000-\u001f\u007f]/.test(value)
-  )
-}
-
-function isSafeUpstreamAgentSegment(value: string): boolean {
-  return isSafeUpstreamPathSegment(value) && value.length <= 200 && !value.includes(':')
-}
-
-function parseUnsignedIntegerQuery(value: unknown): number | undefined | null {
-  if (value === undefined) return undefined
-  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null
-  const parsed = Number(value)
-  return Number.isSafeInteger(parsed) ? parsed : null
-}
 
 type ShellAction = 'once' | 'command' | 'shell'
 type ApprovalMode = 'manual' | 'auto' | 'allow_all'
@@ -98,8 +95,14 @@ function readApprovalModeBody(body: unknown): ApprovalMode | null {
   return readApprovalMode((body as { mode?: unknown }).mode) ?? null
 }
 
+// Keep legacy denial precedence (scope before body parsing), while v2 route
+// binding must see parsed body data before its remote Control API checkpoint.
 /**
- * Pre-wake host error mapping: fetch timeout → 504, everything else → 502.
+ * Pre-wake host error mapping: a control-api answer without an edge assertion
+ * gets 503 `authority_unavailable` (respondControlApiAuthorityUnavailable), an
+ * authentication failure gets the answer of respondAuthenticationFailure (401,
+ * or the control-api rejection's answer), fetch timeout → 504, everything
+ * else → 502.
  *
  * Guards `res.headersSent` (§11.5): this is the terminal responder that
  * route-level outer catches invoke after a held request may already have
@@ -115,6 +118,8 @@ export function respondUpstreamUnavailable(res: ExpressResponse, error: unknown)
     )
     return
   }
+  if (respondControlApiAuthorityUnavailable(res, error)) return
+  if (respondAuthenticationFailure(res, error)) return
   if (isUpstreamTimeoutError(error)) {
     res.status(504).json({ error: 'Gateway Timeout' })
     return
@@ -223,6 +228,33 @@ export function respondControlApiHostAccessRejection(
 }
 
 /**
+ * The one mapping of an authentication failure to the client, called by both
+ * terminal error paths (respondUpstreamUnavailable and apiErrorHandler) right
+ * after respondControlApiAuthorityUnavailable.
+ * A Host 401 means the edge assertion was refused, usually because it or the
+ * RPC token expired: the client gets 401 so it refreshes its token, never a
+ * 500 or 502. A control-api host access rejection gets its own answer. Errors
+ * are matched by `name`, like controlApiHostAccessRejection. Returns false,
+ * having written nothing, for every other error.
+ */
+export function respondAuthenticationFailure(res: ExpressResponse, error: unknown): boolean {
+  if (
+    error instanceof Error &&
+    error.name === 'UpstreamHostError' &&
+    (error as Error & { status?: unknown }).status === 401
+  ) {
+    res.status(401).json({ error: 'Unauthorized' })
+    return true
+  }
+  const rejection = controlApiHostAccessRejection(error)
+  if (rejection) {
+    respondControlApiHostAccessRejection(res, rejection)
+    return true
+  }
+  return false
+}
+
+/**
  * Abort signal for a MUTATING upstream call (approve, deny, set-model, task
  * cancel). The first attempt has no client-side timeout by design: aborting a
  * request the upstream may already have applied would answer 504 for a change
@@ -245,6 +277,58 @@ function mutatingCallSignal(timeoutMs: number | undefined, res: ExpressResponse)
   return timeoutMs === undefined
     ? clientGone.signal
     : AbortSignal.any([clientGone.signal, AbortSignal.timeout(timeoutMs)])
+}
+
+/**
+ * The authority refresh a wake-and-hold retry runs before each attempt: V2
+ * re-runs the action checkpoint, V1 re-resolves the Host connection for a fresh
+ * edge assertion when the held one is near its `exp`. `respondDenied` is the route's answer for a denial at its
+ * first resolve, used when the V1 re-resolve is denied.
+ */
+function wakeAndHoldAuthorityOptions(
+  req: AuthedRequest,
+  hostRef: string,
+  host: ResolvedServerConnection,
+  respondDenied: (denial: HostAccessDenial) => void
+) {
+  const initial = req.authorizedActionV2
+  if (!initial) {
+    const userId = req.auth!.sub
+    const rpcAccessToken = extractAuthToken(req)
+    return {
+      refreshV1Host: {
+        refresh: () => refreshV1HostConnection(host, userId, hostRef, rpcAccessToken),
+        respondDenied,
+      },
+    }
+  }
+  return {
+    authorizedActionV2: initial,
+    reauthorizeV2: async () => {
+      const current = req.authorizedActionV2 ?? initial
+      const hostMessageAdmission = req.hostMessageAdmissionRetryContext
+      const refreshed = await authorizeActionV2(current.claims, current.bound, {
+        ...(hostMessageAdmission
+          ? {
+              hostMessageAdmission,
+              onHostMessageAdmissionReceipt: receipt => {
+                req.hostMessageAdmissionRetryContext = Object.freeze({
+                  ...hostMessageAdmission,
+                  receipt,
+                })
+              },
+            }
+          : {}),
+      })
+      // Both headers come from the same checkpoint and are written together,
+      // with no await between them: never a newer context with an older
+      // assertion.
+      const assertion = v2HostEdgeAssertion(refreshed)
+      req.authorizedActionV2 = refreshed
+      host.headers['x-clerum-edge-action-context'] = refreshed.trustedEdgeHeader
+      host.headers[HOST_EDGE_ASSERTION_HEADER] = assertion
+    },
+  }
 }
 
 class ProxyArtifactTooLargeError extends Error {
@@ -366,8 +450,8 @@ export function createRpcRouter(): Router {
   router.post(
     '/rpc/:serverName',
     requireRpcAuth,
-    requireScope('mcp:server:invoke'),
     jsonBody,
+    requireScope('mcp:server:invoke'),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -378,7 +462,14 @@ export function createRpcRouter(): Router {
           return
         }
 
-        const server = await resolveServerConnectionForUser(auth.sub, serverName, rpcAccessToken)
+        const server = req.authorizedActionV2
+          ? await resolveServerConnectionForUser(
+              auth.sub,
+              serverName,
+              rpcAccessToken,
+              req.authorizedActionV2
+            )
+          : await resolveServerConnectionForUser(auth.sub, serverName, rpcAccessToken)
         if (!server) {
           res.status(403).json({ error: 'Forbidden: user cannot access this server' })
           return
@@ -395,9 +486,39 @@ export function createRpcRouter(): Router {
           `[RPC_PROXY] user=${auth.sub} server=${serverName} method=${rpcRequest.method}`
         )
 
-        const rpcResponse = await forwardRpcToServer(server, rpcRequest, auth.sub)
+        const authorizedV2 = req.authorizedActionV2
+        const rpcResponse = await forwardRpcToServer(server, rpcRequest, auth.sub, {
+          ...(authorizedV2
+            ? {
+                authorityCacheKey: actionAuthorityCacheKey(authorizedV2.claims, authorizedV2.bound),
+                authorityExpiresAt: authorizedV2.trustedEdgeContext.expiresAt,
+                beforeRetry: async () => {
+                  const refreshed = await authorizeActionV2(authorizedV2.claims, authorizedV2.bound)
+                  const refreshedServer = await resolveServerConnectionForUser(
+                    auth.sub,
+                    serverName,
+                    rpcAccessToken,
+                    refreshed
+                  )
+                  if (!refreshedServer) {
+                    throw new Error('Refreshed v2 MCP destination is unavailable')
+                  }
+                  req.authorizedActionV2 = refreshed
+                  return {
+                    server: refreshedServer,
+                    authorityCacheKey: actionAuthorityCacheKey(refreshed.claims, refreshed.bound),
+                    authorityExpiresAt: refreshed.trustedEdgeContext.expiresAt,
+                  }
+                },
+              }
+            : {}),
+        })
         res.status(200).json(rpcResponse)
       } catch (error) {
+        if (error instanceof ActionAuthorityCheckpointError) {
+          sendCheckpointError(res, error)
+          return
+        }
         next(error)
       }
     }
@@ -406,8 +527,9 @@ export function createRpcRouter(): Router {
   router.post(
     '/rpc/hosts/:hostRef/messages',
     requireRpcAuth,
-    requireScope('host:message:invoke'),
     chatJsonBody,
+    bindHostRpcScope(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/messages']),
+    runHostRpcPreflightCheckpoint,
     async (req: AuthedRequest, res) => {
       // Host runtime write path (REST-oriented):
       // - separate from read-only status stream
@@ -415,21 +537,8 @@ export function createRpcRouter(): Router {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!isSafeUpstreamPathSegment(hostRef)) {
-          res.status(400).json({ error: 'Invalid hostRef' })
-          return
-        }
-
-        const body = req.body as HostRuntimeMessageRequest
-        if (!body || typeof body !== 'object' || Array.isArray(body)) {
-          res.status(400).json({ error: 'Invalid host message request payload' })
-          return
-        }
-        if (typeof body.content !== 'string' || !body.content.trim()) {
-          res.status(400).json({ error: 'Invalid host message request payload' })
-          return
-        }
+        const { hostRef, body: preflightBody } = getHostRpcPreflight(req)
+        const body = preflightBody as HostRuntimeMessageRequest
 
         // Identity invariant: rpc-proxy is the sole authority on the Desktop
         // RPC envelope. Ignore client-supplied channel, sender, host, and
@@ -456,7 +565,11 @@ export function createRpcRouter(): Router {
           typeof req.headers['idempotency-key'] === 'string'
             ? req.headers['idempotency-key'].trim()
             : ''
-        const deliveryMessageId = clientIdempotencyKey || randomUUID()
+        const validatedV2MessageId =
+          req.authorizedActionV2?.bound.operationId === 'chat.message.invoke'
+            ? req.authorizedActionV2.bound.target?.messageId
+            : undefined
+        const deliveryMessageId = validatedV2MessageId || clientIdempotencyKey || randomUUID()
         const requestId =
           typeof req.headers['x-request-id'] === 'string'
             ? req.headers['x-request-id'].trim()
@@ -470,22 +583,29 @@ export function createRpcRouter(): Router {
           requestId,
           origin: 'direct_chat',
         })
-        if (body.attachments != null && !Array.isArray(body.attachments)) {
-          res
-            .status(400)
-            .json({ error: 'invalid_attachments', message: 'Attachments must be a list.' })
-          return
-        }
         // First-message mode. This body is an allowlist: forward approvalMode
-        // only for a stored value when the token also has host:session:write.
-        // Carrying the field without that scope is 403. A message without the
-        // field needs only host:message:invoke. An invalid value is dropped.
+        // only for a stored value when the token also has host:approval:write,
+        // the mode PATCH's scope. Carrying the field without that scope is 403,
+        // checked before the value. With the scope, a value that is not a
+        // stored mode is 400, as on the PATCH. A message without the field
+        // needs only host:message:invoke.
         const carriesApprovalMode = Object.prototype.hasOwnProperty.call(body, 'approvalMode')
-        if (carriesApprovalMode && !auth.scopes.includes('host:session:write')) {
+        if (
+          carriesApprovalMode &&
+          !auth.scopes.includes(
+            HOST_EDGE_RPC_PROXY_ROUTE_SCOPES[
+              'PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode'
+            ]
+          )
+        ) {
           res.status(403).json({ error: 'Forbidden: missing scope' })
           return
         }
         const approvalMode = carriesApprovalMode ? readApprovalMode(body.approvalMode) : undefined
+        if (carriesApprovalMode && !approvalMode) {
+          res.status(400).json({ error: 'approvalMode must be manual, auto, or allow_all' })
+          return
+        }
         const forwardedBody: HostRuntimeMessageRequest = {
           content: body.content,
           channelType: 'rpc',
@@ -493,10 +613,15 @@ export function createRpcRouter(): Router {
           hostRef,
           sender: auth.sub,
           messageId: deliveryMessageId,
-          metadata: rpcInvocationContext(auth),
+          // V2 authority is carried only by the trusted edge envelope. The
+          // legacy metadata adapter remains isolated to v1 compatibility.
+          metadata: req.authorizedActionV2 ? undefined : rpcInvocationContext(auth),
           threadId: desktopSessionId,
           attachments: Array.isArray(body.attachments) ? body.attachments : undefined,
           ...(body.fileReferences === undefined ? {} : { fileReferences: body.fileReferences }),
+          ...(body.locationReferences === undefined
+            ? {}
+            : { locationReferences: body.locationReferences }),
           ...(body.modelSelectionRevision === undefined
             ? {}
             : { modelSelectionRevision: body.modelSelectionRevision }),
@@ -511,20 +636,28 @@ export function createRpcRouter(): Router {
         }
 
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-          ...(traceContext.sessionId
-            ? {
-                directRunBinding: {
-                  runId: traceContext.runId,
-                  sessionId: traceContext.sessionId,
-                  origin: traceContext.origin,
-                },
-              }
-            : {}),
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req, {
+            ...(traceContext.sessionId
+              ? {
+                  directRunBinding: {
+                    runId: traceContext.runId,
+                    sessionId: traceContext.sessionId,
+                    origin: traceContext.origin,
+                  },
+                }
+              : {}),
+          })
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
         if (host.attributionBindingStatus === 'unavailable') {
@@ -574,7 +707,10 @@ export function createRpcRouter(): Router {
               // The per-request messageId makes a re-presented POST a
               // duplicate_delivery replay, so retrying until the deadline is safe.
               retryUntilDeadline: true,
-              attemptUpstream: async timeoutMs => {
+              ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+                respondHostAccessDenied(res, denial)
+              ),
+              attemptUpstream: async (timeoutMs, deadlineMs) => {
                 const retried = await forwardHostMessageToHost(host, forwardedBody, {
                   async: isAsync,
                   timeoutMs,
@@ -618,29 +754,38 @@ export function createRpcRouter(): Router {
   router.post(
     '/rpc/hosts/:hostRef/wake',
     requireRpcAuth,
-    requireScope('host:wake:write'),
+    jsonBody,
+    requireHostRpcPreflightScope('host:wake:write'),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!isSafeUpstreamPathSegment(hostRef)) {
-          res.status(400).json({ error: 'Invalid hostRef' })
-          return
-        }
+        const { hostRef } = getHostRpcPreflight(req)
 
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
 
         console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=host-wake`)
         let wake: HostWakeApiResponse
         try {
-          wake = await requestHostWakeFromControlApi(hostRef, rpcAccessToken)
+          wake = req.authorizedActionV2
+            ? await requestHostWakeFromControlApi(hostRef, rpcAccessToken, {
+                authorizedActionV2: req.authorizedActionV2,
+                wakeReason: String(req.authorizedActionV2.bound.target?.wakeReason || 'explicit'),
+              })
+            : await requestHostWakeFromControlApi(hostRef, rpcAccessToken)
         } catch (error) {
           console.warn(
             `[RPC_PROXY] host wake request failed host=${hostRef} error=${
@@ -681,6 +826,9 @@ export function createRpcRouter(): Router {
             // control-api rejected the caller's rpc access token — mirror it.
             res.status(wake.status).json({ error: 'Control API rejected the rpc access token' })
             return
+          case 'authority':
+            res.status(wake.status).json({ error: wake.code })
+            return
           default: {
             // Exhaustiveness guard: a future HostWakeApiResponse kind must
             // answer 502 instead of leaving the request hanging until the
@@ -702,17 +850,15 @@ export function createRpcRouter(): Router {
   router.post(
     '/rpc/hosts/:hostRef/approvals/approve',
     requireRpcAuth,
-    requireScope('host:approval:write'),
     jsonBody,
+    requireHostRpcPreflightScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/approvals/approve']
+    ),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
+        const { hostRef, approvalRequestId } = getHostRpcPreflight(req)
         const parsed = req.body as Record<string, unknown>
         // Persistent consent must be an explicit boolean: a truthy string such
         // as "false" must never turn into an exact-name allowlist entry.
@@ -729,11 +875,18 @@ export function createRpcRouter(): Router {
           return
         }
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -742,7 +895,8 @@ export function createRpcRouter(): Router {
         // sender that was stamped onto the original message).
         const upstreamBody = {
           userId: auth.sub,
-          requestId: parsed.toolCallId || parsed.requestId,
+          ...(typeof parsed.taskId === 'string' ? { taskId: parsed.taskId } : {}),
+          requestId: approvalRequestId,
           alwaysApprove,
           ...(shellAction ? { shellAction } : {}),
         }
@@ -773,6 +927,9 @@ export function createRpcRouter(): Router {
             claims: auth,
             rpcAccessToken,
             deadlineMs: wakeDeadlineMs,
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -787,23 +944,28 @@ export function createRpcRouter(): Router {
   router.post(
     '/rpc/hosts/:hostRef/approvals/deny',
     requireRpcAuth,
-    requireScope('host:approval:write'),
     jsonBody,
+    requireHostRpcPreflightScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/approvals/deny']
+    ),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
+        const { hostRef, approvalRequestId } = getHostRpcPreflight(req)
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -813,7 +975,8 @@ export function createRpcRouter(): Router {
         const parsed = req.body as Record<string, unknown>
         const upstreamBody = {
           userId: auth.sub,
-          requestId: parsed.toolCallId || parsed.requestId,
+          ...(typeof parsed.taskId === 'string' ? { taskId: parsed.taskId } : {}),
+          requestId: approvalRequestId,
         }
         // Wake-eligible finite operation (§11.4): scope stays host:approval:write.
         const attempt = async (timeoutMs?: number) => {
@@ -839,7 +1002,101 @@ export function createRpcRouter(): Router {
             claims: auth,
             rpcAccessToken,
             deadlineMs: wakeDeadlineMs,
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: attempt,
+            respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
+          })
+        }
+      } catch (error) {
+        guardedNext(res, next, error)
+      }
+    }
+  )
+
+  // Session search is a PR 2 trusted-edge operation. Unlike the neighboring
+  // compatibility session reads, this route deliberately has no v1 user-token
+  // authority: the selected path must be checkpointed and carried to mcp-host.
+  router.get(
+    '/rpc/hosts/:hostRef/sessions/search',
+    requireRpcAuth,
+    bindHostRpcScope(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/sessions/search']),
+    requireV2SessionSearch,
+    runHostRpcPreflightCheckpoint,
+    async (req: AuthedRequest, res, next) => {
+      try {
+        if (!req.userDelegationV2 || !req.authorizedActionV2) {
+          res.status(403).json({ error: 'User delegation v2 required for session search' })
+          return
+        }
+        const auth = req.auth!
+        const rpcAccessToken = extractAuthToken(req)
+        const {
+          hostRef,
+          query: rawQuery,
+          scope: rawScope,
+          channel: rawChannel,
+          since: rawSince,
+          limit: rawLimit,
+        } = getHostRpcPreflight(req)
+
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
+        if (isHostAccessDenied(host)) {
+          respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+          return
+        }
+        const upstreamUrl = new URL(`${host.url.replace(/\/+$/, '')}/v1/runtime/sessions/search`)
+        upstreamUrl.searchParams.set('q', rawQuery!)
+        upstreamUrl.searchParams.set(
+          'scope',
+          rawScope === 'all_channels' ? 'all_channels' : 'this_channel'
+        )
+        if (typeof rawChannel === 'string') {
+          upstreamUrl.searchParams.set('channel', rawChannel.trim())
+        }
+        if (typeof rawSince === 'string') upstreamUrl.searchParams.set('since', rawSince.trim())
+        if (rawLimit !== undefined) {
+          upstreamUrl.searchParams.set('limit', String(rawLimit))
+        }
+
+        const forwardSearch = async () => {
+          const response = await fetch(upstreamUrl, {
+            method: 'GET',
+            headers: { ...host.headers },
+            signal: AbortSignal.timeout(config.upstreamTimeoutMs),
+          })
+          const body = await response.text()
+          const draining = sessionDrainingFence(response, body)
+          if (draining) throw draining
+          res
+            .status(response.status)
+            .type(response.headers.get('content-type') || 'application/json')
+            .send(body)
+        }
+        try {
+          await forwardSearch()
+        } catch (error) {
+          if (!isWakeEligibleHostError(error)) throw error
+          await respondWithWakeAndHold({
+            res,
+            hostRef,
+            host,
+            claims: auth,
+            rpcAccessToken,
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
+            attemptUpstream: forwardSearch,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
         }
@@ -853,48 +1110,37 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/sessions',
     requireRpcAuth,
-    requireScope('host:session:read'),
+    requireHostRpcPreflightScope(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/sessions']),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!isSafeUpstreamPathSegment(hostRef)) {
-          res.status(400).json({ error: 'Invalid hostRef' })
-          return
-        }
-        const rawSessionAgent = req.query.agent
-        const sessionAgent =
-          typeof rawSessionAgent === 'string' ? rawSessionAgent.trim() : undefined
-        const rawSessionCursor = req.query.cursor
-        const sessionCursor = typeof rawSessionCursor === 'string' ? rawSessionCursor : ''
-        const sessionLimit = parseUnsignedIntegerQuery(req.query.limit)
-        if (
-          (rawSessionAgent !== undefined && typeof rawSessionAgent !== 'string') ||
-          (rawSessionCursor !== undefined && typeof rawSessionCursor !== 'string') ||
-          (rawSessionAgent !== undefined &&
-            (!sessionAgent || !isSafeUpstreamAgentSegment(sessionAgent))) ||
-          (rawSessionCursor !== undefined && !sessionCursor) ||
-          sessionCursor.length > 2048 ||
-          sessionLimit === null ||
-          (sessionLimit !== undefined && sessionLimit < 1)
-        ) {
-          res.status(400).json({ error: 'Invalid session pagination query' })
-          return
-        }
+        const {
+          hostRef,
+          agent: sessionAgent,
+          cursor: sessionCursor,
+          limit: sessionLimit,
+        } = getHostRpcPreflight(req)
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
         const upstreamUrl = new URL(`${baseUrl}/v1/runtime/sessions`)
         if (sessionAgent) upstreamUrl.searchParams.set('agent', sessionAgent)
         if (sessionLimit !== undefined) {
-          upstreamUrl.searchParams.set('limit', String(Math.min(sessionLimit, SESSIONS_LIMIT_CAP)))
+          upstreamUrl.searchParams.set('limit', String(sessionLimit))
         }
         if (sessionCursor) upstreamUrl.searchParams.set('cursor', sessionCursor)
         console.info(`[RPC_PROXY] user=${auth.sub} host=${hostRef} method=list-sessions`)
@@ -937,6 +1183,9 @@ export function createRpcRouter(): Router {
             deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: forwardSessionList,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -951,55 +1200,42 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/sessions/:agent/:chatId/messages',
     requireRpcAuth,
-    requireScope('host:session:read'),
+    requireHostRpcPreflightScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/sessions/:agent/:chatId/messages']
+    ),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        const agent = String(req.params.agent || '').trim()
-        const chatId = String(req.params.chatId || '').trim()
-        if (
-          !isSafeUpstreamPathSegment(hostRef) ||
-          !isSafeUpstreamAgentSegment(agent) ||
-          !isSafeUpstreamPathSegment(chatId)
-        ) {
-          res.status(400).json({ error: 'Invalid hostRef, agent, or chatId' })
-          return
-        }
-        const rawLimit = parseUnsignedIntegerQuery(req.query.limit)
-        const beforeTurn = parseUnsignedIntegerQuery(req.query.beforeTurn)
-        const afterTurn = parseUnsignedIntegerQuery(req.query.afterTurn)
-        const invalidQueryShape = ['limit', 'beforeTurn', 'afterTurn'].some(
-          key => req.query[key] !== undefined && typeof req.query[key] !== 'string'
-        )
-        if (
-          invalidQueryShape ||
-          rawLimit === null ||
-          (rawLimit !== undefined && rawLimit < 1) ||
-          beforeTurn === null ||
-          (beforeTurn !== undefined && beforeTurn < 1) ||
-          afterTurn === null ||
-          (afterTurn !== undefined && afterTurn < 0) ||
-          (beforeTurn !== undefined && afterTurn !== undefined)
-        ) {
-          res.status(400).json({ error: 'Invalid session messages pagination query' })
-          return
-        }
+        const {
+          hostRef,
+          agent,
+          chatId,
+          limit: rawLimit,
+          beforeTurn,
+          afterTurn,
+        } = getHostRpcPreflight(req)
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
           return
         }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+          return
+        }
         const baseUrl = host.url.replace(/\/+$/, '')
         const upstreamUrl = new URL(
-          `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/messages`
+          `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent!)}/${encodeURIComponent(chatId!)}/messages`
         )
         if (rawLimit !== undefined) {
-          upstreamUrl.searchParams.set('limit', String(Math.min(rawLimit, MESSAGES_LIMIT_CAP)))
+          upstreamUrl.searchParams.set('limit', String(rawLimit))
         }
         if (beforeTurn !== undefined) {
           upstreamUrl.searchParams.set('beforeTurn', String(beforeTurn))
@@ -1042,6 +1278,9 @@ export function createRpcRouter(): Router {
             deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: forwardTranscript,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1059,28 +1298,27 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/sessions/:agent/:chatId/context-breakdown',
     requireRpcAuth,
-    requireScope('host:session:read'),
+    requireHostRpcPreflightScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/sessions/:agent/:chatId/context-breakdown']
+    ),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        const agent = String(req.params.agent || '').trim()
-        const chatId = String(req.params.chatId || '').trim()
-        if (
-          !isSafeUpstreamPathSegment(hostRef) ||
-          !isSafeUpstreamAgentSegment(agent) ||
-          !isSafeUpstreamPathSegment(chatId)
-        ) {
-          res.status(400).json({ error: 'Invalid hostRef, agent, or chatId' })
-          return
-        }
+        const { hostRef, agent, chatId } = getHostRpcPreflight(req)
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1090,7 +1328,7 @@ export function createRpcRouter(): Router {
         // Wake-eligible finite operation (§11.4): scope stays host:session:read.
         const attempt = async (timeoutMs = config.upstreamTimeoutMs) => {
           const response = await fetch(
-            `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/context-breakdown`,
+            `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent!)}/${encodeURIComponent(chatId!)}/context-breakdown`,
             {
               method: 'GET',
               headers: { ...host.headers },
@@ -1120,6 +1358,9 @@ export function createRpcRouter(): Router {
             deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1133,10 +1374,9 @@ export function createRpcRouter(): Router {
   // Rename a session — write path, scoped to host:session:write (a distinct
   // scope from host:session:read, so a read/navigation token can never rename).
   // Passthrough to mcp-host PATCH /v1/runtime/sessions/:agent/:chatId/name: the
-  // request body (the new title) is forwarded verbatim, and mcp-host owns title
-  // validation, ownership, and the anti-enumeration 404, so its 400/403/404/200
-  // pass through unchanged. Title content is NOT validated here (only the path
-  // segments); the raw title value is never logged.
+  // request body (the new title) uses the shared pure validator during
+  // preflight; mcp-host enforces the same validator at its independent runtime
+  // boundary. Ownership and anti-enumeration remain Host-owned.
   //
   // Deliberately NOT wake-eligible: the Desktop App renames optimistically
   // (local-first) and reconciles on the next listSessions poll, so a suspended
@@ -1145,39 +1385,35 @@ export function createRpcRouter(): Router {
   router.patch(
     '/rpc/hosts/:hostRef/sessions/:agent/:chatId/name',
     requireRpcAuth,
-    requireScope('host:session:write'),
-    jsonBody,
+    requireHostRpcJsonBodyPreflightScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['PATCH /v1/runtime/sessions/:agent/:chatId/name']
+    ),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        const agent = String(req.params.agent || '').trim()
-        const chatId = String(req.params.chatId || '').trim()
-        if (
-          !isSafeUpstreamPathSegment(hostRef) ||
-          !isSafeUpstreamAgentSegment(agent) ||
-          !isSafeUpstreamPathSegment(chatId)
-        ) {
-          res.status(400).json({ error: 'Invalid hostRef, agent, or chatId' })
-          return
-        }
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const { hostRef, agent, chatId, validatedTitle } = getHostRpcPreflight(req)
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
           return
         }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+          return
+        }
         const baseUrl = host.url.replace(/\/+$/, '')
         // Strip line breaks from the user-derived path segments before logging.
-        // They are already control-char-free (isSafeUpstreamPathSegment rejects
-        // the C0 range, CR/LF included, above) so this is defense in depth: a
-        // logged value can never forge an extra log line. Never log the raw title
+        // This prevents a value from forging an extra log line. Never log the raw title
         // (spec 15 §5): titles are user content.
         const logHost = hostRef.replace(/[\r\n]/g, '')
-        const logAgent = agent.replace(/[\r\n]/g, '')
-        const logChatId = chatId.replace(/[\r\n]/g, '')
+        const logAgent = agent!.replace(/[\r\n]/g, '')
+        const logChatId = chatId!.replace(/[\r\n]/g, '')
         console.info(
           `[RPC_PROXY] user=${auth.sub} host=${logHost} method=rename-session agent=${logAgent} chatId=${logChatId}`
         )
@@ -1185,15 +1421,17 @@ export function createRpcRouter(): Router {
           // Only host.headers carry the edge identity (x-clerum-edge-user-id and
           // the caller marker); the client Authorization is never forwarded, so
           // mcp-host's runtimeEdgeGuard stays satisfied. Body is re-serialized
-          // from the parsed JSON and forwarded verbatim: unlike the /model write
-          // path this route does no body-shape guard, since mcp-host owns title
-          // validation and returns its own 400 for a malformed body.
+          // with the canonical preflight title; MCP Host still validates it at
+          // its independent runtime boundary.
           const response = await fetch(
-            `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/name`,
+            `${baseUrl}/v1/runtime/sessions/${encodeURIComponent(agent!)}/${encodeURIComponent(chatId!)}/name`,
             {
               method: 'PATCH',
               headers: { 'content-type': 'application/json', ...host.headers },
-              body: JSON.stringify(req.body),
+              body: JSON.stringify({
+                ...(req.body as Record<string, unknown>),
+                title: validatedTitle,
+              }),
               // No wake retry re-issues a rename, so the timeout stays; a client
               // that leaves still releases the upstream call.
               signal: mutatingCallSignal(config.upstreamTimeoutMs, res),
@@ -1215,14 +1453,18 @@ export function createRpcRouter(): Router {
     }
   )
 
-  // Set a session's stored approval mode. Scope and host access match rename.
-  // Unlike rename this write is wake-eligible: it copies the approve route's
-  // single retry. There is no idempotency key, so a hold re-issues the PATCH
-  // at most once. The body is only { mode }; mcp-host clamps the effective mode.
+  // Set a session's stored approval mode. A mode answers later cards in
+  // advance, so the scope is approve's (host:approval:write), not rename's.
+  // Host access matches rename. Unlike rename this write is wake-eligible: it
+  // copies the approve route's single retry. There is no idempotency key, so a
+  // hold re-issues the PATCH at most once. The body is only { mode }; mcp-host
+  // clamps the effective mode.
   router.patch(
     '/rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode',
     requireRpcAuth,
-    requireScope('host:session:write'),
+    requireScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode']
+    ),
     jsonBody,
     async (req: AuthedRequest, res, next) => {
       try {
@@ -1231,11 +1473,7 @@ export function createRpcRouter(): Router {
         const hostRef = String(req.params.hostRef || '').trim()
         const agent = String(req.params.agent || '').trim()
         const chatId = String(req.params.chatId || '').trim()
-        if (
-          !isSafeUpstreamPathSegment(hostRef) ||
-          !isSafeUpstreamAgentSegment(agent) ||
-          !isSafeUpstreamPathSegment(chatId)
-        ) {
+        if (!safePathSegment(hostRef) || !safeAgentSegment(agent) || !safePathSegment(chatId)) {
           res.status(400).json({ error: 'Invalid hostRef, agent, or chatId' })
           return
         }
@@ -1244,12 +1482,22 @@ export function createRpcRouter(): Router {
           res.status(400).json({ error: 'mode must be manual, auto, or allow_all' })
           return
         }
+        // The Host-ref grammar every sibling Host route applies after its
+        // preflight, before the Host is resolved.
+        if (!validateHostRef(req, res)) return
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1260,7 +1508,7 @@ export function createRpcRouter(): Router {
           `[RPC_PROXY] user=${auth.sub} host=${logHost} method=set-approval-mode agent=${logAgent} chatId=${logChatId} mode=${mode}`
         )
         const upstreamBody = { mode }
-        // Wake-eligible finite operation: scope stays host:session:write.
+        // Wake-eligible finite operation: scope stays host:approval:write.
         // Waking also needs host:wake:write on the token.
         const attempt = async (timeoutMs?: number) => {
           const response = await fetch(
@@ -1293,6 +1541,9 @@ export function createRpcRouter(): Router {
             claims: auth,
             rpcAccessToken,
             deadlineMs: wakeDeadlineMs,
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1310,26 +1561,28 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/models',
     requireRpcAuth,
-    requireScope('host:session:read'),
+    requireHostRpcPreflightScope(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/models']),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
+        const { hostRef, chatId } = getHostRpcPreflight(req)
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
           return
         }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+          return
+        }
         const baseUrl = host.url.replace(/\/+$/, '')
-        const chatId = typeof req.query.chatId === 'string' ? req.query.chatId.trim() : ''
         const upstreamUrl = chatId
           ? `${baseUrl}/v1/runtime/models?chatId=${encodeURIComponent(chatId)}`
           : `${baseUrl}/v1/runtime/models`
@@ -1364,6 +1617,9 @@ export function createRpcRouter(): Router {
             deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1380,28 +1636,26 @@ export function createRpcRouter(): Router {
   router.post(
     '/rpc/hosts/:hostRef/model',
     requireRpcAuth,
-    requireScope('host:model:write'),
     jsonBody,
+    requireHostRpcPreflightScope(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/model']),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
+        const { hostRef, body } = getHostRpcPreflight(req)
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
           return
         }
-        const body = req.body as Record<string, unknown>
-        if (!body || typeof body !== 'object' || Array.isArray(body)) {
-          res.status(400).json({ error: 'Invalid set-model request payload' })
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1435,6 +1689,9 @@ export function createRpcRouter(): Router {
             claims: auth,
             rpcAccessToken,
             deadlineMs: wakeDeadlineMs,
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1448,27 +1705,23 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/tasks/:taskId/result',
     requireRpcAuth,
-    requireScope('host:message:invoke'),
+    requireHostRpcPreflightScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/tasks/:taskId/result']
+    ),
     async (req: AuthedRequest, res) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        const taskId = String(req.params.taskId || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
-        if (!taskId || !/^[a-zA-Z0-9_-]+$/.test(taskId)) {
-          res.status(400).json({ error: 'Invalid taskId' })
-          return
-        }
+        const { hostRef, taskId } = getHostRpcPreflight(req)
 
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
-        if (isHostAccessDenied(host)) {
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
+        if (isHostAccessDenied(host) || !host) {
           res.status(404).json({ error: 'Host not found or not accessible' })
           return
         }
@@ -1477,7 +1730,7 @@ export function createRpcRouter(): Router {
           `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=get-task-result taskId=${taskId}`
         )
         const attemptTaskResult = async (timeoutMs = config.upstreamTimeoutMs) => {
-          const result = await forwardTaskResultFromHost(host, taskId, timeoutMs)
+          const result = await forwardTaskResultFromHost(host, taskId!, timeoutMs)
           if (!result) {
             res.status(404).json({ error: 'Task result not found' })
             return
@@ -1498,6 +1751,9 @@ export function createRpcRouter(): Router {
               deadlineMs: wakeDeadlineMs,
               // idempotent GET: a re-issued read cannot duplicate a side effect
               retryUntilDeadline: true,
+              ...wakeAndHoldAuthorityOptions(req, hostRef, host, () =>
+                res.status(404).json({ error: 'Host not found or not accessible' })
+              ),
               attemptUpstream: attemptTaskResult,
               respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
             })
@@ -1515,27 +1771,23 @@ export function createRpcRouter(): Router {
   router.post(
     '/rpc/hosts/:hostRef/tasks/:taskId/cancel',
     requireRpcAuth,
-    requireScope('host:message:invoke'),
+    requireHostRpcPreflightScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['POST /v1/runtime/tasks/:taskId/cancel']
+    ),
     async (req: AuthedRequest, res) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        const taskId = String(req.params.taskId || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
-        if (!taskId || !/^[a-zA-Z0-9_-]+$/.test(taskId)) {
-          res.status(400).json({ error: 'Invalid taskId' })
-          return
-        }
+        const { hostRef, taskId } = getHostRpcPreflight(req)
 
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
-        if (isHostAccessDenied(host)) {
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
+        if (isHostAccessDenied(host) || !host) {
           res.status(404).json({ error: 'Host not found or not accessible' })
           return
         }
@@ -1547,7 +1799,7 @@ export function createRpcRouter(): Router {
         const attemptCancel = async (timeoutMs?: number) => {
           const result = await forwardCancelToHost(
             host,
-            taskId,
+            taskId!,
             auth.sub,
             mutatingCallSignal(timeoutMs, res)
           )
@@ -1574,6 +1826,9 @@ export function createRpcRouter(): Router {
               claims: auth,
               rpcAccessToken,
               deadlineMs: wakeDeadlineMs,
+              ...wakeAndHoldAuthorityOptions(req, hostRef, host, () =>
+                res.status(404).json({ error: 'Host not found or not accessible' })
+              ),
               attemptUpstream: attemptCancel,
               respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
             })
@@ -1592,7 +1847,7 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/artifacts',
     requireRpcAuth,
-    requireScope('host:task:read'),
+    requireHostRefCheckpointScope(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/artifacts']),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -1607,11 +1862,18 @@ export function createRpcRouter(): Router {
           return
         }
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1643,6 +1905,9 @@ export function createRpcRouter(): Router {
             deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: attempt,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1657,7 +1922,24 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/artifacts/:filename/download',
     requireRpcAuth,
-    requireScope('host:task:read'),
+    bindHostRpcScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/artifacts/:filename/download']
+    ),
+    (req: AuthedRequest, res, next) => {
+      const filename = String(req.params.filename || '').trim()
+      if (
+        !filename ||
+        filename.includes('..') ||
+        filename.includes('/') ||
+        filename.includes('\\') ||
+        filename.includes('\0')
+      ) {
+        res.status(400).json({ error: 'Invalid filename' })
+        return
+      }
+      next()
+    },
+    runHostRefCheckpoint,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -1683,11 +1965,18 @@ export function createRpcRouter(): Router {
           return
         }
         const wakeDeadlineMs = Date.now() + config.wakeMaxHoldMs
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
         const baseUrl = host.url.replace(/\/+$/, '')
@@ -1765,6 +2054,9 @@ export function createRpcRouter(): Router {
             deadlineMs: wakeDeadlineMs,
             // idempotent GET: a re-issued read cannot duplicate a side effect
             retryUntilDeadline: true,
+            ...wakeAndHoldAuthorityOptions(req, hostRef, host, denial =>
+              respondHostAccessDenied(res, denial)
+            ),
             attemptUpstream: attemptDownload,
             respondLegacy: legacyError => respondUpstreamUnavailable(res, legacyError),
           })
@@ -1778,25 +2070,27 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/activity',
     requireRpcAuth,
-    requireScope('host:activity:read'),
+    requireHostRpcPreflightScope(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/activity']),
     async (req: AuthedRequest, res, next) => {
       // Host runtime read-only activity timeline snapshot.
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const { hostRef, limit = 50 } = getHostRpcPreflight(req)
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
           return
         }
-        const limit = Number(req.query.limit || 50)
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+          return
+        }
         const sinceEventId =
           typeof req.query.sinceEventId === 'string' ? req.query.sinceEventId : undefined
         const activity = await forwardHostActivity(host, limit, sinceEventId)
@@ -1815,23 +2109,26 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/status',
     requireRpcAuth,
-    requireScope('host:status:read'),
+    requireHostRpcPreflightScope(HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/status']),
     async (req: AuthedRequest, res, next) => {
       // Host runtime read snapshot (REST-oriented) scoped to host:status:read.
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
+        const { hostRef } = getHostRpcPreflight(req)
 
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
 
@@ -1858,23 +2155,26 @@ export function createRpcRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/health',
     requireRpcAuth,
-    requireScope('host:health:read'),
+    requireHostRpcPreflightScope('host:health:read'),
     async (req: AuthedRequest, res, next) => {
       // Host runtime health/liveness read path (REST-oriented) scoped to host:health:read.
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
+        const { hostRef } = getHostRpcPreflight(req)
 
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
 

@@ -8,10 +8,13 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { config as appConfig } from '../../config'
+import type { AdapterStaticContext } from '../../core/adapters/llmPortAdapter'
 import type { ApprovalMode } from '../../core/approval/approvalMode'
 import { approvalLogId } from '../../core/approval/grantMemory'
+import type { ShellClassifierCaller } from '../../core/approval/shellClassifier'
 import { makeFakeConversation } from '../../core/conversation/__testing__/makeFakeConversation'
 import { ConversationManager } from '../../core/conversation/conversation'
+import { pendingApprovalWireFields } from '../../core/conversation/pendingApprovalView'
 import type { StoreHandle } from '../../core/conversation/persistence/__tests__/testHelpers'
 import { makeSqliteStore } from '../../core/conversation/persistence/__tests__/testHelpers'
 import { LlmErrorCode } from '../../core/errors'
@@ -30,6 +33,7 @@ import { logger } from '../../logger'
 import { MessageQueue } from '../../queue'
 import type { Task, TaskError } from '../../queue/types'
 import { STATELESS_ALLOW_CRON_MANAGE_ENV } from '../../statelessCronPolicy'
+import type { UsageReporter } from '../../usage/usageReporter'
 import { CronScheduler } from '../cronScheduler'
 import { TaskExecutor, type TaskExecutorDeps, resolveTaskSessionKey } from '../taskExecutor'
 import type { ExecutorFailoverSupport } from '../types'
@@ -125,6 +129,10 @@ interface DriveOptions {
    * script a fallback can reuse to serve the turn.
    */
   failover?: (primary: SingleTurnProvider) => ExecutorFailoverSupport
+  /** When set, shell is judged by this caller instead of the chat provider. */
+  shellClassifier?: ShellClassifierCaller
+  usageReporter?: UsageReporter
+  usageStaticContext?: AdapterStaticContext
 }
 
 interface DriveResult {
@@ -238,6 +246,11 @@ async function drive(options: DriveOptions): Promise<DriveResult> {
     onComplete: vi.fn(),
     onFail,
     ...(options.failover ? { failover: options.failover(provider) } : {}),
+    ...(options.shellClassifier
+      ? { shellClassifierProvider: () => options.shellClassifier ?? null }
+      : {}),
+    ...(options.usageReporter ? { usageReporter: options.usageReporter } : {}),
+    ...(options.usageStaticContext ? { usageStaticContext: options.usageStaticContext } : {}),
   }
   const executor = new TaskExecutor(task, deps)
   await executor.run()
@@ -274,6 +287,12 @@ function infoEvents(spy: { mock: { calls: unknown[][] } }, event: string): unkno
         typeof fields === 'object' &&
         (fields as { event?: string }).event === event
     )
+}
+
+const HOST_USAGE_CONTEXT: AdapterStaticContext = {
+  host_ref: 'ns/approval-host',
+  context_ref: null,
+  llm_secret_name: null,
 }
 
 describe('approval mode admission', () => {
@@ -422,14 +441,14 @@ describe('approval mode admission', () => {
       await manager.setApprovalMode(
         changed.conversation,
         'manual',
-        { ceiling: 'allow_all', cap: 'allow_all' },
+        { ceiling: 'allow_all', cap: 'allow_all', channelSwitch: 'allow_all' },
         'route',
         'deny-user'
       )
       await manager.setApprovalMode(
         changed.conversation,
         'auto',
-        { ceiling: 'allow_all', cap: 'allow_all' },
+        { ceiling: 'allow_all', cap: 'allow_all', channelSwitch: 'allow_all' },
         'route',
         'deny-user'
       )
@@ -540,6 +559,71 @@ describe('approval mode admission', () => {
     expect(rewritten.classifyCalls).toBe(0)
     expect(rewritten.approval).toBeUndefined()
     expect(JSON.stringify(rewritten.messages)).toContain('admission-ok')
+  })
+
+  it('judges shell with the dedicated classifier while the chat model stays unused', async () => {
+    const enqueue = vi.fn()
+    const seen: Array<{ max_tokens?: number; reasoning_effort?: string }> = []
+    const ran = await drive({
+      mode: 'auto',
+      primaryType: 'openai',
+      calls: [shell('sh-dedicated', 'printf admission-ok')],
+      shellClassifier: {
+        providerType: 'openai',
+        modelName: 'gpt-5.5',
+        provider: {
+          completeSingleTurn: async (_messages, options) => {
+            seen.push(options ?? {})
+            return { content: 'APPROVE', usage, finish_reason: FinishReason.Stop }
+          },
+        },
+      },
+      usageReporter: { enqueue } as unknown as UsageReporter,
+      usageStaticContext: HOST_USAGE_CONTEXT,
+    })
+    expect(ran.classifyCalls).toBe(0)
+    expect(ran.approval).toBeUndefined()
+    expect(ran.completed).toBe(true)
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.max_tokens).toBe(16)
+    expect(seen[0]?.reasoning_effort).toBe('none')
+    expect(enqueue).toHaveBeenCalled()
+    // With the Host static context set, the chat turns report too, so the
+    // classifier's event is found by its model rather than by position.
+    expect(enqueue.mock.calls.map(call => call[0])).toContainEqual(
+      expect.objectContaining({
+        provider: 'openai',
+        model: 'gpt-5.5',
+        host_ref: HOST_USAGE_CONTEXT.host_ref,
+      })
+    )
+  })
+
+  it('reports no classifier usage when the reporter has no Host static context', async () => {
+    // setUsageReporter sets both together; a reporter alone is a wiring gap
+    // and must not bill the classifier call to a placeholder Host.
+    const enqueue = vi.fn()
+    const seen: unknown[] = []
+    const ran = await drive({
+      mode: 'auto',
+      primaryType: 'openai',
+      calls: [shell('sh-no-static', 'printf admission-ok')],
+      shellClassifier: {
+        providerType: 'openai',
+        modelName: 'gpt-5.5',
+        provider: {
+          completeSingleTurn: async (_messages, options) => {
+            seen.push(options ?? {})
+            return { content: 'APPROVE', usage, finish_reason: FinishReason.Stop }
+          },
+        },
+      },
+      usageReporter: { enqueue } as unknown as UsageReporter,
+    })
+    expect(seen).toHaveLength(1)
+    expect(ran.approval).toBeUndefined()
+    expect(ran.completed).toBe(true)
+    expect(enqueue).not.toHaveBeenCalled()
   })
 
   it('A3 APPROVE stores nothing, ESCALATE cards with the descriptor, and an unavailable classifier does not call classify', async () => {
@@ -688,7 +772,7 @@ describe('approval mode admission', () => {
     }
   })
 
-  it('X1 runs shell, MCP, live download, admin_forced, denied, denials_active, and guardrail ask without classify', async () => {
+  it('X1 runs shell, MCP, live download, admin_forced, denied, and denials_active without classify', async () => {
     const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
     process.env.MCP_HOST_GATEWAY_URL = 'http://gateway.invalid'
     process.env.MCP_HOST_WORKFLOW_CONTROL_TOKEN = 'token'
@@ -746,30 +830,59 @@ describe('approval mode admission', () => {
       })
       expect(workflow.approval).toBeUndefined()
       expect(workflow.classifyCalls).toBe(0)
-
-      const asked = await drive({
-        mode: 'allow_all',
-        calls: [http('http-ask-x1')],
-        guardrails: {
-          rules: [
-            {
-              id: 'ask-http-x1',
-              action: 'ask',
-              reasonCode: DESCRIPTION_SENTINEL,
-              match: { tool: { provenance: 'native', name: 'http_request' } },
-            },
-          ],
-        },
-      })
-      expect(asked.approval).toBeUndefined()
-      expect(asked.classifyCalls).toBe(0)
-      expect(vi.mocked(requestPinned)).toHaveBeenCalled()
     } finally {
       info.mockRestore()
       delete process.env.MCP_HOST_GATEWAY_URL
       delete process.env.MCP_HOST_WORKFLOW_CONTROL_TOKEN
     }
   })
+
+  it.each([
+    [
+      'an explicit ask rule',
+      {
+        id: 'ask-http-x2',
+        action: 'ask' as const,
+        reasonCode: DESCRIPTION_SENTINEL,
+        match: { tool: { provenance: 'native' as const, name: 'http_request' } },
+      },
+    ],
+    [
+      'the unmatched default of a Host with rules',
+      {
+        id: 'allow-shell-x2',
+        action: 'allow' as const,
+        match: { tool: { provenance: 'native' as const, name: 'shell_exec' } },
+      },
+    ],
+  ])(
+    'X2 cards a guardrail ask from %s in allow-all, exactly and without classify',
+    async (_label, rule) => {
+      const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
+      try {
+        const asked = await drive({
+          mode: 'allow_all',
+          calls: [http('http-ask-x2')],
+          guardrails: { rules: [rule] },
+        })
+        expect(asked.approval).toMatchObject({
+          tool_name: 'http_request',
+          authorization_scope: 'exact_invocation',
+        })
+        expect(pendingApprovalWireFields(asked.approval!).alwaysApproveAllowed).toBe(false)
+        expect(asked.executor.executorState).toBe('waiting_approval')
+        expect(asked.classifyCalls).toBe(0)
+        expect(vi.mocked(requestPinned)).not.toHaveBeenCalled()
+        expect(infoEvents(info, 'L4')).toHaveLength(0)
+
+        const ran = await drive({ mode: 'allow_all', calls: [http('http-no-guardrail-x2')] })
+        expect(ran.approval).toBeUndefined()
+        expect(vi.mocked(requestPinned)).toHaveBeenCalledTimes(1)
+      } finally {
+        info.mockRestore()
+      }
+    }
+  )
 
   it('C1 honors a cron task grant in auto and cards allow-all creates that manual would card', async () => {
     const info = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
@@ -972,7 +1085,11 @@ describe('grant memory through admission', () => {
     })
     conversation.auto_shell_grants = { wholeTool: true, commands: new Set() }
     conversation.last_effective_approval_mode = 'auto'
-    const live = { ceiling: 'allow_all' as const, cap: 'allow_all' as const }
+    const live = {
+      ceiling: 'allow_all' as const,
+      cap: 'allow_all' as const,
+      channelSwitch: 'allow_all' as const,
+    }
     await manager.setApprovalMode(conversation, 'manual', live, 'route', 'writer-user')
     await manager.setApprovalMode(conversation, 'auto', live, 'route', 'writer-user')
     const cleared = await drive({
@@ -1181,12 +1298,12 @@ describe('classifier pair while failover serves a fallback', () => {
       triggerOn: ['rate_limited'],
       fallbacks: [
         { provider: 'gemini', model: 'gemini-fixture' },
-        { provider: 'openai', model: 'gpt-4.1' },
+        { provider: 'openai', model: 'gpt-5.5' },
       ],
     }
     // Only the openai entry can be built, so the second entry serves.
     const engine = await engineServingFallback(policy, provider => provider === 'openai')
-    expect(engine.servedBy()).toEqual({ provider: 'openai', model: 'gpt-4.1', fallback: true })
+    expect(engine.servedBy()).toEqual({ provider: 'openai', model: 'gpt-5.5', fallback: true })
     let openai: ReturnType<typeof fallbackProvider> | undefined
     const builds: FallbackEntry[] = []
     const result = await drive({
@@ -1209,7 +1326,7 @@ describe('classifier pair while failover serves a fallback', () => {
     expect(result.completed).toBe(true)
     expect(openai!.classifyCalls()).toBe(1)
     expect(result.classifyCalls).toBe(0)
-    expect(builds).toContainEqual({ provider: 'openai', model: 'gpt-4.1' })
+    expect(builds).toContainEqual({ provider: 'openai', model: 'gpt-5.5' })
   })
 
   it('shows the shell card when the serving fallback is one the table refuses, though the primary is eligible', async () => {
@@ -1333,16 +1450,7 @@ describe('L2 and L4', () => {
         prepare: conversation => {
           conversation.last_effective_approval_mode = 'allow_all'
         },
-        guardrails: {
-          rules: [
-            {
-              id: 'ask-shell-l4',
-              action: 'ask',
-              reasonCode: DESCRIPTION_SENTINEL,
-              match: { tool: { provenance: 'native', name: 'shell_exec' } },
-            },
-          ],
-        },
+        tools: { shell_exec: true },
       })
       const l4 = infoEvents(info, 'L4')
       expect(l4).toHaveLength(1)
@@ -1350,7 +1458,7 @@ describe('L2 and L4', () => {
         event: 'L4',
         session: approvalLogId(result.conversation.id),
         tool: 'shell_exec',
-        cause: 'guardrail_ask',
+        cause: 'admin_forced',
         mode: 'allow_all',
       })
       expect(String((l4[0] as { session: string }).session)).toMatch(/^[0-9a-f]{64}$/)

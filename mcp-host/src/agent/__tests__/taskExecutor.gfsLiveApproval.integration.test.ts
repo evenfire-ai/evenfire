@@ -188,6 +188,10 @@ async function scenario(
       channels: {},
       ...(options.requireDownloadApproval ? { tools: { clerum__gfs_download: true } } : {}),
     },
+    approvalConfigProvider: () => ({
+      effective: deps.approvalConfig,
+      hostSpec: deps.approvalConfig,
+    }),
     guardrailsConfig: guardrailAsk
       ? {
           rules: [

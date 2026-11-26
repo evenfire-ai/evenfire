@@ -405,44 +405,6 @@ describe('SlackAdapter — fetchMessages()', () => {
     expect(messages[0]!.providerIdentity?.providerUserId).toBe('U123')
   })
 
-  it('marks a sender allowed only by username so it cannot raise the approval mode', async () => {
-    const adapter = new SlackAdapter()
-    await adapter.connect({ slackBotToken: TEST_TOKEN })
-
-    const client = slackState.instances[0]!
-    client.conversations.history.mockResolvedValueOnce({
-      messages: [{ user: 'U123', text: 'approval-mode allow-all', ts: '1700000001.000004' }],
-      ok: true,
-    })
-    client.users.info.mockResolvedValueOnce({
-      user: { name: 'alice' },
-      ok: true,
-    })
-
-    const messages = await adapter.fetchMessages('C12345', new Set(['alice']))
-    expect(messages).toHaveLength(1)
-    expect(messages[0]!.senderMatch).toBe('username')
-  })
-
-  it('does not mark a sender allowed by stable user id', async () => {
-    const adapter = new SlackAdapter()
-    await adapter.connect({ slackBotToken: TEST_TOKEN })
-
-    const client = slackState.instances[0]!
-    client.conversations.history.mockResolvedValueOnce({
-      messages: [{ user: 'U123', text: 'approval-mode allow-all', ts: '1700000001.000005' }],
-      ok: true,
-    })
-    client.users.info.mockResolvedValueOnce({
-      user: { name: 'alice' },
-      ok: true,
-    })
-
-    const messages = await adapter.fetchMessages('C12345', new Set(['U123', 'alice']))
-    expect(messages).toHaveLength(1)
-    expect(messages[0]!.senderMatch).toBeUndefined()
-  })
-
   it('does not allow workflow approval decisions through legacy username allowlists', async () => {
     const adapter = new SlackAdapter()
     await adapter.connect({ slackBotToken: TEST_TOKEN })

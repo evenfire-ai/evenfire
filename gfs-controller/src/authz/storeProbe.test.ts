@@ -27,6 +27,9 @@ function fakePool(): PingPool & {
       if (pool.failPing) throw new Error("pool exhausted: connection refused");
       return {};
     },
+    // The checkout error-event surface; this fake never emits.
+    on: () => undefined,
+    removeListener: () => undefined,
     release: (err?: Error) => {
       pool.releases.push(err);
     },
@@ -149,6 +152,9 @@ function fakeClientFactory(behavior: FakeClientBehavior): {
       end: async () => {
         ends += 1;
       },
+      // The client error-event surface; this fake never emits.
+      on: () => undefined,
+      removeListener: () => undefined,
     };
   };
   return {

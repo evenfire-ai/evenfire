@@ -1,5 +1,6 @@
 import React from 'react'
 import { TEAMS_SETUP_GUIDE_URL } from '@constants/teams'
+import type { TeamsSetupPrerequisitesProps } from './types'
 
 /**
  * Both Teams panels used to jump straight to "run the CLI command", which
@@ -12,9 +13,9 @@ import { TEAMS_SETUP_GUIDE_URL } from '@constants/teams'
  * `teams status` checks both in one command, so lead with it rather than let
  * either gap surface later as a confusing failure.
  */
-export function TeamsSetupPrerequisites() {
+export function TeamsSetupPrerequisites({ inline = false }: TeamsSetupPrerequisitesProps) {
   return (
-    <section className="cu-teams-setup">
+    <section className={`cu-teams-setup${inline ? ' cu-teams-setup--inline' : ''}`}>
       <div>
         <p className="cu-section-title">Before you start</p>
         <p className="cu-muted">Two things need to be true before the command below will work.</p>

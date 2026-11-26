@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applySessionApprovalMode } from '../../agent/sessionApprovalMode'
 import type { ApprovalConfigSnapshot } from '../../core/approval/approvalMode'
+import { approvalLogId } from '../../core/approval/grantMemory'
 import { classifierAvailable } from '../../core/approval/shellClassifier'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { InMemoryConversationStore } from '../../core/conversation/conversationStore'
@@ -19,6 +20,7 @@ import { runMigrations } from '../../db/migrate'
 import { applyPragmas } from '../../db/pragmas'
 import { createDispatcher, dispatch } from '../../db/worker/dispatcher'
 import type { SessionRow } from '../../db/worker/protocol'
+import { logger } from '../../logger'
 import { serializeSessionKey } from '../../session'
 import { handleSetApprovalModeRoute } from '../routes'
 import { createSessionRouteHandlers } from '../sessionRouteHandlers'
@@ -147,6 +149,76 @@ describe('handleSetApprovalModeRoute', () => {
     expect(manager.getSessionByKey(rpcKey())?.approval_mode).toBe('manual')
   })
 
+  function okHandler() {
+    return vi.fn<SetApprovalModeHandler>(async () => ({
+      ok: true,
+      approvalMode: 'auto',
+      modeCeiling: 'allow_all',
+      channelCap: 'allow_all',
+      effectiveApprovalMode: 'auto',
+    }))
+  }
+
+  it('returns 400 for an unsafe agent segment and does not call the handler', async () => {
+    const handler = okHandler()
+    for (const agent of ['agent:x', '..', 'a/b', 'a\\b', 'a\u0000b', 'a'.repeat(201)]) {
+      const captured = makeRes()
+      await handleSetApprovalModeRoute(
+        makeReq({ caller: RPC_CALLER, agent, body: { mode: 'auto' } }),
+        captured.res,
+        makeHandlers({ setApprovalModeHandler: handler })
+      )
+      expect(captured.statusCode).toBe(400)
+      expect(captured.jsonBody).toEqual({ error: 'Invalid agent or chatId' })
+    }
+    expect(handler).not.toHaveBeenCalled()
+
+    const safe = makeRes()
+    await handleSetApprovalModeRoute(
+      makeReq({ caller: RPC_CALLER, body: { mode: 'auto' } }),
+      safe.res,
+      makeHandlers({ setApprovalModeHandler: handler })
+    )
+    expect(safe.statusCode).toBe(200)
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(handler).toHaveBeenCalledWith(USER, AGENT, CHAT, 'auto')
+  })
+
+  it('returns 400 for an unsafe chatId segment and does not call the handler', async () => {
+    const handler = okHandler()
+    for (const chatId of ['.', '..', 'x/y', 'x\\y', 'x\u001fy', 'x'.repeat(501)]) {
+      const captured = makeRes()
+      await handleSetApprovalModeRoute(
+        makeReq({ caller: RPC_CALLER, chatId, body: { mode: 'auto' } }),
+        captured.res,
+        makeHandlers({ setApprovalModeHandler: handler })
+      )
+      expect(captured.statusCode).toBe(400)
+      expect(captured.jsonBody).toEqual({ error: 'Invalid agent or chatId' })
+    }
+    expect(handler).not.toHaveBeenCalled()
+
+    const safe = makeRes()
+    await handleSetApprovalModeRoute(
+      makeReq({ caller: RPC_CALLER, chatId: 'chat:with:colons', body: { mode: 'auto' } }),
+      safe.res,
+      makeHandlers({ setApprovalModeHandler: handler })
+    )
+    expect(safe.statusCode).toBe(200)
+    expect(handler).toHaveBeenCalledWith(USER, AGENT, 'chat:with:colons', 'auto')
+  })
+
+  it('returns 501 when no set-approval-mode handler is configured', async () => {
+    const captured = makeRes()
+    await handleSetApprovalModeRoute(
+      makeReq({ caller: RPC_CALLER, body: { mode: 'auto' } }),
+      captured.res,
+      makeHandlers()
+    )
+    expect(captured.statusCode).toBe(501)
+    expect(captured.jsonBody).toEqual({ error: 'Set approval mode handler not configured' })
+  })
+
   it('returns 400 for a mode outside the enum and does not create a row', async () => {
     const manager = new ConversationManager(new InMemoryConversationStore())
     const captured = makeRes()
@@ -251,6 +323,46 @@ describe('handleSetApprovalModeRoute', () => {
     expect(conv.state).toBe(ConversationState.AwaitingApproval)
     expect(conv.pending_approval?.request_id).toBe('req-wait')
     expect(conv.approval_mode).toBe('auto')
+  })
+
+  it('answers a store failure with a fixed 500 and logs only its class and the hashed session key', async () => {
+    const store = new InMemoryConversationStore()
+    const manager = new ConversationManager(store)
+    await seedRpc(manager)
+    const conv = manager.getSessionByKey(rpcKey())
+    expect(conv?.id).toContain(USER)
+    const persist = vi.spyOn(store, 'persistApprovalMode').mockImplementation(async failing => {
+      // The SQLite store's message when it has no durable target.
+      throw new Error(
+        `persistApprovalMode: no sessionKey for conversation ${failing.id}; refusing a write with no durable target`
+      )
+    })
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
+    try {
+      const captured = makeRes()
+      await handleSetApprovalModeRoute(
+        makeReq({ caller: RPC_CALLER, body: { mode: 'auto' } }),
+        captured.res,
+        makeHandlers({ setApprovalModeHandler: realHandler(manager) })
+      )
+      expect(persist).toHaveBeenCalledTimes(1)
+      expect(captured.statusCode).toBe(500)
+      expect(captured.jsonBody).toEqual({ error: 'Set approval mode failed' })
+      const body = JSON.stringify(captured.jsonBody)
+      for (const raw of [conv?.id ?? '', rpcKey(), USER, CHAT, AGENT]) {
+        expect(body).not.toContain(raw)
+      }
+      expect(error).toHaveBeenCalledTimes(1)
+      const [fields, message] = error.mock.calls[0] as [Record<string, unknown>, string]
+      expect(fields).toEqual({ errorClass: 'Error', sessionKey: approvalLogId(rpcKey()) })
+      expect(message).toBe('[Server] Error setting approval mode')
+      const line = JSON.stringify([fields, message])
+      for (const raw of [conv?.id ?? '', rpcKey(), USER, CHAT, AGENT]) {
+        expect(line).not.toContain(raw)
+      }
+    } finally {
+      error.mockRestore()
+    }
   })
 
   it('reloads the stored mode after a cold restart', async () => {

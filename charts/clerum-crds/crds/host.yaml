@@ -288,6 +288,13 @@ spec:
                         cli_only: Only HTTP /approve /deny endpoints.
                         channel_users: Any authorized channel user.
                         designated_approvers: Only users in approvers list.
+                        An explicit cli_only or designated_approvers also
+                        governs approval modes on Telegram, email, Slack and
+                        Teams: cli_only refuses every raise and runs every
+                        such session as manual, and designated_approvers lets
+                        only a listed approver raise or keep a raised mode.
+                        Every other such session runs as manual. A change
+                        applies at each session's next tool call.
                     modeCeiling:
                       type: string
                       enum:
@@ -299,10 +306,20 @@ spec:
                         may run. manual asks on every gated tool. auto judges
                         shell on supported models and runs http_request with no
                         card. allow_all runs gated tools, except cron_manage,
-                        which asks exactly when manual would. Absent means
+                        which asks exactly when manual would, and a guardrail
+                        ask, which still shows its card. Absent means
                         manual. mcp-host reads this from the Host CR only (dev
                         mode reads CLERUM_APPROVAL_CONFIG). An older CRD prunes
                         an unknown value, which fails safe to manual.
+                    shellClassifierModel:
+                      type: string
+                      description: >-
+                        Model the shell classifier calls when this Host's model
+                        provider is OpenAI. Absent means gpt-5.5. A model the
+                        classifier does not allow shows the shell card. With
+                        any other provider, auto keeps judging shell with the
+                        model serving the turn. An older CRD prunes this field,
+                        which is the same as absent.
                     channels:
                       type: object
                       description: Per-channel-type approval settings.
@@ -315,7 +332,10 @@ spec:
                               description: Whether Telegram users can approve.
                             approvers:
                               type: array
-                              description: List of Telegram user IDs allowed to approve.
+                              description: >-
+                                List of Telegram user IDs allowed to approve. Under
+                                designated_approvers, only these users' Telegram
+                                sessions may raise or keep a mode above manual.
                               items:
                                 type: string
                             allowModeChange:
@@ -333,7 +353,10 @@ spec:
                               description: Whether email users can approve.
                             approvers:
                               type: array
-                              description: List of email addresses allowed to approve.
+                              description: >-
+                                List of email addresses allowed to approve. Under
+                                designated_approvers, only these users' email
+                                sessions may raise or keep a mode above manual.
                               items:
                                 type: string
                             allowModeChange:
@@ -353,7 +376,10 @@ spec:
                               description: Whether Slack users can approve.
                             approvers:
                               type: array
-                              description: List of Slack user IDs allowed to approve.
+                              description: >-
+                                List of Slack user IDs allowed to approve. Under
+                                designated_approvers, only these users' Slack
+                                sessions may raise or keep a mode above manual.
                               items:
                                 type: string
                             allowModeChange:
@@ -362,9 +388,7 @@ spec:
                               description: >-
                                 When true or absent, a Slack session may store
                                 auto or allow_all, up to modeCeiling. Only false
-                                caps that channel at manual. A sender who matched
-                                only a legacy username allowlist entry cannot
-                                raise the mode; allowlist the Slack user ID.
+                                caps that channel at manual.
                         teams:
                           type: object
                           properties:
@@ -373,7 +397,10 @@ spec:
                               description: Whether Microsoft Teams users can approve.
                             approvers:
                               type: array
-                              description: List of Teams user IDs allowed to approve.
+                              description: >-
+                                List of Teams user IDs allowed to approve. Under
+                                designated_approvers, only these users' Teams
+                                sessions may raise or keep a mode above manual.
                               items:
                                 type: string
                             allowModeChange:

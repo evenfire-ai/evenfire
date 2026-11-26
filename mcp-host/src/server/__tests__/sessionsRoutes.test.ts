@@ -231,11 +231,7 @@ describe('handleSessionsListRoute', () => {
     } as unknown as Request
     const captured = makeRes()
 
-    await handleSessionsListRoute(
-      req,
-      captured.res,
-      makeHandlers({ sessionsListHandler: null })
-    )
+    await handleSessionsListRoute(req, captured.res, makeHandlers({ sessionsListHandler: null }))
 
     expect(captured.statusCode).toBe(400)
     expect(captured.jsonBody).toEqual({ error: 'Invalid sessions cursor' })
@@ -263,6 +259,29 @@ describe('handleSessionsListRoute', () => {
 function makeReqWithParams(sub: string, agent: string, chatId: string): Request {
   return {
     runtimeCaller: { caller: 'rpc-proxy', hostRef: 'chatllm', userId: sub },
+    params: { agent, chatId },
+    query: {},
+  } as unknown as Request
+}
+
+function makeV2SessionReq(
+  sub: string,
+  agent: string,
+  chatId: string,
+  accessPathId: string
+): Request {
+  return {
+    runtimeCaller: {
+      caller: 'rpc-proxy',
+      hostRef: 'chatllm',
+      userId: sub,
+      actionContextV2: {
+        operationId: 'session.read',
+        userId: sub,
+        accessPathId,
+        target: { hostRef: 'mcp-host/chatllm', agent, chatId },
+      },
+    },
     params: { agent, chatId },
     query: {},
   } as unknown as Request
@@ -303,6 +322,54 @@ describe('handleSessionMessagesRoute', () => {
       beforeTurn: undefined,
       afterTurn: undefined,
     })
+  })
+
+  it('keeps stable session identity path-neutral across currently authorized paths', async () => {
+    const sessionMessagesHandler: SessionMessagesHandler = vi.fn().mockReturnValue({
+      agent: 'chatllm',
+      chatId: 'stable-chat',
+      totalTurns: 1,
+      hasMoreBefore: false,
+      hasMoreAfter: false,
+      turns: [{ number: 1, authorityPath: 'historical-path-b' }],
+    })
+    const pathA = `ap1_${'a'.repeat(43)}`
+    const pathB = `ap1_${'b'.repeat(43)}`
+
+    for (const accessPathId of [pathA, pathB]) {
+      const captured = makeRes()
+      await handleSessionMessagesRoute(
+        makeV2SessionReq('user-1', 'chatllm', 'stable-chat', accessPathId),
+        captured.res,
+        makeHandlers({ sessionMessagesHandler })
+      )
+      expect(captured.statusCode).toBe(200)
+      expect(captured.jsonBody).toMatchObject({ chatId: 'stable-chat' })
+    }
+
+    expect(sessionMessagesHandler).toHaveBeenNthCalledWith(1, 'user-1', 'chatllm', 'stable-chat', {
+      limit: undefined,
+      beforeTurn: undefined,
+      afterTurn: undefined,
+    })
+    expect(sessionMessagesHandler).toHaveBeenNthCalledWith(2, 'user-1', 'chatllm', 'stable-chat', {
+      limit: undefined,
+      beforeTurn: undefined,
+      afterTurn: undefined,
+    })
+  })
+
+  it('treats a session ID as a locator and rejects route substitution before storage access', async () => {
+    const sessionMessagesHandler: SessionMessagesHandler = vi.fn()
+    const req = makeV2SessionReq('user-1', 'chatllm', 'authorized-chat', `ap1_${'a'.repeat(43)}`)
+    req.params.chatId = 'substituted-chat'
+    const captured = makeRes()
+
+    await handleSessionMessagesRoute(req, captured.res, makeHandlers({ sessionMessagesHandler }))
+
+    expect(captured.statusCode).toBe(403)
+    expect(captured.jsonBody).toEqual({ error: 'Runtime edge action mismatch' })
+    expect(sessionMessagesHandler).not.toHaveBeenCalled()
   })
 
   it('normalizes bounded history pagination before calling the handler', async () => {

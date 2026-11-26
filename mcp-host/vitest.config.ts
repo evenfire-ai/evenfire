@@ -3,7 +3,11 @@ import { fileURLToPath } from 'node:url'
 
 export default defineConfig({
   test: {
-    setupFiles: ['../scripts/testing/bind-loopback-in-tests.mjs'],
+    setupFiles: [
+      '../scripts/testing/bind-loopback-in-tests.mjs',
+      '../scripts/testing/install-control-api-jwt-test-keys.ts',
+      './test/setupHostEdgeAssertionKey.ts',
+    ],
     // Client construction in unit tests uses a fixture, never a live context.
     env: {
       KUBECONFIG: fileURLToPath(new URL('./test/fixtures/kubernetes-unit.yaml', import.meta.url)),

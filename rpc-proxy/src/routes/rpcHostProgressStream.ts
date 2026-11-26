@@ -1,18 +1,20 @@
 import { Router } from 'express'
+import { HOST_EDGE_RPC_PROXY_ROUTE_SCOPES } from '@clerum/action-context-contracts'
 import { config } from '../config.js'
+import { getHostRpcPreflight } from '../hostRpcPreflight.js'
 import {
   type AuthedRequest,
   extractAuthToken,
+  requireHostRpcPreflightScope,
   requireRpcAuth,
-  requireScope,
 } from '../middleware/auth.js'
-import { isHostAccessDenied, respondHostAccessDenied } from '../services/hostAccessDenial.js'
+import { runtimeHostEdgeContext } from '../routeActionBindingV2.js'
+import {
+  isHostAccessDenied,
+  respondControlApiAuthorityUnavailable,
+  respondHostAccessDenied,
+} from '../services/hostAccessDenial.js'
 import { resolveHostConnectionForUser } from '../services/mcpProxyService.js'
-
-function isWildcardOrInvalidHostRef(hostRef: string): boolean {
-  if (!hostRef.trim()) return true
-  return /[*%]/.test(hostRef)
-}
 
 function sanitizedStreamErrorMessage(): string {
   return 'Progress stream temporarily unavailable'
@@ -45,36 +47,27 @@ export function createRpcHostProgressStreamRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/tasks/:taskId/progress/stream',
     requireRpcAuth,
-    requireScope('host:activity:read'),
+    requireHostRpcPreflightScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/tasks/:taskId/progress/stream']
+    ),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
-        const hostRef = String(req.params.hostRef || '').trim()
-        const taskId = String(req.params.taskId || '').trim()
+        const { hostRef, taskId } = getHostRpcPreflight(req)
 
-        if (!hostRef || isWildcardOrInvalidHostRef(hostRef)) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
-        if (!taskId || taskId.length > 128 || !/^[a-zA-Z0-9_-]+$/.test(taskId)) {
-          res
-            .status(400)
-            .json({ error: 'taskId is required and must be alphanumeric (max 128 chars)' })
-          return
-        }
-        if (Number(req.headers['content-length'] || 0) > 0) {
-          res
-            .status(400)
-            .json({ error: 'Progress stream is read-only and does not accept request bodies' })
-          return
-        }
-
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (isHostAccessDenied(host)) {
           respondHostAccessDenied(res, host)
+          return
+        }
+        if (!host) {
+          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return
         }
 
@@ -210,6 +203,7 @@ export function createRpcHostProgressStreamRouter(): Router {
         })
       } catch (error) {
         if (!res.headersSent) {
+          if (respondControlApiAuthorityUnavailable(res, error)) return
           res.status(500).json({ error: 'Internal Server Error' })
           return
         }

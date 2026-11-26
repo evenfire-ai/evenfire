@@ -34,6 +34,11 @@ const MESSAGE_AND_SESSION_WRITE_CLAIMS = {
   scopes: ['host:message:invoke', 'host:session:write'],
 }
 
+const MESSAGE_AND_APPROVAL_WRITE_CLAIMS = {
+  ...VALID_CLAIMS,
+  scopes: ['host:message:invoke', 'host:approval:write'],
+}
+
 const HOST_CONNECTION = {
   name: 'chatllm',
   url: 'http://chatllm:8080',
@@ -179,10 +184,23 @@ describe('POST /rpc/hosts/:hostRef/messages — first-message approvalMode', () 
     expect(forwardedBody).not.toHaveProperty('approvalMode')
   })
 
+  it('returns 403 when a host:session:write token carries approvalMode', async () => {
+    authTokenMock.verifyRpcToken.mockReturnValue(MESSAGE_AND_SESSION_WRITE_CLAIMS)
+
+    const res = await request(makeApp())
+      .post('/rpc/hosts/chatllm/messages')
+      .set('authorization', 'Bearer token')
+      .send({ content: 'hi', approvalMode: 'allow_all' })
+      .expect(403)
+
+    expect(res.body).toEqual({ error: 'Forbidden: missing scope' })
+    expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
+  })
+
   it.each(['manual', 'auto', 'allow_all'] as const)(
-    'forwards approvalMode %s when the token has host:session:write',
+    'forwards approvalMode %s when the token has host:approval:write',
     async approvalMode => {
-      authTokenMock.verifyRpcToken.mockReturnValue(MESSAGE_AND_SESSION_WRITE_CLAIMS)
+      authTokenMock.verifyRpcToken.mockReturnValue(MESSAGE_AND_APPROVAL_WRITE_CLAIMS)
 
       await request(makeApp())
         .post('/rpc/hosts/chatllm/messages')
@@ -199,19 +217,19 @@ describe('POST /rpc/hosts/:hostRef/messages — first-message approvalMode', () 
   )
 
   it.each(['yolo', 'allow-all', '', null, 1])(
-    'omits invalid approvalMode %j instead of forwarding it',
+    'returns 400 for invalid approvalMode %j and forwards nothing',
     async approvalMode => {
-      authTokenMock.verifyRpcToken.mockReturnValue(MESSAGE_AND_SESSION_WRITE_CLAIMS)
+      authTokenMock.verifyRpcToken.mockReturnValue(MESSAGE_AND_APPROVAL_WRITE_CLAIMS)
 
-      await request(makeApp())
+      const res = await request(makeApp())
         .post('/rpc/hosts/chatllm/messages')
         .set('authorization', 'Bearer token')
         .send({ content: 'hi', approvalMode })
-        .expect(200)
+        .expect(400)
 
-      const forwardedBody = serviceMock.forwardHostMessageToHost.mock.calls[0][1]
-      expect(forwardedBody.content).toBe('hi')
-      expect(forwardedBody).not.toHaveProperty('approvalMode')
+      expect(res.body).toEqual({ error: 'approvalMode must be manual, auto, or allow_all' })
+      expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
+      expect(serviceMock.forwardHostMessageToHost).not.toHaveBeenCalled()
     }
   )
 })

@@ -6,7 +6,7 @@ import { parse } from 'yaml'
 
 // Parses charts/clerum-crds/crds/host.yaml the same way
 // crd.secretReferenceCoverage.test.ts does. The approval mode ceiling is an
-// admission enum, and allowModeChange exists only on the three channel objects
+// admission enum, and allowModeChange exists only on the four channel objects
 // the control-api schema accepts.
 const crdsDir = resolve(dirname(fileURLToPath(import.meta.url)), '../../charts/clerum-crds/crds')
 const hostYamlPath = resolve(crdsDir, 'host.yaml')
@@ -61,6 +61,13 @@ describe('host.yaml approval mode schema', () => {
 
   it('modeCeiling is exactly manual, auto, and allow_all', () => {
     expect(asRecord(approval.modeCeiling)?.enum).toEqual([...APPROVAL_MODES])
+  })
+
+  it('shellClassifierModel is a string and absent means the default classifier model', () => {
+    const field = asRecord(approval.shellClassifierModel)
+    expect(field?.type).toBe('string')
+    expect(field?.enum).toBeUndefined()
+    expect(String(field?.description)).toContain('gpt-5.5')
   })
 
   it('allowModeChange is a boolean under telegram, email, slack and teams', () => {

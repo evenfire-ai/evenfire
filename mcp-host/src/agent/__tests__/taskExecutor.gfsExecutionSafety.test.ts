@@ -284,6 +284,10 @@ async function shellScenario({
       channels: {},
       ...(shellApprovalDisabled ? { tools: { shell_exec: false } } : {}),
     },
+    approvalConfigProvider: () => ({
+      effective: deps.approvalConfig,
+      hostSpec: deps.approvalConfig,
+    }),
     config: {
       maxTaskDuration: 30_000,
       maxToolCallsPerTask: 10,

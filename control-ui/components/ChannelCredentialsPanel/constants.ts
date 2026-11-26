@@ -11,7 +11,7 @@ export const CHANNEL_CREDENTIAL_FIELDS: CredentialField[] = [
   {
     channelType: 'telegram',
     key: 'telegram-bot-token',
-    label: 'Telegram Bot Token',
+    label: 'Telegram bot token',
     placeholder: '123456789:ABCDEF…',
     helpText: 'Token from @BotFather. Leave blank if Telegram is not used.',
   },

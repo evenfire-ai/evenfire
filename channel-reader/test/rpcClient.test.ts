@@ -117,22 +117,6 @@ describe('RPCClient - sendMessage()', () => {
     })
   })
 
-  it('forwards a username-only sender match so mcp-host refuses a mode raise', async () => {
-    mockFetch.mockReturnValue(
-      mockOkResponse({ success: true, status: 'completed', model: 'gpt-4' })
-    )
-
-    const client = new RPCClient('http://mcp-host:8080')
-    await client.sendMessage(makeMessage({ channelType: 'slack', senderMatch: 'username' }))
-    await client.sendMessage(makeMessage({ channelType: 'slack' }))
-
-    const bodies = mockFetch.mock.calls.map(call =>
-      JSON.parse((call[1] as RequestInit).body as string)
-    )
-    expect(bodies[0].senderMatch).toBe('username')
-    expect(bodies[1]).not.toHaveProperty('senderMatch')
-  })
-
   it('returns success response from mcp-host', async () => {
     mockFetch.mockReturnValueOnce(
       mockOkResponse({ success: true, status: 'completed', response: 'Hi back', model: 'gpt-4' })
@@ -206,6 +190,30 @@ describe('RPCClient - sendMessage()', () => {
 
     expect(result.success).toBe(false)
     expect(result.error?.message).toContain('ECONNREFUSED')
+  })
+
+  it('a 429 answer is a generic failure', async () => {
+    mockFetch.mockReturnValueOnce(
+      Promise.resolve({
+        ok: false,
+        status: 429,
+        statusText: 'Too Many Requests',
+        headers: new Headers({ 'retry-after': '7' }),
+        json: () =>
+          Promise.resolve({ error: 'runtime_service_admission_limited', retryAfterSeconds: 7 }),
+      })
+    )
+
+    const client = new RPCClient('http://mcp-host:8080')
+    const result = await client.sendMessage(makeMessage())
+
+    expect(mockFetch).toHaveBeenCalledOnce()
+    expect(mockFetch.mock.calls[0]?.[0]).toBe('http://mcp-host:8080/v1/runtime/messages')
+    expect(result.success).toBe(false)
+    expect(result.error?.code).toBe('LLM_API_CALL_FAILED')
+    expect(result.error?.message).toBe('HTTP 429: Too Many Requests')
+    expect(result.error).not.toHaveProperty('retryAfterSeconds')
+    expect(result.error?.code).not.toBe('RUNTIME_SERVICE_ADMISSION_LIMITED')
   })
 })
 

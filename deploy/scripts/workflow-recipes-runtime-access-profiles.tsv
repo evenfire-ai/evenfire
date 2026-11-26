@@ -55,6 +55,9 @@ mcp_secret_rollback_permits	none
 notification_deliveries	none
 dynamic_clients	none
 oauth_grants	none
+oidc_protocol_attempts	none
+oidc_connections	none
+user_oidc_links	none
 password_admission_rollout_state	none
 password_identifier_state	none
 password_verification_pace	none
@@ -66,6 +69,8 @@ plugin_workload_sdk_invocations	none
 plugin_workload_sdk_provider_attempts	none
 plugin_workload_sdk_quota_counters	none
 plugin_workload_sdk_spend_outcomes	none
+pr2_readiness_activations	none
+pr2_readiness_evidence	none
 profiles	none
 rate_limit_buckets	none
 registry_connection	none
@@ -87,6 +92,7 @@ user_agents	none
 user_contexts	none
 user_notification_preferences	none
 user_workflow_triggers	delete
+workflow_authority_bindings	read
 users	none
 workflow_approval_medium_accounts	none
 workflow_approval_medium_challenges	none
