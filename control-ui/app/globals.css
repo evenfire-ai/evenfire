@@ -8007,9 +8007,12 @@ td.cu-registry-description {
   color: var(--cu-text-muted);
 }
 
-.cu-host-overview-identity__meta {
+/* Badge row (type chip + status). Not __meta: that class is the Created
+ * <dl> further down, whose left-aligned grid would override this one. */
+.cu-host-overview-identity__badges {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 0.75rem;
 }
 
