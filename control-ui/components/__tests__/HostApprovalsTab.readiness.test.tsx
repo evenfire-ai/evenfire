@@ -474,7 +474,8 @@ describe('approval settings readiness (spec §7 A3)', () => {
       otherHold.deliverNow()
       await other
     })
-    // The save went through once the other read was answered.
+    // The save used its own read, not the other one: its PUT is applied
+    // whether or not it landed before the other read was answered.
     await waitFor(() => expect(writes(fake).some(entry => entry.applied)).toBe(true))
     await settle()
     page.unmount()

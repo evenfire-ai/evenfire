@@ -2231,10 +2231,14 @@ async function editRows(w: World, changes: ReadonlyArray<[number, RowState]>): P
       inherited: inheritingShown(tabRoot() as HTMLElement),
       logLen: w.fake.log.length,
     }
-    // Rows set back to the base leave the session clean, but the section
-    // still edits from the base it took. The banner may already show a newer
-    // load that the editing section did not take, so the base taken for this
-    // session stays, rather than one built from these rows and that banner.
+    // Rows set back to the base leave the session clean. The base this
+    // session took is kept while the rows equal its tools, rather than one
+    // built from these rows and the banner: the banner may already show a
+    // newer load that the editing section did not take. A clean section does
+    // take a newer load as its base, though, so after a clean newer load with
+    // the same tools the kept base is older than the section's. Their tools
+    // are equal, and S1 and S2 read only the tools; the counts (S2's
+    // non-vacuity, E15) and example 18's pin read the kept base's other fields.
     const kept =
       !view.dirty && view.base !== null && sameTools(view.base.tools, capture.tools)
         ? view.base
@@ -3791,7 +3795,10 @@ const TEST_TIMEOUT_MS = (NUM_RUNS + EXAMPLES.length) * TIMEOUT_MS_PER_RUN
 /**
  * Ruling 70: shrinking a failure stops this long before the test timeout. The
  * run then fails with its message and the smallest counterexample found so
- * far, never as "Test timed out". The slowest single run seen took 2.5 s.
+ * far. The deadline is checked between shrink candidates only, so a candidate
+ * still running at the timeout would end as "Test timed out"; the margin
+ * covers the slowest single run seen (2.5 s), and the first failure's message
+ * is logged before shrinking starts in any case.
  */
 const REPORT_MARGIN_MS = 20_000
 

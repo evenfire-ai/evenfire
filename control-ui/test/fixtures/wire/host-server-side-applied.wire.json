@@ -3,7 +3,7 @@
     "recorded": "2026-11-25, with kubectl get -o json --show-managed-fields",
     "object": "A synthetic Host applied with server-side apply (kubectl apply --server-side --field-manager=example-deployer, kubectl v1.37.0) to a disposable local cluster (Kubernetes v1.37.0) with only the Host CRD installed: charts/clerum-crds/crds/host.yaml (sha256 acae500f8731ee6a6fa1175e9955e8b1e22652437273255c663bade7d9d7371c).",
     "signal": "A managedFields entry with operation Apply (manager example-deployer) owns f:spec.f:approval. There is no last-applied-configuration annotation.",
-    "synthetic": "Every value comes from a made-up manifest. After the read, metadata.uid was removed, and metadata.creationTimestamp, metadata.resourceVersion and the managedFields time were set to the fixed values the other manifest-signal fixtures use. Everything else is as the apiserver returned it: spec, the managedFields managers, operations, apiVersions, fieldsTypes and fieldsV1 paths, and (client-side apply only) the last-applied-configuration annotation, which kubectl wrote."
+    "synthetic": "Every value comes from a made-up manifest. After the read, metadata.uid was removed, and metadata.creationTimestamp, metadata.resourceVersion and the managedFields time were set to the fixed values the other manifest-signal fixtures use. Everything else is as the apiserver returned it: spec, and the managedFields managers, operations, apiVersions, fieldsTypes and fieldsV1 paths."
   },
   "apiVersion": "clerum.io/v1alpha1",
   "kind": "Host",
