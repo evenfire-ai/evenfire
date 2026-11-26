@@ -170,18 +170,27 @@ export function useAuthController({
     refreshLoginMethods: loginMethods.refresh,
   })
   /**
-   * A browser sign-in that redeems blocks every other auth action (D14). It is read from the
-   * hook's ref, so it holds before React commits the view (V32, A3-55). It is never written to
-   * `authTransitioningRef`, which other flows' `finally` blocks clear (X3).
+   * A browser sign-in that redeems blocks these auth actions at call time (D14): the password
+   * sign-in, which the backend switch also runs at its end; the environment changes outside a
+   * desktop-environment link; and a desktop-environment link's handoff gate and confirm. It is
+   * read from the hook's ref, so it holds before React commits the view (V32, A3-55). It is
+   * never written to `authTransitioningRef`, which other flows' `finally` blocks clear (X3).
    *
-   * The environment changes outside a desktop-environment link (save from the add form, select,
-   * the backend switch, delete and clear) return at once while it holds, with no call to main
-   * and no epoch move (Task 14a review I-1). Main does not refuse them while an attempt
-   * redeems. One that moves the binding advances the generation, so main discards the redeem's
-   * answer and ends the sign-in `replaced`, which shows nothing (decision 5). Delete and clear
-   * are refused even when they would not move it, so all five behave alike. The page also
-   * disables those controls; reading the ref here covers a click that lands before that state
-   * commits. Nothing is shown: the sign-in's own outcome follows.
+   * The password sign-in and the environment changes (save from the add form, select, the
+   * backend switch, delete and clear) return at once while it holds, with no call to main and
+   * no state change (Task 14a review I-1; final review FR-C1). Main does not refuse them while
+   * an attempt redeems. A password sign-in advances the generation, and so does an environment
+   * change that moves the binding, so main discards the redeem's answer, a session the server
+   * already issued, and ends the sign-in `replaced`, which shows nothing (decision 5; G1-m7).
+   * Delete and clear are refused even when they would not move it, so all five environment
+   * changes behave alike. The page also disables those controls; reading the ref here covers a
+   * click or an Enter that lands before that state commits. Nothing is shown: the sign-in's own
+   * outcome follows.
+   *
+   * Starting desktop setup, completing it and a new browser sign-in do not read it. Starting
+   * setup reads the invitation and opens the browser, and moves neither the generation nor the
+   * binding. Main refuses completing setup (`auth_transition_in_progress`, D11) and a new start
+   * (`browser_sign_in_finishing`) while an attempt redeems.
    */
   const browserSignInBlocksAuthActions = browserSignIn.isRedeeming
 
@@ -274,6 +283,8 @@ export function useAuthController({
   }, [onSessionNeedsLoad, setStatus])
 
   const handlePasswordLogin = async () => {
+    // Before the `try`, whose `finally` would write `busy` and `authTransitioning` (FR-C1).
+    if (browserSignInBlocksAuthActions()) return
     try {
       setBusy(true)
       setAuthTransitioning(true)

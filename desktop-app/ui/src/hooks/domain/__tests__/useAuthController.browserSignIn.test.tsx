@@ -828,6 +828,63 @@ describe('useAuthController: the auth gates and a browser sign-in (D14)', () => 
     await waitFor(() => expect(page.controller().browserSignIn.phase).toBe('idle'))
   })
 
+  // Final review FR-C1: the page's submit reads `redeeming` from rendered state, so an Enter that
+  // lands before React commits the push still calls the handler. The handler reads the ref.
+  it('FR-C1 refuses a password sign-in while redeeming, and lets it reach main while waiting', async () => {
+    const { harness, bridge } = await createSignInMain()
+    const page = await mountAuthPage(bridge)
+    // Without credentials the handler would stop before main for another reason.
+    const fillCredentials = () =>
+      act(() => {
+        page.controller().setEmail('member@example.test')
+        page.controller().setPassword('fake-password')
+      })
+
+    // Main redeems an attempt, and the renderer has its push.
+    const { attemptId: redeemingId, redeem } = await redeemInMain(harness)
+    await waitFor(() => expect(page.controller().browserSignIn.phase).toBe('redeeming'))
+    fillCredentials()
+    const bumps = harness.bumpLog.length
+
+    await act(async () => {
+      await page.controller().handlePasswordLogin()
+    })
+    expect(
+      bridge.auth.passwordLogin,
+      'the password sign-in does not reach main while redeeming'
+    ).not.toHaveBeenCalled()
+    expect(harness.bumpLog.length, 'the generation did not advance').toBe(bumps)
+    expect(endStatesOf(harness, redeemingId), 'the attempt has not ended').toEqual([])
+    expect(page.controller().browserSignIn.phase, 'the attempt still redeems').toBe('redeeming')
+
+    // The redeem gets no answer; main ends the attempt and the renderer returns to idle.
+    redeem.release(new Error('fake network failure'))
+    await waitFor(() => expect(page.controller().browserSignIn.phase).toBe('idle'))
+
+    // Positive control: a waiting attempt does not stop the same call (decision 9), and the
+    // login's bump ends the attempt `replaced` (A3-16).
+    await act(async () => {
+      await page.controller().handleStartBrowserSignIn()
+    })
+    const waitingId = page.controller().browserSignIn.attemptId
+    expect(page.controller().browserSignIn.phase, 'a new attempt waits').toBe('waiting')
+    fillCredentials()
+    await act(async () => {
+      await page.controller().handlePasswordLogin()
+    })
+    expect(
+      bridge.auth.passwordLogin,
+      'the password sign-in reaches main while waiting'
+    ).toHaveBeenCalledTimes(1)
+    expect(page.setStatus, 'the password login signs in').toHaveBeenCalledWith(
+      'Signed in.',
+      'success'
+    )
+    expect(endStatesOf(harness, waitingId ?? 0), "the login's bump replaced the attempt").toEqual([
+      'replaced',
+    ])
+  })
+
   it('G2-14b treats redeeming as in progress before React commits', async () => {
     const { harness, bridge, relay } = await createSignInMain()
     const page = await mountAuthPage(bridge)
