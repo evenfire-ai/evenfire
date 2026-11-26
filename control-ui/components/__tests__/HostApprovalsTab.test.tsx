@@ -589,16 +589,27 @@ describe('HostApprovalsTab', () => {
         await put.arrived
       })
 
-      tab.leave()
-      await act(async () => {
-        put.respondWith(PUT_403.status, PUT_403.body)
+      const emitted: Array<[string, unknown]> = []
+      const unsubscribe = subscribeRootToast((message, options) => {
+        emitted.push([message, options])
       })
-      await waitFor(() => expect(tab.toasts('error')).toHaveLength(1))
+      try {
+        tab.leave()
+        await act(async () => {
+          put.respondWith(PUT_403.status, PUT_403.body)
+        })
+        await waitFor(() => expect(tab.toasts('error')).toHaveLength(1))
+      } finally {
+        unsubscribe()
+      }
 
       const [toast] = tab.toasts('error')
       expect(toast).toMatch(/^Per-tool overrides for agent foo were not saved\. /)
       expect(toast, "control-api's refusal").toContain('is forbidden')
       expect(tab.toasts('success')).toEqual([])
+      // Minor 5's partner: a per-tool continuation problem stays 8 s; only the
+      // switch's failure, which carries the kubectl fallback, stays longer.
+      expect(emitted).toEqual([[toast, { tone: 'error', durationMs: 8000 }]])
       expect(approvalOf(fake.stored('foo')), 'nothing written').toEqual({
         tools: { json_transform: true },
       })

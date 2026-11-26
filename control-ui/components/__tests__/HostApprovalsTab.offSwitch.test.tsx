@@ -1086,7 +1086,7 @@ describe('HostApprovalsTab — Set to Manual now', () => {
       tab.unmount()
     })
 
-    it('a failure after the tab was left goes to the root toast once, naming the agent, with the fallback', async () => {
+    it('a failure after the tab was left goes to the root toast once, naming the agent, with the fallback, for 30 s (minor 5)', async () => {
       const fake = tabFake({ modeCeiling: 'auto' })
       const tab = renderApprovalsTab({ fake, host: 'foo' })
       await approvalSettingsDriver()
@@ -1095,17 +1095,28 @@ describe('HostApprovalsTab — Set to Manual now', () => {
       await act(async () => {
         await put.arrived
       })
-
-      tab.leave()
-      await act(async () => {
-        put.respondWith(PUT_403.status, PUT_403.body)
+      // What the root toast was asked to show, with its options.
+      const emitted: Array<[string, unknown]> = []
+      const unsubscribe = subscribeRootToast((message, options) => {
+        emitted.push([message, options])
       })
-      await waitFor(() => expect(tab.toasts('error')).toHaveLength(1))
-      await settle()
-      expect(tab.toasts('error')).toEqual([
-        failedFor('foo', clientMessage(PUT_403), fallback('mcp-host', 'foo')),
-      ])
+
+      try {
+        tab.leave()
+        await act(async () => {
+          put.respondWith(PUT_403.status, PUT_403.body)
+        })
+        await waitFor(() => expect(tab.toasts('error')).toHaveLength(1))
+        await settle()
+      } finally {
+        unsubscribe()
+      }
+      const failed = failedFor('foo', clientMessage(PUT_403), fallback('mcp-host', 'foo'))
+      expect(tab.toasts('error')).toEqual([failed])
       expect(tab.toasts('success')).toEqual([])
+      // Minor 5: it carries the kubectl fallback, so it stays 30 s, not the 8 s
+      // of other problems.
+      expect(emitted).toEqual([[failed, { tone: 'error', durationMs: 30_000 }]])
       tab.unmount()
     })
 

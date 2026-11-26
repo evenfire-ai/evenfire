@@ -217,6 +217,13 @@ export const TOOLS_SAVED_TOAST = 'Per-tool overrides saved.'
 /** How long a continuation's warning or error stays: longer than a success, to be read. */
 export const CONTINUATION_PROBLEM_DURATION_MS = 8000
 
+/**
+ * How long the root toast of a switch that failed after its tab was left
+ * stays (review minor 5). It carries the kubectl fallback, which no tab shows
+ * then, so it stays long enough to copy; Toast has no persistent mode.
+ */
+export const SWITCH_FAILURE_CONTINUATION_DURATION_MS = 30_000
+
 function problem(message: string, tone: 'warning' | 'error' = 'error'): ContinuationToast {
   return { message, options: { tone, durationMs: CONTINUATION_PROBLEM_DURATION_MS } }
 }
@@ -285,7 +292,8 @@ export const SWITCH_TOAST_STILL_RUNNING_TEXT = `${STILL_RUNNING_TEXT}: ${SKIP_TO
  * shows another agent: every outcome, named after the agent. A success says
  * what still runs without a card, and adds the manifest warning
  * (`switchManifestWarning`) when a manifest sets the agent's settings. A
- * failure carries the kubectl fallback, since no tab shows it.
+ * failure carries the kubectl fallback, since no tab shows it, and stays
+ * longer than other problems (`SWITCH_FAILURE_CONTINUATION_DURATION_MS`).
  */
 export function offSwitchContinuationToast(
   host: string,
@@ -312,8 +320,9 @@ export function offSwitchContinuationToast(
         options: { tone: 'success' },
       }
     case 'failed':
-      return problem(
-        `Manual was not saved for agent ${host}. ${asSentence(outcome.message)} ${OFF_SWITCH_FALLBACK_INTRO} ${outcome.fallback}`
-      )
+      return {
+        message: `Manual was not saved for agent ${host}. ${asSentence(outcome.message)} ${OFF_SWITCH_FALLBACK_INTRO} ${outcome.fallback}`,
+        options: { tone: 'error', durationMs: SWITCH_FAILURE_CONTINUATION_DURATION_MS },
+      }
   }
 }
