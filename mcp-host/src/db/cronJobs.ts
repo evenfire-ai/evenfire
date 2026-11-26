@@ -1,11 +1,14 @@
 /**
  * cron_jobs row mapping for the database worker.
  *
- * Times are unix seconds. This module round-trips columns. It does not
- * validate origin or provider groups and it does not disable invalid rows.
- * There is no provider_event_id column.
+ * Times are unix seconds. The mapper round-trips columns. validateCronRecord
+ * reports whether a row may be armed and rebuilds ProviderIdentity without
+ * providerEventId. Neither path disables a row. There is no provider_event_id
+ * column.
  */
 import type { Database, Statement } from 'better-sqlite3'
+import { parseNextRun } from '../agent/cronExpression'
+import type { CronJob } from '../agent/types'
 
 export type CronJobRecord = {
   id: string
@@ -289,4 +292,142 @@ export function setCronSchedule(
 
 export function setCronLastRun(db: Database, id: string, lastRunAt: number): void {
   statements(db).setLastRun.run({ id, last_run_at: lastRunAt })
+}
+
+const TELEGRAM_CHANNEL_TYPES = new Set(['private', 'group', 'supergroup'])
+
+function filled(value: string | null | undefined): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+function originChannelType(
+  value: string | null
+): NonNullable<CronJob['origin']>['channelType'] | null {
+  if (
+    value === 'telegram' ||
+    value === 'email' ||
+    value === 'slack' ||
+    value === 'teams' ||
+    value === 'rpc'
+  ) {
+    return value
+  }
+  return null
+}
+
+function providerMedium(value: string | null): 'telegram' | 'slack' | 'teams' | null {
+  if (value === 'telegram' || value === 'slack' || value === 'teams') return value
+  return null
+}
+
+function readOrigin(origin: CronJobRecord['origin']): CronJob['origin'] | undefined {
+  if (!origin) return undefined
+  const channelType = originChannelType(origin.channelType)
+  if (!channelType || !filled(origin.channelId) || !filled(origin.sender)) return undefined
+  if (!filled(origin.threadId)) {
+    return { channelType, channelId: origin.channelId, sender: origin.sender }
+  }
+  return {
+    channelType,
+    channelId: origin.channelId,
+    sender: origin.sender,
+    threadId: origin.threadId,
+  }
+}
+
+function readTarget(
+  target: NonNullable<CronJobRecord['provider']>['providerTarget']
+): NonNullable<NonNullable<CronJob['providerIdentity']>['providerTarget']> | 'absent' | 'invalid' {
+  if (target === null) return 'absent'
+  if (
+    !filled(target.hostRef) ||
+    !filled(target.communicationChannelNamespace) ||
+    !filled(target.communicationChannelName)
+  ) {
+    return 'invalid'
+  }
+  if (
+    (target.providerBotId !== null && !filled(target.providerBotId)) ||
+    (target.providerBotUsername !== null && !filled(target.providerBotUsername))
+  ) {
+    return 'invalid'
+  }
+  return {
+    hostRef: target.hostRef,
+    communicationChannelNamespace: target.communicationChannelNamespace,
+    communicationChannelName: target.communicationChannelName,
+    providerBotId: target.providerBotId,
+    providerBotUsername: target.providerBotUsername,
+  }
+}
+
+function readProviderIdentity(
+  row: CronJobRecord,
+  origin: NonNullable<CronJob['origin']>
+): CronJob['providerIdentity'] | undefined {
+  const provider = row.provider
+  if (!provider) return undefined
+  const medium = providerMedium(provider.medium)
+  if (!medium || medium !== origin.channelType) return undefined
+  if (!filled(provider.providerUserId) || provider.providerUserId !== origin.sender) {
+    return undefined
+  }
+  if (!filled(provider.providerChannelId)) return undefined
+  if (provider.providerWorkspaceId !== null && !filled(provider.providerWorkspaceId)) {
+    return undefined
+  }
+  if (provider.providerChannelType !== null && !filled(provider.providerChannelType)) {
+    return undefined
+  }
+  if (medium === 'telegram') {
+    if (!TELEGRAM_CHANNEL_TYPES.has(provider.providerChannelType ?? '')) return undefined
+  } else if (!filled(provider.providerWorkspaceId)) {
+    return undefined
+  }
+
+  const target = readTarget(provider.providerTarget)
+  if (target === 'invalid') return undefined
+  if (target === 'absent' && medium !== 'teams') return undefined
+
+  return {
+    medium,
+    providerUserId: provider.providerUserId,
+    providerWorkspaceId: provider.providerWorkspaceId,
+    providerChannelId: provider.providerChannelId,
+    providerChannelType: provider.providerChannelType,
+    ...(target === 'absent' ? {} : { providerTarget: target }),
+  }
+}
+
+function cronJobFromRecord(
+  row: CronJobRecord,
+  origin: CronJob['origin'] | undefined,
+  providerIdentity: CronJob['providerIdentity'] | undefined
+): CronJob {
+  const job: CronJob = {
+    id: row.id,
+    name: row.name,
+    schedule: row.schedule,
+    task: row.task,
+    enabled: row.enabled,
+    createdAt: new Date(row.createdAt * 1000),
+  }
+  if (row.lastRunAt != null) job.lastRun = new Date(row.lastRunAt * 1000)
+  if (row.nextRunAt != null) job.nextRun = new Date(row.nextRunAt * 1000)
+  if (row.createdBy != null) job.createdBy = row.createdBy
+  if (origin) job.origin = origin
+  if (providerIdentity) job.providerIdentity = providerIdentity
+  return job
+}
+
+export function validateCronRecord(row: CronJobRecord): { job: CronJob; valid: boolean } {
+  const origin = readOrigin(row.origin)
+  const originOk = row.origin === null || origin !== undefined
+  const providerIdentity = origin && row.provider ? readProviderIdentity(row, origin) : undefined
+  const providerOk = row.provider === null || providerIdentity !== undefined
+  const scheduleOk = parseNextRun(row.schedule) !== null
+  return {
+    job: cronJobFromRecord(row, origin, providerIdentity),
+    valid: originOk && providerOk && scheduleOk,
+  }
 }

@@ -5,6 +5,7 @@ import type { SingleTurnProvider } from '../llm'
 import type { FailoverEngine } from '../llm/failover/engine'
 import type { FallbackEntry, LlmPolicy } from '../llm/failover/types'
 import { Task } from '../queue/types'
+import type { ProviderIdentity } from '../server/types'
 
 /**
  * R5 — per-task provider-fallback support injected into the agent (built in
@@ -150,7 +151,10 @@ export interface CronJob {
     channelType: 'telegram' | 'email' | 'slack' | 'teams' | 'rpc'
     channelId: string
     sender: string
+    threadId?: string
   }
+  /** Replayed on fire. providerEventId is not stored. */
+  providerIdentity?: ProviderIdentity
 }
 
 /**
