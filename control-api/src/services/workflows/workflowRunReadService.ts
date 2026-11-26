@@ -42,15 +42,12 @@ export function userRunScope(caller: WorkflowRouteCaller): UserRunScope | null {
   }
 }
 
-async function hasLiveWorkflowTeamGrant(
-  scope: UserRunScope,
-  recipeNamespace: string,
-  recipeName: string,
-  db: Pick<DbClient, 'query'> = pool
-): Promise<boolean> {
-  if (!scope.teamId) return false
-  const result = await db.query(
-    `SELECT 1
+/**
+ * The scope team's live grant on a recipe, reached through the scope user's
+ * active membership of that team. Parameters: $1 scope user id, $2 scope team
+ * id, $3 recipe namespace, $4 recipe name.
+ */
+const LIVE_SCOPE_TEAM_RECIPE_GRANT_ROWS = `
        FROM team_members tm
        JOIN team_workflow_triggers twt
          ON twt.team_id = tm.team_id
@@ -58,10 +55,30 @@ async function hasLiveWorkflowTeamGrant(
         AND twt.recipe_name = $4
       WHERE tm.user_id = $1
         AND tm.team_id = $2
-        AND tm.status = 'active'
-      LIMIT 1`,
-    [scope.userId, scope.teamId, recipeNamespace, recipeName]
-  )
+        AND tm.status = 'active'`
+
+/**
+ * A live admin of the scope team whose team holds a live grant on the recipe:
+ * the grant predicate of `hasLiveWorkflowTeamGrant` plus the admin role.
+ * Same parameters as `LIVE_SCOPE_TEAM_RECIPE_GRANT_ROWS`.
+ */
+export const LIVE_SCOPE_TEAM_ADMIN_WITH_RECIPE_GRANT = `
+     SELECT 1${LIVE_SCOPE_TEAM_RECIPE_GRANT_ROWS}
+        AND tm.role = 'admin'`
+
+async function hasLiveWorkflowTeamGrant(
+  scope: UserRunScope,
+  recipeNamespace: string,
+  recipeName: string,
+  db: Pick<DbClient, 'query'> = pool
+): Promise<boolean> {
+  if (!scope.teamId) return false
+  const result = await db.query(`SELECT 1${LIVE_SCOPE_TEAM_RECIPE_GRANT_ROWS}\n      LIMIT 1`, [
+    scope.userId,
+    scope.teamId,
+    recipeNamespace,
+    recipeName,
+  ])
   return (result.rowCount ?? 0) > 0
 }
 
@@ -119,7 +136,9 @@ export function runMatchesUserScope(
  * Who may cancel a run: its launcher, or a live admin of the session's scope
  * team for a team run that is not a teammate's own manual run (scheduled or
  * autonomous, or a user run with no actor id). `liveAdmin` is "an active
- * `team_members` row with role `admin` for the scope user and scope team".
+ * `team_members` row with role `admin` for the scope user and scope team, and
+ * a `team_workflow_triggers` row for the scope team and the run's recipe"
+ * (`LIVE_SCOPE_TEAM_ADMIN_WITH_RECIPE_GRANT`).
  * Every run this accepts is also accepted by `runMatchesUserScope`, so cancel
  * never reaches a run the caller cannot already see.
  */
@@ -146,18 +165,23 @@ export function isNonTerminalRunPhase(phase: string): boolean {
   return NON_TERMINAL_RUN_PHASES.has(phase)
 }
 
-/** One read per request: is the scope user a live admin of the scope team. */
-async function isLiveScopeTeamAdmin(scope: UserRunScope): Promise<boolean> {
+/**
+ * One read per request: is the scope user a live admin of the scope team, and
+ * does that team hold a live grant on the recipe. Every row of a recipe's run
+ * list shares the recipe, so one answer covers the whole list.
+ */
+async function isLiveScopeTeamAdminWithRecipeGrant(
+  scope: UserRunScope,
+  recipeNamespace: string,
+  recipeName: string
+): Promise<boolean> {
   if (!scope.teamId) return false
-  const result = await pool.query(
-    `SELECT 1
-       FROM team_members tm
-      WHERE tm.user_id = $1
-        AND tm.team_id = $2
-        AND tm.role = 'admin'
-        AND tm.status = 'active'`,
-    [scope.userId, scope.teamId]
-  )
+  const result = await pool.query(LIVE_SCOPE_TEAM_ADMIN_WITH_RECIPE_GRANT, [
+    scope.userId,
+    scope.teamId,
+    recipeNamespace,
+    recipeName,
+  ])
   return (result.rowCount ?? 0) > 0
 }
 
@@ -518,7 +542,10 @@ export async function listCanonicalRuns(
   if (scope) {
     // A user-session list says, per live run, whether this caller may cancel it
     // now: permitted, not finished, and not already asked to cancel.
-    const liveAdmin = await isLiveScopeTeamAdmin(scope)
+    // A scope-team run listed through its approval target
+    // (listRunsByRecipeForUserScope) is listed without the team's recipe
+    // grant, so the grant is read here and not inferred from the list.
+    const liveAdmin = await isLiveScopeTeamAdminWithRecipeGrant(scope, recipeNamespace, recipeName)
     liveRuns = liveRows
       .filter(row => runMatchesUserScope(row, scope))
       .map(

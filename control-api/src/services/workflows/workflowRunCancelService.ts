@@ -4,7 +4,11 @@ import { canonicalWorkflowRunId } from '../access/workflowRunId.js'
 import { cancelPendingRequestsForRun } from '../userApprovalRequestService.js'
 import type { WorkflowRunRow } from '../workflowRunService.js'
 import type { WorkflowRouteCaller } from './types.js'
-import { canCancel, userRunScope } from './workflowRunReadService.js'
+import {
+  LIVE_SCOPE_TEAM_ADMIN_WITH_RECIPE_GRANT,
+  canCancel,
+  userRunScope,
+} from './workflowRunReadService.js'
 
 export class WorkflowRunCancelError extends Error {
   constructor(
@@ -26,17 +30,14 @@ export const LOCK_RUN_FOR_CANCEL = `
    FOR UPDATE`
 
 /**
- * Step 2: whether the caller is a live admin of the session's scope team. The
- * share lock makes a concurrent demotion wait for this cancel to commit.
+ * Step 2: whether the caller is a live admin of the session's scope team and
+ * that team holds a live grant on the run's recipe (the run list's predicate,
+ * `LIVE_SCOPE_TEAM_ADMIN_WITH_RECIPE_GRANT`). The share lock covers the
+ * membership row and the grant row, so a concurrent demotion or grant removal
+ * waits for this cancel to commit.
  */
-export const LOCK_LIVE_SCOPE_TEAM_ADMIN_FOR_CANCEL = `
-  SELECT 1
-    FROM team_members
-   WHERE user_id = $1
-     AND team_id = $2
-     AND role = 'admin'
-     AND status = 'active'
-   FOR SHARE`
+export const LOCK_LIVE_SCOPE_TEAM_ADMIN_FOR_CANCEL = `${LIVE_SCOPE_TEAM_ADMIN_WITH_RECIPE_GRANT}
+        FOR SHARE`
 
 /**
  * Step 3, run without a child: nothing runs for it yet, so the cancel ends it.
@@ -129,6 +130,8 @@ export async function cancelWorkflowRun(input: {
       const admin = await db.query(LOCK_LIVE_SCOPE_TEAM_ADMIN_FOR_CANCEL, [
         scope.userId,
         scope.teamId,
+        run.recipe_namespace,
+        run.recipe_name,
       ])
       liveAdmin = (admin.rowCount ?? 0) > 0
     }

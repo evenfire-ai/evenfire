@@ -1212,7 +1212,7 @@ describe('routes/external/workflows', () => {
         .mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 })
         // 2. live runs → empty
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
-        // 3. live team-admin read for viewerCanCancel (the session's scope team) → not admin
+        // 3. live team-admin and recipe-grant read for viewerCanCancel (the session's scope team) → not admin
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
         // 4. workflow_runs_audit → empty
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
@@ -1255,7 +1255,7 @@ describe('routes/external/workflows', () => {
         .mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 })
         // 2. listRunsByRecipe live DB lookup → empty
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
-        // 3. live team-admin read for viewerCanCancel (the session's scope team) → not admin
+        // 3. live team-admin and recipe-grant read for viewerCanCancel (the session's scope team) → not admin
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
         // 4. workflow_runs_audit → empty
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
@@ -1335,7 +1335,7 @@ describe('routes/external/workflows', () => {
           ],
           rowCount: 2,
         })
-        // 3. live team-admin read for viewerCanCancel (the session's scope team) → not admin
+        // 3. live team-admin and recipe-grant read for viewerCanCancel (the session's scope team) → not admin
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
         // 4. workflow_runs_audit → includes only a foreign archived run, also rejected.
         .mockResolvedValueOnce({
@@ -1440,7 +1440,7 @@ describe('routes/external/workflows', () => {
           ],
           rowCount: 2,
         })
-        // 3. live team-admin read for viewerCanCancel (the session's scope team) → not admin
+        // 3. live team-admin and recipe-grant read for viewerCanCancel (the session's scope team) → not admin
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
         // 4. workflow_runs_audit → empty
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })

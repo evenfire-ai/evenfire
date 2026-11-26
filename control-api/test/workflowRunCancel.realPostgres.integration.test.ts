@@ -1155,6 +1155,96 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     }
   }, 120_000)
 
+  it("an admin cancel needs the scope team's live grant on the run's recipe", async () => {
+    // M-93: the admin path also needs a team_workflow_triggers row for (scope
+    // team, run recipe). The launcher path does not.
+    const recipe = `s12-grant-${suffix}`
+    const token = await v1Token(A, teamT, 'admin')
+    const grantRow = [teamT, ns, recipe]
+    const removeGrant = () =>
+      databasePool.query(
+        `DELETE FROM team_workflow_triggers
+          WHERE team_id = $1 AND recipe_namespace = $2 AND recipe_name = $3`,
+        grantRow
+      )
+    const restoreGrant = () =>
+      databasePool.query(
+        `INSERT INTO team_workflow_triggers(team_id, recipe_namespace, recipe_name)
+         VALUES ($1, $2, $3)`,
+        grantRow
+      )
+    await restoreGrant()
+    // A run the admin sees only as the approval's target, so the list shows it
+    // while the team's grant is absent.
+    const approval = await createApprovalRequest({
+      recipeNamespace: ns,
+      recipeName: recipe,
+      targetUserId: A.id,
+      payload: { message: 'Approve the scheduled run' },
+      idempotencyKey: `s12-grant-${randomUUID()}`,
+    })
+    if (!('status' in approval) || approval.status !== 'pending') {
+      throw new Error(`expected a pending approval, got ${JSON.stringify(approval)}`)
+    }
+    const teamRun = await insertRun({
+      recipe,
+      phase: 'Running',
+      actorType: 'scheduled',
+      teamId: teamT,
+      child: 'c-grant',
+    })
+    const targetRun = await insertRun({
+      recipe,
+      phase: 'Pending',
+      actorType: 'scheduled',
+      teamId: teamT,
+      approvalRequestId: approval.id,
+    })
+    const listedFlags = async () => {
+      const listed = await listCanonicalRuns(ns, recipe, 50, await callerFor(token))
+      const flag = (runId: string) => {
+        const run = listed.find(entry => entry.id === runId) as
+          | { viewerCanCancel?: boolean }
+          | undefined
+        return run ? run.viewerCanCancel : 'not listed'
+      }
+      return { teamRun: flag(teamRun), targetRun: flag(targetRun) }
+    }
+
+    await removeGrant()
+    // (b) Without the grant the team run is not listed (the list needs the
+    // grant for team runs); the run listed through its approval target does
+    // not offer the cancel.
+    expect(await listedFlags()).toEqual({ teamRun: 'not listed', targetRun: false })
+    // (a) The run team's live admin gets the not-found answer and nothing changes.
+    for (const runId of [teamRun, targetRun]) {
+      const before = await readRun(runId)
+      const response = await cancel(token, runId, recipe)
+      expect({ runId, status: response.status }).toEqual({ runId, status: 404 })
+      expect(response.body).toEqual({ error: 'workflow_run_not_found' })
+      const after = await readRun(runId)
+      expect(after).toEqual(before)
+      expect({
+        cancel_requested_at: after.cancel_requested_at,
+        canceled_by: after.canceled_by,
+      }).toEqual({ cancel_requested_at: null, canceled_by: null })
+    }
+    expect((await readRun(teamRun)).phase).toBe('Running')
+    expect((await readRun(targetRun)).phase).toBe('Pending')
+
+    // Liveness: with the grant restored the same admin is offered the cancel and
+    // cancels the same runs.
+    await restoreGrant()
+    expect(await listedFlags()).toEqual({ teamRun: true, targetRun: true })
+    for (const runId of [teamRun, targetRun]) {
+      const response = await cancel(token, runId, recipe)
+      expect({ runId, status: response.status }).toEqual({ runId, status: 200 })
+      expect((await readRun(runId)).canceled_by).toBe(A.id)
+    }
+    expect((await readRun(teamRun)).cancel_requested_at).toBeInstanceOf(Date)
+    expect((await readRun(targetRun)).phase).toBe('Canceled')
+  })
+
   // ── S13 · run ids ───────────────────────────────────────────────────────
 
   it('unknown, foreign-recipe and non-uuid run ids are not found', async () => {
@@ -1257,6 +1347,12 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     const recipe = `s19-${suffix}`
     const tokenA = await v1Token(A, teamT, 'admin')
     const tokenA2 = await v1Token(A2, teamT, 'admin')
+    // An admin cancel needs the scope team's live grant on the recipe (M-93).
+    await databasePool.query(
+      `INSERT INTO team_workflow_triggers(team_id, recipe_namespace, recipe_name)
+       VALUES ($1, $2, $3)`,
+      [teamT, ns, recipe]
+    )
 
     const runId = await insertRun({
       recipe,
