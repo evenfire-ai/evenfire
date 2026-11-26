@@ -841,6 +841,9 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
   ]
   // Run on REFRESH_ROWS: the other denials the shared re-resolve code maps.
   const SHARED_DENIAL_CASES: DenialCase[] = [
+    // Not written by the route, but reachable through the error handler: the
+    // `app.ts:304` fallthrough under version skew, or a Kubernetes 404 that
+    // `http/errorHandler.ts:46-67,217-248` forwards.
     { label: 'control-api 404', answer: () => jsonResponse(404, { error: 'not found' }) },
     // Hardening: the authorizer returns the request's own userId
     // (`rpcHostAccessAuthorizer.ts:43-44,80`).
@@ -911,6 +914,7 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
     status: number
     body: Record<string, unknown>
   }> = [
+    // Not written by control-api: the transport (the request never gets an answer).
     {
       label: 'a network failure',
       answer: () => {
@@ -919,6 +923,7 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
       status: 503,
       body: { error: 'authority_unavailable' },
     },
+    // Not written by control-api: the transport (rpc-proxy's upstream timeout).
     {
       label: 'a timeout',
       answer: () => {
