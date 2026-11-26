@@ -5,8 +5,6 @@ import { IconPencil } from '../icons'
 import { Field, TextInput } from '../ui'
 import type { HostOverviewTabProps, HostTabKey } from './types'
 
-const DESCRIPTION_MAX_LENGTH = 100
-
 const STATUS_DOT_CLASS: Record<HostOverviewTabProps['statusTone'], string> = {
   active: 'cu-host-overview-status__dot--active',
   inactive: 'cu-host-overview-status__dot--inactive',
@@ -75,17 +73,10 @@ function formatTimestamp(value: string): string {
   return `${month} ${day}, ${year} • ${hours}:${minutes} ${meridiem}`
 }
 
-function truncateDescription(value: string): string {
-  const description = value.trim()
-  if (description.length <= DESCRIPTION_MAX_LENGTH) return description
-  return `${description.slice(0, DESCRIPTION_MAX_LENGTH - 1).trimEnd()}…`
-}
-
 export function HostOverviewTab({
   hostName,
   displayName,
   loadingName = false,
-  description,
   statusLabel,
   statusTone,
   contextRef,
@@ -108,8 +99,6 @@ export function HostOverviewTab({
   const [nameError, setNameError] = React.useState('')
   const [nameValid, setNameValid] = React.useState(true)
   const hasContext = Boolean(contextRef.trim())
-  const trimmedDescription = description.trim()
-  const shownDescription = truncateDescription(trimmedDescription) || 'No description provided.'
 
   async function saveName(value: string) {
     const nextName = value.trim()
@@ -167,12 +156,6 @@ export function HostOverviewTab({
               </button>
             )}
           </>
-        </div>
-        <div
-          className="cu-host-overview-identity__description"
-          title={trimmedDescription || undefined}
-        >
-          {shownDescription}
         </div>
         <div className="cu-host-overview-identity__status">
           <StatusDot tone={statusTone} />

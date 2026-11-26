@@ -16,7 +16,6 @@ export type HostOverviewTabProps = {
    * and the edit affordance is hidden until a real name is on screen.
    */
   loadingName?: boolean
-  description: string
   statusLabel: string
   statusTone: 'active' | 'inactive' | 'unknown'
   contextRef: string

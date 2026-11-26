@@ -501,18 +501,42 @@ describe('HostDetailsPage identity integration', () => {
     expect(container.querySelector('.cu-host-approval-section .cu-section-title')).toBeNull()
   })
 
-  it('shows the agent description in place of the identifier and truncates long copy', async () => {
+  it('renders the identity without the agent description or slug fallback', async () => {
     const { container } = render(<HostDetailsPage />)
-    const description = await screen.findByTitle(host.spec.description)
+    await screen.findByRole('button', { name: 'Edit agent name' })
 
-    expect(description).toHaveClass('cu-host-overview-identity__description')
-    expect(description.textContent).toHaveLength(100)
-    expect(description.textContent?.endsWith('…')).toBe(true)
+    expect(container.querySelector('.cu-host-overview-identity__description')).toBeNull()
+    expect(screen.queryByTitle(host.spec.description)).not.toBeInTheDocument()
+    expect(screen.queryByText(/coordinates customer support requests/)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Edit agent name' })).toBeInTheDocument()
     expect(screen.getByText('Created').nextElementSibling).toHaveTextContent(/2026/)
     expect(screen.queryByText('Last updated')).not.toBeInTheDocument()
     expect(container.querySelector('.cu-host-overview-identity__slug')).toBeNull()
     expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
+  })
+
+  it('labels a suspended lifecycle state as Idle', async () => {
+    const suspendedHost = {
+      ...host,
+      status: { lifecycle: { state: 'Suspended' } },
+    }
+    ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      host: suspendedHost,
+      contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
+      secrets: [{ name: 'openai-secret', keys: ['openai-api-key'] }],
+      users: [],
+      teams: [],
+      agentUsers: [],
+      agentTeams: [],
+    })
+    ;(api.getHost as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(suspendedHost)
+
+    const { container } = render(<HostDetailsPage />)
+    await screen.findByRole('button', { name: 'Edit agent name' })
+
+    const status = container.querySelector('.cu-host-overview-identity__status')
+    expect(status).toHaveTextContent('Idle')
+    expect(status).not.toHaveTextContent('Suspended')
   })
 
   it('edits the agent name in a scalar dialog via one PUT without changing the agent slug', async () => {

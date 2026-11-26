@@ -232,7 +232,6 @@ export default function HostDetailsPage() {
   // loadData('model'|'none')) keep the loaded title — no re-flash.
   const [overviewReady, setOverviewReady] = useState(false)
   const [editingDisplayName, setEditingDisplayName] = useState(false)
-  const [hostDescription, setHostDescription] = useState('')
   const [contextRefDraft, setContextRefDraft] = useState('')
   const [providerDraft, setProviderDraft] = useState<LlmProvider>('openai')
   // Model options are the operator allowlist (enabled only). The host's saved
@@ -584,7 +583,6 @@ export default function HostDetailsPage() {
         setHostDisplaySaved(overview.hostDisplay)
         setOverviewReady(true)
         setEditingDisplayName(false)
-        setHostDescription(String(spec.description || '').trim())
         setContextRefDraft(overview.contextRef)
         setChannelsDraft(overview.channels)
         // Overview read-only summary: linked context's MCP servers + access counts.
@@ -629,6 +627,11 @@ export default function HostDetailsPage() {
         if (lowerState === 'active' || lowerState === 'ready') {
           setHostStatusLabel('Active')
           setHostStatusTone('active')
+        } else if (lowerState === 'suspended') {
+          // A stateless host scales to zero while suspended; surface that
+          // state to admins as Idle, not Suspended.
+          setHostStatusLabel('Idle')
+          setHostStatusTone('unknown')
         } else if (lowerState === 'blocked' || lowerState === 'failed') {
           setHostStatusLabel(lifecycleState || 'Inactive')
           setHostStatusTone('inactive')
@@ -1495,7 +1498,6 @@ export default function HostDetailsPage() {
               setHostDisplayDraft(hostDisplaySaved)
               setEditingDisplayName(false)
             }}
-            description={hostDescription}
             statusLabel={hostStatusLabel}
             statusTone={hostStatusTone}
             contextRef={contextRefDraft}
