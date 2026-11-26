@@ -1,0 +1,133 @@
+// Presentation only. Registry names remain the identity for API calls and installs.
+// Coverage: the public marketplace catalog fetched on 2026-11-26 (55 connectors).
+export const CONNECTOR_PRESENTATION: Record<
+  string,
+  { name: string; icon: string; darkIcon?: string }
+> = {
+  '@evenfire/mcp-airtable': { name: 'Airtable', icon: '/connector-icons/airtable.svg' },
+  '@evenfire/mcp-arxiv': {
+    name: 'arXiv',
+    icon: '/connector-icons/arxiv.svg',
+    darkIcon: '/connector-icons/arxiv-on-dark.svg',
+  },
+  '@evenfire/mcp-brave': { name: 'Brave Search', icon: '/connector-icons/brave.svg' },
+  '@evenfire/mcp-clickhouse': { name: 'ClickHouse', icon: '/connector-icons/clickhouse.svg' },
+  '@evenfire/mcp-cloudflare-docs-remote': {
+    name: 'Cloudflare Docs',
+    icon: '/connector-icons/cloudflare.svg',
+  },
+  '@evenfire/mcp-coingecko': { name: 'CoinGecko', icon: '/connector-icons/coingecko.svg' },
+  '@evenfire/mcp-context7-remote': { name: 'Context7', icon: '/connector-icons/book.svg' },
+  '@evenfire/mcp-deepwiki-remote': { name: 'DeepWiki', icon: '/connector-icons/book.svg' },
+  '@evenfire/mcp-defillama': { name: 'DefiLlama', icon: '/connector-icons/defillama.svg' },
+  '@evenfire/mcp-dovetail-remote': {
+    name: 'Dovetail',
+    icon: '/connector-icons/dovetail.svg',
+    darkIcon: '/connector-icons/dovetail-on-dark.svg',
+  },
+  '@evenfire/mcp-duckduckgo': { name: 'DuckDuckGo', icon: '/connector-icons/duckduckgo.svg' },
+  '@evenfire/mcp-etherscan': { name: 'Etherscan', icon: '/connector-icons/etherscan.svg' },
+  '@evenfire/mcp-everything': {
+    name: 'Everything',
+    icon: '/connector-icons/modelcontextprotocol.svg',
+    darkIcon: '/connector-icons/modelcontextprotocol-on-dark.svg',
+  },
+  '@evenfire/mcp-exa-remote': { name: 'Exa', icon: '/connector-icons/exa.svg' },
+  '@evenfire/mcp-fetch': { name: 'Fetch', icon: '/connector-icons/globe.svg' },
+  '@evenfire/mcp-figma': { name: 'Figma', icon: '/connector-icons/figma.svg' },
+  '@evenfire/mcp-filesystem': { name: 'Filesystem', icon: '/connector-icons/folder.svg' },
+  '@evenfire/mcp-firecrawl-remote': { name: 'Firecrawl', icon: '/connector-icons/firecrawl.svg' },
+  '@evenfire/mcp-git': { name: 'Git', icon: '/connector-icons/git.svg' },
+  '@evenfire/mcp-github-clerum': {
+    name: 'GitHub',
+    icon: '/connector-icons/github.svg',
+    darkIcon: '/connector-icons/github-on-dark.svg',
+  },
+  '@evenfire/mcp-github-remote': {
+    name: 'GitHub (Remote)',
+    icon: '/connector-icons/github.svg',
+    darkIcon: '/connector-icons/github-on-dark.svg',
+  },
+  '@evenfire/mcp-gitlab': { name: 'GitLab', icon: '/connector-icons/gitlab.svg' },
+  '@evenfire/mcp-gitmcp-remote': { name: 'GitMCP', icon: '/connector-icons/git.svg' },
+  '@evenfire/mcp-google-sheets': {
+    name: 'Google Sheets',
+    icon: '/connector-icons/google-sheets.svg',
+  },
+  '@evenfire/mcp-hackernews-remote': {
+    name: 'Hacker News',
+    icon: '/connector-icons/hacker-news.svg',
+  },
+  '@evenfire/mcp-heyreach': { name: 'HeyReach', icon: '/connector-icons/heyreach.svg' },
+  '@evenfire/mcp-hubspot': {
+    name: 'HubSpot',
+    icon: '/connector-icons/hubspot.svg',
+    darkIcon: '/connector-icons/hubspot-on-dark.svg',
+  },
+  '@evenfire/mcp-linear': {
+    name: 'Linear',
+    icon: '/connector-icons/linear.svg',
+    darkIcon: '/connector-icons/linear-on-dark.svg',
+  },
+  '@evenfire/mcp-mailpit': { name: 'Mailpit', icon: '/connector-icons/mailpit.svg' },
+  '@evenfire/mcp-memory': { name: 'Memory', icon: '/connector-icons/brain.svg' },
+  '@evenfire/mcp-mongodb': { name: 'MongoDB', icon: '/connector-icons/mongodb.svg' },
+  '@evenfire/mcp-monid': { name: 'Monid', icon: '/connector-icons/identity.svg' },
+  '@evenfire/mcp-ms-learn-remote': {
+    name: 'Microsoft Learn',
+    icon: '/connector-icons/microsoft.svg',
+  },
+  '@evenfire/mcp-mysql': { name: 'MySQL', icon: '/connector-icons/mysql.svg' },
+  '@evenfire/mcp-neo4j': { name: 'Neo4j', icon: '/connector-icons/neo4j.svg' },
+  '@evenfire/mcp-notion': {
+    name: 'Notion',
+    icon: '/connector-icons/notion.svg',
+    darkIcon: '/connector-icons/notion-on-dark.svg',
+  },
+  '@evenfire/mcp-paddle': {
+    name: 'Paddle',
+    icon: '/connector-icons/paddle.svg',
+    darkIcon: '/connector-icons/paddle-on-dark.svg',
+  },
+  '@evenfire/mcp-paypal': { name: 'PayPal', icon: '/connector-icons/paypal.svg' },
+  '@evenfire/mcp-perplexity': {
+    name: 'Perplexity',
+    icon: '/connector-icons/perplexity.svg',
+    darkIcon: '/connector-icons/perplexity-on-dark.svg',
+  },
+  '@evenfire/mcp-playwright': { name: 'Playwright', icon: '/connector-icons/playwright.svg' },
+  '@evenfire/mcp-postgres': { name: 'PostgreSQL', icon: '/connector-icons/postgresql.svg' },
+  '@evenfire/mcp-redis': { name: 'Redis', icon: '/connector-icons/redis.svg' },
+  '@evenfire/mcp-sentry': {
+    name: 'Sentry',
+    icon: '/connector-icons/sentry.svg',
+    darkIcon: '/connector-icons/sentry-on-dark.svg',
+  },
+  '@evenfire/mcp-sequential-thinking': {
+    name: 'Sequential Thinking',
+    icon: '/connector-icons/steps.svg',
+  },
+  '@evenfire/mcp-snowflake': { name: 'Snowflake', icon: '/connector-icons/snowflake.svg' },
+  '@evenfire/mcp-sqlite': { name: 'SQLite', icon: '/connector-icons/sqlite.svg' },
+  '@evenfire/mcp-square': {
+    name: 'Square',
+    icon: '/connector-icons/square.svg',
+    darkIcon: '/connector-icons/square-on-dark.svg',
+  },
+  '@evenfire/mcp-stripe': {
+    name: 'Stripe',
+    icon: '/connector-icons/stripe.svg',
+    darkIcon: '/connector-icons/stripe-on-dark.svg',
+  },
+  '@evenfire/mcp-supabase': { name: 'Supabase', icon: '/connector-icons/supabase.svg' },
+  '@evenfire/mcp-tavily-remote': { name: 'Tavily', icon: '/connector-icons/tavily.svg' },
+  '@evenfire/mcp-terraform': { name: 'Terraform', icon: '/connector-icons/terraform.svg' },
+  '@evenfire/mcp-time': { name: 'Time', icon: '/connector-icons/clock.svg' },
+  '@evenfire/mcp-web-research': { name: 'Web Research', icon: '/connector-icons/globe.svg' },
+  '@evenfire/mcp-whois': { name: 'WHOIS', icon: '/connector-icons/globe.svg' },
+  '@evenfire/mcp-wikipedia': {
+    name: 'Wikipedia',
+    icon: '/connector-icons/wikipedia.svg',
+    darkIcon: '/connector-icons/wikipedia-on-dark.svg',
+  },
+}
