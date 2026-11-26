@@ -1221,7 +1221,9 @@ function settleSwitch(w: World, record: SwitchRecord): void {
   if (inInstance) {
     const result = root?.querySelector('.cu-host-approvals-tab__switch-result')?.textContent ?? ''
     const expected = outcome.kind === 'failed' ? 'Manual was not saved.' : 'Manual is saved.'
-    if (!result.startsWith(expected)) {
+    // Shown in the tab that ran it; a continuation is shown by its toast.
+    record.shown = result.startsWith(expected)
+    if (!record.shown) {
       flag(
         w,
         'L4',
@@ -1236,7 +1238,6 @@ function settleSwitch(w: World, record: SwitchRecord): void {
       }
     }
   }
-  record.shown = true
   checkL5(w, record.agent, record.settleLogLen as number, `switch #${record.id} (${outcome.kind})`)
 }
 
@@ -1249,8 +1250,13 @@ type ToastDue = {
   owner: string
   matches: (text: string) => boolean
   tone: string
-  /** S3 or S4 when the toast says the write succeeded; L4 or S5 otherwise. */
+  /**
+   * What a missing or mistoned toast breaks: L4 for a switch, S5 for a save's
+   * continuation, S3 for a save's success in its tab.
+   */
   property: string
+  /** Called when the toast is found: a switch continuation is then shown (L4). */
+  onShown?: () => void
 }
 
 /** The approval toasts (spec §6.3 step 7, §6.4 step 10, §6.5): every other toast is the page's. */
@@ -1281,7 +1287,7 @@ function toastsDue(w: World, settled: ReadonlyArray<SaveRecord | SwitchRecord>):
       const prefix = `Per-tool overrides for agent ${record.agent}`
       if (outcome.kind === 'saved') {
         const text = `Per-tool overrides saved for agent ${record.agent}.`
-        due.push({ owner, matches: shown => shown === text, tone: 'success', property: 'S3' })
+        due.push({ owner, matches: shown => shown === text, tone: 'success', property: 'S5' })
       } else if (outcome.kind === 'maybe') {
         const text = `${prefix}: The save may not have applied. Reload to check.`
         due.push({ owner, matches: shown => shown === text, tone: 'warning', property: 'S5' })
@@ -1312,6 +1318,9 @@ function toastsDue(w: World, settled: ReadonlyArray<SaveRecord | SwitchRecord>):
       }
       continue
     }
+    const onShown = () => {
+      record.shown = true
+    }
     if (outcome.kind === 'failed') {
       const text = `Manual was not saved for agent ${record.agent}. `
       due.push({
@@ -1320,11 +1329,18 @@ function toastsDue(w: World, settled: ReadonlyArray<SaveRecord | SwitchRecord>):
           shown.startsWith(text) && shown.includes('To set Manual by hand, run: kubectl'),
         tone: 'error',
         property: 'L4',
+        onShown,
       })
     } else {
       const already = outcome.kind === 'already' ? ' It was already Manual.' : ''
       const text = `Manual is saved for agent ${record.agent}.${already} ${applied}`
-      due.push({ owner, matches: shown => shown === text, tone: 'success', property: 'S4' })
+      due.push({
+        owner,
+        matches: shown => shown === text,
+        tone: 'success',
+        property: 'L4',
+        onShown,
+      })
     }
   }
   return due
@@ -1345,6 +1361,7 @@ function checkApprovalToasts(w: World, settled: ReadonlyArray<SaveRecord | Switc
     )
     if (index >= 0) {
       unmatched.splice(index, 1)
+      expected.onShown?.()
       count(w.stats, 'checks', 'toasts')
       continue
     }
@@ -1969,7 +1986,9 @@ function countHistoryEvents(w: World): void {
 
 function checkAtRest(w: World): void {
   countHistoryEvents(w)
+  // L4 at rest: every run's outcome was shown, in its tab or by its toast.
   for (const record of w.switches) {
+    count(w.stats, 'checks', 'L4rest')
     if (!record.shown) flag(w, 'L4', `switch #${record.id} ended and was never shown`)
   }
   checkS1(w)
