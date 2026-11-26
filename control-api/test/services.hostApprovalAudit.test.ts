@@ -9,6 +9,7 @@ import {
   buildApprovalChangeSummary,
   buildHostApprovalChange,
   logHostApprovalChange,
+  serializeApprovalChangeSummary,
 } from '../src/services/hostApprovalAudit.js'
 import { MCP_HOST_NATIVE_TOOL_NAMES } from '../src/services/mcpHostNativeToolNames.js'
 import { TOKEN_LEAK_REDACT_PATHS } from '../src/utils/log/redact.js'
@@ -247,7 +248,91 @@ describe('buildHostApprovalChange', () => {
       const summary = buildApprovalChangeSummary({ before, after })
       const kept = summaryTools(summary)
       for (const name of MCP_HOST_NATIVE_TOOL_NAMES) expect(kept).toContain(name)
-      expect(JSON.parse(summary as string).truncated).toBe(true)
+      // Ruling 73: the long strings became markers, the other 10 fields keep
+      // their values, and nothing fell back to counts.
+      const parsed = JSON.parse(summary as string) as {
+        truncated?: boolean
+        fields: Record<string, { old: unknown; new: unknown }>
+      }
+      expect(parsed.truncated).toBeUndefined()
+      expect(Object.keys(parsed.fields)).toHaveLength(11)
+      expect(parsed.fields.shellClassifierModel).toEqual({
+        old: '(value too long)',
+        new: '(value too long)',
+      })
+      expect(parsed.fields.modeCeiling).toEqual({ old: 'manual', new: 'allow_all' })
+      expect(parsed.fields['channels.teams.enabled']).toEqual({ old: true, new: false })
+    })
+
+    it('a ceiling raise survives a summary that overflows with 46 natives and an escaped model', () => {
+      const names = [...MCP_HOST_NATIVE_TOOL_NAMES].slice(0, 46)
+      const toolsBefore = Object.fromEntries(names.map(name => [name, false]))
+      const toolsAfter = Object.fromEntries(names.map(name => [name, true]))
+      const before = {
+        modeCeiling: 'manual',
+        shellClassifierModel: '\u0085'.repeat(MAX_VALUE_LENGTH),
+        tools: toolsBefore,
+      }
+      const after = {
+        modeCeiling: 'allow_all',
+        shellClassifierModel: '\u0086'.repeat(MAX_VALUE_LENGTH),
+        tools: toolsAfter,
+      }
+      const summary = buildApprovalChangeSummary({ before, after }) as string
+      expect(summary.length).toBeLessThanOrEqual(4096)
+      const parsed = JSON.parse(summary) as {
+        truncated?: boolean
+        tools: Array<{ name: string }>
+        fields: Record<string, { old: unknown; new: unknown }>
+      }
+      expect(parsed.fields.modeCeiling).toEqual({ old: 'manual', new: 'allow_all' })
+      expect(parsed.fields.shellClassifierModel?.new).toBe('(value too long)')
+      expect(parsed.tools.map(entry => entry.name).sort()).toEqual([...names].sort())
+      expect(parsed.truncated).toBeUndefined()
+    })
+
+    it('tier 4: natives that cannot fit are cut from the end, counted, and logged as a warning', () => {
+      const warn = vi.fn()
+      const spy = vi.spyOn(rootLogger, 'child').mockReturnValue({ warn } as never)
+      try {
+        const names = Array.from(
+          { length: 200 },
+          (_, i) => `synthetic_native_tool_${String(i).padStart(3, '0')}`
+        )
+        const change = {
+          fields: { modeCeiling: { old: 'manual' as const, new: 'allow_all' as const } },
+          tools: names.map(name => ({ name, old: true, new: false })),
+          toolsTruncated: 0,
+          approvers: {},
+          blockRemoved: false,
+          inheritedBefore: false,
+        }
+        const text = serializeApprovalChangeSummary(change, {
+          isNative: () => true,
+          host: 'foo',
+        })
+        expect(text.length).toBeLessThanOrEqual(4096)
+        const parsed = JSON.parse(text) as {
+          truncated: boolean
+          tools: Array<{ name: string }>
+          nativeToolsTruncated: number
+        }
+        expect(parsed.truncated).toBe(true)
+        expect(parsed.tools.length + parsed.nativeToolsTruncated).toBe(200)
+        expect(parsed.nativeToolsTruncated).toBeGreaterThan(0)
+        // Cut from the end: the kept ones are the first, in order.
+        expect(parsed.tools.map(entry => entry.name)).toEqual(names.slice(0, parsed.tools.length))
+        expect(warn).toHaveBeenCalledTimes(1)
+        const [payload] = warn.mock.calls[0] as [Record<string, unknown>]
+        expect(payload).toMatchObject({
+          event: 'host_approval_summary_oversize',
+          host: 'foo',
+          nativeToolsTruncated: parsed.nativeToolsTruncated,
+        })
+        expect(typeof payload.length).toBe('number')
+      } finally {
+        spy.mockRestore()
+      }
     })
 
     it('all natives changed plus decoys, with no field change, list every native name', () => {

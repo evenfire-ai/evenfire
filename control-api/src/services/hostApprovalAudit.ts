@@ -10,8 +10,10 @@
  * tool name never meets an object member or a logger redaction path.
  *
  * Privacy: the line carries no approver identity, only how many approvers were
- * added and removed per channel. Every value is a primitive cut to
- * `MAX_VALUE_LENGTH` characters.
+ * added and removed per channel. Every value is a primitive; a string is cut to
+ * `MAX_VALUE_LENGTH` characters before the line escapes control, C1,
+ * bidirectional and line-separator characters, so an escaped string can reach
+ * six times that length in the line.
  */
 import { rootLogger } from '../observability/logger.js'
 import { approvalBlocksEqual } from './hostApprovalRules.js'
@@ -27,7 +29,7 @@ export const MAX_TOOL_KEYS = 50
  * name is only a label: whether a tool is native is decided on the full name.
  */
 export const MAX_TOOL_NAME_LENGTH = 64
-/** Other strings (values and field keys) are cut to this many characters. */
+/** Other strings (values and field keys) are cut to this many characters, before any escaping. */
 export const MAX_VALUE_LENGTH = 128
 
 type Leaf = string | number | boolean | null
@@ -271,40 +273,82 @@ function lineSafe(change: HostApprovalChange): HostApprovalChange {
   }
 }
 
+/** Stands for a string value too long to keep when the summary overflows (Ruling 73, tier 2). */
+export const VALUE_TOO_LONG = '(value too long)'
+
+export type SummaryOptions = {
+  /** Tests only: the native-name predicate. Defaults to mcp-host's registry. */
+  isNative?: (name: string) => boolean
+  /** The Host, for the oversize warning. */
+  host?: string
+}
+
 /**
  * The change as the JSON text kept on the administrative intent event
  * (`summary`, spec §6.8). The text is always valid JSON of at most
  * `MAX_APPROVAL_CHANGE_SUMMARY_LENGTH` characters, never a JSON string cut
- * mid-way:
+ * mid-way. Native tool entries are kept as long as anything can be, in four
+ * tiers:
  *
  * 1. Entries of other tools are dropped one by one, from the end, and counted
- *    into `toolsTruncated`, until the text fits. Native tool entries are never
- *    dropped.
- * 2. If it still does not fit with only the native entries (many changed
- *    fields), the field values fall back to counts: the text is a counts-only
- *    object marked `truncated: true` (field, tool and approver-channel counts,
- *    the approver totals and the two flags) that also holds every native
- *    entry. All native entries together take about 3,100 characters and the
- *    rest of that object is bounded, so it always fits.
+ *    into `toolsTruncated`, until the text fits.
+ * 2. Long string values (longer than `VALUE_TOO_LONG`) become that marker.
+ *    Every enum and boolean field keeps its old and new values, and the
+ *    approver counts stay.
+ * 3. The field values fall back to counts: a counts-only object marked
+ *    `truncated: true` (field, tool and approver-channel counts, the approver
+ *    totals and the two flags) that holds every native entry.
+ * 4. Only if even that cannot fit (mcp-host gaining about 15 more native
+ *    tools), native entries are cut from the end of the counts-only object,
+ *    counted in `nativeToolsTruncated`, and a `host_approval_summary_oversize`
+ *    warning is logged, so nothing disappears silently.
  */
-export function serializeApprovalChangeSummary(change: HostApprovalChange): string {
+export function serializeApprovalChangeSummary(
+  change: HostApprovalChange,
+  options: SummaryOptions = {}
+): string {
+  const isNative = options.isNative ?? isMcpHostNativeToolName
   const entries = [
-    ...change.tools.filter(entry => isMcpHostNativeToolName(entry.name)),
-    ...change.tools.filter(entry => !isMcpHostNativeToolName(entry.name)),
+    ...change.tools.filter(entry => isNative(entry.name)),
+    ...change.tools.filter(entry => !isNative(entry.name)),
   ]
-  const nativeCount = entries.filter(entry => isMcpHostNativeToolName(entry.name)).length
+  const nativeCount = entries.filter(entry => isNative(entry.name)).length
+  const fits = (text: string): boolean => text.length <= MAX_APPROVAL_CHANGE_SUMMARY_LENGTH
+
+  // Tier 1.
   for (let kept = entries.length; kept >= nativeCount; kept -= 1) {
     const text = encode({
       ...change,
       tools: entries.slice(0, kept),
       toolsTruncated: change.toolsTruncated + (entries.length - kept),
     })
-    if (text.length <= MAX_APPROVAL_CHANGE_SUMMARY_LENGTH) return text
+    if (fits(text)) return text
   }
+
+  // Tier 2.
+  const shorten = (value: Leaf): Leaf =>
+    typeof value === 'string' && value.length > VALUE_TOO_LONG.length ? VALUE_TOO_LONG : value
+  const shortFields = Object.fromEntries(
+    Object.entries(change.fields).map(([key, entry]) => [
+      key,
+      { old: shorten(entry.old), new: shorten(entry.new) },
+    ])
+  )
+  const natives = entries.slice(0, nativeCount)
+  const markerText = encode({
+    ...change,
+    fields: shortFields,
+    tools: natives,
+    toolsTruncated: change.toolsTruncated + (entries.length - nativeCount),
+  })
+  if (fits(markerText)) return markerText
+
+  // Tiers 3 and 4.
   const counts = Object.values(change.approvers)
-  return encode({
+  const countsOnly = (tools: HostApprovalToolChange[], cut: number): Record<string, unknown> => ({
     truncated: true,
-    tools: entries.slice(0, nativeCount),
+    tools,
+    ...(cut > 0 ? { nativeToolsTruncated: cut } : {}),
     fieldCount: Object.keys(change.fields).length,
     toolCount: entries.length + change.toolsTruncated,
     approverChannelCount: counts.length,
@@ -313,6 +357,26 @@ export function serializeApprovalChangeSummary(change: HostApprovalChange): stri
     blockRemoved: change.blockRemoved,
     inheritedBefore: change.inheritedBefore,
   })
+  const tier3 = encode(countsOnly(natives, 0))
+  if (fits(tier3)) return tier3
+
+  let kept = natives.length
+  let text = tier3
+  while (kept > 0 && !fits(text)) {
+    kept -= 1
+    text = encode(countsOnly(natives.slice(0, kept), natives.length - kept))
+  }
+  rootLogger.child({ module: 'host-approval-audit' }).warn(
+    {
+      event: 'host_approval_summary_oversize',
+      host: options.host ?? null,
+      length: tier3.length,
+      limit: MAX_APPROVAL_CHANGE_SUMMARY_LENGTH,
+      nativeToolsTruncated: natives.length - kept,
+    },
+    'Host approval summary too long for its native tool entries'
+  )
+  return text
 }
 
 /**
@@ -323,6 +387,7 @@ export function serializeApprovalChangeSummary(change: HostApprovalChange): stri
 export function buildApprovalChangeSummary(input: {
   before: unknown
   after: unknown
+  host?: string
 }): string | undefined {
   const asBlock = (value: unknown): Record<string, unknown> | undefined =>
     isRecord(value) ? value : undefined
@@ -330,7 +395,7 @@ export function buildApprovalChangeSummary(input: {
     before: asBlock(input.before),
     after: asBlock(input.after),
   })
-  return change ? serializeApprovalChangeSummary(change) : undefined
+  return change ? serializeApprovalChangeSummary(change, { host: input.host }) : undefined
 }
 
 export function logHostApprovalChange(input: {

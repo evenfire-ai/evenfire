@@ -814,6 +814,7 @@ export function createAdminResourcesRouter(
               approvalChangeSummary: buildApprovalChangeSummary({
                 before: undefined,
                 after: hostSpec.approval,
+                host: body.metadata?.name,
               }),
             })
           })
@@ -1053,6 +1054,7 @@ export function createAdminResourcesRouter(
                 ? buildApprovalChangeSummary({
                     before: recordValue(ratchetCurrent?.spec)?.approval,
                     after: hostSpec.approval,
+                    host: req.params.name,
                   })
                 : undefined,
             })
