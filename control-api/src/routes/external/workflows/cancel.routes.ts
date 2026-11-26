@@ -13,7 +13,8 @@ const BASE = '/external/workflows'
 
 // Cancel needs a live session and no delegation: V1 and V2 sessions take the
 // same path, and the permission check reads only the run row and, for an
-// admin, the caller's live team membership.
+// admin, the caller's live team membership and the scope team's live grant on
+// the run's recipe.
 export function createExternalWorkflowCancelRoutes(): Router {
   const router = Router()
 
