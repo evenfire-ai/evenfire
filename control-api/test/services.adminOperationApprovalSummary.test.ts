@@ -98,7 +98,7 @@ describe('serializeApprovalChangeSummary', () => {
     expect(parsed.toolsTruncated).toBe(3 + (50 - kept.length))
   })
 
-  it('falls back to a counts-only object that parses when no tool entries are left to drop', () => {
+  it('falls back to a counts-only object that parses when no other tool entries are left to drop and the fields still overflow', () => {
     const fields: HostApprovalChange['fields'] = {}
     for (let index = 0; index < 60; index += 1) {
       fields[`f${index}-${'k'.repeat(120)}`] = { old: 'o'.repeat(128), new: 'n'.repeat(128) }

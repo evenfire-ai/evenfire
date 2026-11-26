@@ -429,7 +429,7 @@ describe('buildHostApprovalChange', () => {
         const change = buildHostApprovalChange({
           before: block({ shellClassifierModel: 'plain', tools: {} }),
           after: block({
-            shellClassifierModel: 'model\u202e\u0085',
+            shellClassifierModel: 'model\u202e\u0085\u061c\u2028\u2029',
             tools: { 'shell\u202eexe': false, shell_exec: false },
           }),
         })
@@ -446,14 +446,18 @@ describe('buildHostApprovalChange', () => {
       }
       expect(lines).toHaveLength(1)
       // eslint-disable-next-line no-misleading-character-class
-      expect(/[\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(lines[0] as string)).toBe(
-        false
-      )
+      expect(
+        /[\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/.test(
+          lines[0] as string
+        )
+      ).toBe(false)
       const logged = JSON.parse(lines[0] as string) as {
         fields: { shellClassifierModel: { new: string } }
         tools: Array<{ name: string }>
       }
-      expect(logged.fields.shellClassifierModel.new).toBe('model\\u202e\\u0085')
+      expect(logged.fields.shellClassifierModel.new).toBe(
+        'model\\u202e\\u0085\\u061c\\u2028\\u2029'
+      )
       expect(logged.tools.map(entry => entry.name)).toEqual(['shell_exec', 'shell\\u202eexe'])
     })
 
