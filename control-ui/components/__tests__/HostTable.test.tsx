@@ -450,3 +450,29 @@ describe('HostTable type column (lifecycle)', () => {
     expect(rowOrder()).toEqual(['cold-agent', 'warm-agent'])
   })
 })
+
+it('keeps tooltip content clicks separate from row navigation', () => {
+  const onOpen = vi.fn()
+  render(
+    <HostTable
+      items={[hostWithContext('chatllm', 'context1')]}
+      onOpen={onOpen}
+      onOpenConnectors={vi.fn()}
+      onDelete={vi.fn()}
+      deletingKey={null}
+      onRefresh={vi.fn()}
+      onCreateHost={vi.fn()}
+      refreshing={false}
+    />
+  )
+  const row = screen.getByLabelText('Open agent chatllm')
+  fireEvent.mouseEnter(within(row).getByText('Stateful'))
+  const tooltip = screen.getByRole('tooltip')
+  expect(tooltip).toBeVisible()
+  fireEvent.click(tooltip)
+  expect(onOpen).not.toHaveBeenCalled()
+  fireEvent.click(row)
+  expect(onOpen).toHaveBeenCalledTimes(1)
+  fireEvent.keyDown(row, { key: 'Enter' })
+  expect(onOpen).toHaveBeenCalledTimes(2)
+})

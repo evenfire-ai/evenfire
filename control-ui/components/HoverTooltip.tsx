@@ -137,6 +137,7 @@ export function HoverTooltip({
                     // measures this node and positions it before paint.
                     { top: -10000, left: -10000, visibility: 'hidden' }
               }
+              onClick={event => event.stopPropagation()}
               onMouseEnter={openHover}
               onMouseLeave={closeHoverSoon}
             >
