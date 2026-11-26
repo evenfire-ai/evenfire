@@ -1474,7 +1474,7 @@ function checkS5(w: World): void {
   const pendingLoad = w.fake.log.some(
     entry =>
       entry.path === `/api/v1/admin/hosts/${other}/detail` &&
-      (w.sentAt.get(entry.seq) ?? 0) >= w.instance.mountStep &&
+      sentStep(w, entry) >= w.instance.mountStep &&
       !w.delivered.has(entry.seq)
   )
   if (currentView(w) && (pendingLoad || inFlight(w, other))) count(w.stats, 'checks', 'S5')
@@ -2736,6 +2736,13 @@ function inFlight(w: World, agent?: Agent): boolean {
   )
 }
 
+/** The step a logged request was sent in: the tagged `fetch` records it for every request. */
+function sentStep(w: World, entry: FakeLogEntry): number {
+  const step = w.sentAt.get(entry.seq)
+  if (step === undefined) throw harnessError(`request #${entry.seq} was logged with no send step`)
+  return step
+}
+
 async function remount(w: World, agent: Agent, tab: TabSlug): Promise<void> {
   if (onApprovals(w)) count(w.stats, 'events', 'E8')
   if (inFlight(w)) count(w.stats, 'events', 'E9')
@@ -3078,13 +3085,12 @@ function loadDeliveries(w: World, agent: Agent): FakeLogEntry[] {
  */
 const PINS = {
   noticeLoadAfterWrite: (w: World) => {
-    const save = savesOf(w, 'saved')[0]
-    const late = save
-      ? loadDeliveries(w, 'alpha').some(
-          entry =>
-            entry.seq > (save.settleLogLen ?? Infinity) && blockOf(hostOfRead(entry)) === undefined
-        )
-      : false
+    const settled = savesOf(w, 'saved')[0]?.settleLogLen
+    const late =
+      settled !== undefined &&
+      loadDeliveries(w, 'alpha').some(
+        entry => entry.seq > settled && blockOf(hostOfRead(entry)) === undefined
+      )
     return late ? null : 'no load sent after the save answered with the block removed'
   },
   twoSavesOneStep: (w: World) => {
@@ -3097,16 +3103,16 @@ const PINS = {
   },
   olderLoadAfterWrite: (w: World) => {
     const save = savesOf(w, 'saved')[0]
-    const writeDelivered = save
-      ? w.deliveries.indexOf(writesOf(w, { kind: 'save', id: save.id }).at(-1)?.seq ?? -1)
-      : -1
-    const older = save
-      ? loadDeliveries(w, 'alpha').some(
-          entry =>
-            entry.seq <= (save.settleLogLen ?? -1) &&
-            w.deliveries.indexOf(entry.seq) > writeDelivered
-        )
-      : false
+    const settled = save?.settleLogLen
+    const write = save ? writesOf(w, { kind: 'save', id: save.id }).at(-1) : undefined
+    // The save's last PUT must have answered: a load counts only after it.
+    const writeDelivered = write ? w.deliveries.indexOf(write.seq) : -1
+    const older =
+      settled !== undefined &&
+      writeDelivered >= 0 &&
+      loadDeliveries(w, 'alpha').some(
+        entry => entry.seq <= settled && w.deliveries.indexOf(entry.seq) > writeDelivered
+      )
     const switches = w.switches.filter(item => item.outcome && item.outcome.kind !== 'failed')
     return older && switches.length === 2
       ? null
@@ -3150,25 +3156,25 @@ const PINS = {
       : "no save ended saved from a read with only 409'd PUTs"
   },
   outsideRaiseAfterSwitch: (w: World) => {
-    const done = w.switches.find(item => item.outcome?.kind === 'saved')
-    const raised = w.timeline.some(
-      event =>
-        event.kind === 'external' &&
-        event.step > (done?.settleStep ?? Infinity) &&
-        ceilingOf(event.after) !== 'manual'
-    )
+    const settled = w.switches.find(item => item.outcome?.kind === 'saved')?.settleStep
+    const raised =
+      settled !== undefined &&
+      w.timeline.some(
+        event =>
+          event.kind === 'external' && event.step > settled && ceilingOf(event.after) !== 'manual'
+      )
     return raised ? null : 'no outside raise after the switch saved Manual'
   },
   refreshFailed: (w: World) => {
-    const save = savesOf(w, 'saved')[0]
-    const failed = save
-      ? w.fake.log.some(
-          entry =>
-            entry.path === '/api/v1/admin/hosts/alpha/detail' &&
-            entry.seq > (save.settleLogLen ?? Infinity) &&
-            entry.response?.status === 500
-        )
-      : false
+    const settled = savesOf(w, 'saved')[0]?.settleLogLen
+    const failed =
+      settled !== undefined &&
+      w.fake.log.some(
+        entry =>
+          entry.path === '/api/v1/admin/hosts/alpha/detail' &&
+          entry.seq > settled &&
+          entry.response?.status === 500
+      )
     return failed ? null : 'the save did not settle with its refresh failing'
   },
   sixConflicts: (w: World) => {
