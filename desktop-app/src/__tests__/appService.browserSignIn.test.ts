@@ -1739,6 +1739,13 @@ describe('browser sign-in link acceptance, redeem and install', () => {
     )
     expect(endedAt).toBeGreaterThanOrEqual(0)
     expect(endedAt).toBeLessThan(harness.secretsSeen.indexOf(`${LINK_HANDLING_FAILED} Error`))
+    // D11: the redeem's count settled on this throw path too. X1 left the session in memory, so
+    // setup proceeds once a logout has cleared it.
+    expect(service.getSessionPresence()).toEqual({ hasToken: true, hasMe: true })
+    await service.logout()
+    expect(service.getSessionPresence()).toEqual({ hasToken: false, hasMe: false })
+    await expect(completeSetup(harness)).resolves.toMatchObject({ configured: true })
+    expect(setupFetches(harness)).toBe(1)
   })
 
   it(`fails a 200 whose me has no id, without installing (${SIGNED_IN_WITHOUT_ME_ID})`, async () => {
@@ -1796,6 +1803,10 @@ describe('browser sign-in link acceptance, redeem and install', () => {
     expect(endStatesOf(harness, attemptId)).toEqual(['failed'])
     expect(harness.secretsSeen).toContain(`${LINK_HANDLING_FAILED} Error`)
     expect(harness.secretsSeen.filter(text => text.includes('fake redeem failure'))).toEqual([])
+    // D11: the redeem's count settled on this throw path too, so signed-out setup proceeds.
+    expect(service.getSessionPresence()).toEqual({ hasToken: false, hasMe: false })
+    await expect(completeSetup(harness)).resolves.toMatchObject({ configured: true })
+    expect(setupFetches(harness)).toBe(1)
   })
 
   it('ends a waiting attempt failed when its acceptance op throws before the redeem', async () => {
