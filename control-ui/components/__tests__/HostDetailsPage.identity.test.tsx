@@ -571,7 +571,8 @@ describe('HostDetailsPage identity integration', () => {
     expect(screen.getByRole('tooltip')).toBeInTheDocument()
     fireEvent.keyDown(typeChip, { key: 'Escape' })
     expect(screen.queryByRole('tooltip')).toBeNull()
-    // Re-entering the trigger re-shows it.
+    // Leaving and re-entering the trigger starts a new hover interaction.
+    fireEvent.mouseLeave(typeChip)
     fireEvent.mouseEnter(typeChip)
     expect(screen.getByRole('tooltip')).toBeInTheDocument()
   })

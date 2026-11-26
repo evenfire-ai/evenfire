@@ -38,15 +38,19 @@ export function HoverTooltip({
   const triggerRef = useRef<HTMLSpanElement>(null)
   const cardRef = useRef<HTMLDivElement>(null)
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const hoverMayReopenRef = useRef(true)
   const tooltipId = useId()
   const open = (hovered || focused) && !dismissedByEscape
 
+  // Require a new hover interaction, so removing a card that overlaps its trigger
+  // cannot immediately reopen it under a stationary pointer.
   const openHover = () => {
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
     setHovered(true)
-    setDismissedByEscape(false)
+    if (hoverMayReopenRef.current) setDismissedByEscape(false)
   }
   const closeHoverSoon = () => {
+    hoverMayReopenRef.current = true
     if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
     hideTimerRef.current = setTimeout(() => setHovered(false), HOVER_GRACE_MS)
   }
@@ -84,11 +88,20 @@ export function HoverTooltip({
       setReflowTick(tick => tick + 1)
     }
     const onResize = () => setReflowTick(tick => tick + 1)
+    // Observe Escape wherever focus lives; leave dialog handlers and defaults intact.
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        hoverMayReopenRef.current = false
+        setDismissedByEscape(true)
+      }
+    }
+    document.addEventListener('keydown', onKeyDown, true)
     window.addEventListener('scroll', onScroll, true)
     window.addEventListener('resize', onResize)
     return () => {
       window.removeEventListener('scroll', onScroll, true)
       window.removeEventListener('resize', onResize)
+      document.removeEventListener('keydown', onKeyDown, true)
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
     }
   }, [open])
@@ -107,9 +120,6 @@ export function HoverTooltip({
           setDismissedByEscape(false)
         }}
         onBlur={() => setFocused(false)}
-        onKeyDown={event => {
-          if (event.key === 'Escape' && open) setDismissedByEscape(true)
-        }}
       >
         {label}
       </span>
