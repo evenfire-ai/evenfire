@@ -11,6 +11,7 @@ export class SignalPoller {
   private readonly workflowName: string
   private readonly tokenProvider: RuntimeTokenProvider
   private readonly intervalMs: number
+  private readonly runId: string | undefined
   private readonly seenIds = new Set<string>()
   private static readonly MAX_SEEN_IDS = 10_000
 
@@ -35,11 +36,39 @@ export class SignalPoller {
     workflowName: string
     tokenProvider: RuntimeTokenProvider
     intervalMs: number
+    /**
+     * The database run this pod executes (`CLERUM_WORKFLOW_RUN_ID`), or
+     * undefined when the pod has none. Only the cancel signal of this run is
+     * accepted.
+     */
+    runId: string | undefined
   }) {
     this.wrcUrl = opts.wrcUrl
     this.workflowName = opts.workflowName
     this.tokenProvider = opts.tokenProvider
     this.intervalMs = opts.intervalMs
+    this.runId = opts.runId
+  }
+
+  /**
+   * True for a cancel signal that does not name this pod's run. Signals are
+   * queued under the recipe name, and two database runs can get the same
+   * child recipe name, so a cancel left for another run must not stop this
+   * one. A pod without a run id has no run a cancel can target, so every
+   * cancel is foreign to it. Other signal types are not filtered.
+   */
+  private isForeignCancel(signal: Signal): boolean {
+    if (signal.type !== 'cancel') return false
+    return this.runId === undefined || signal.requestId !== `cancel:${this.runId}`
+  }
+
+  private dropForeignCancel(signal: Signal): boolean {
+    if (!this.isForeignCancel(signal)) return false
+    emitLog('warn', 'Dropped a cancel signal that does not name this run', {
+      signalType: signal.type,
+      requestId: signal.requestId,
+    })
+    return true
   }
 
   private async authHeader(): Promise<string> {
@@ -73,6 +102,7 @@ export class SignalPoller {
         if (!Array.isArray(signals)) return
         for (const signal of signals) {
           if (this.stopped) break
+          if (this.dropForeignCancel(signal)) continue
           if (this.seenIds.has(signal.requestId)) continue
           this.trackSeen(signal.requestId)
           if (this.pendingSignals.length >= SignalPoller.MAX_PENDING_SIGNALS) {
@@ -112,6 +142,7 @@ export class SignalPoller {
   private static readonly MAX_PENDING_SIGNALS = 200
 
   pushSignal(signal: Signal): void {
+    if (this.dropForeignCancel(signal)) return
     if (this.seenIds.has(signal.requestId)) return
     this.trackSeen(signal.requestId)
     if (this.pendingSignals.length >= SignalPoller.MAX_PENDING_SIGNALS) {

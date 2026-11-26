@@ -115,7 +115,11 @@ export class WorkflowSDK {
       workflowName: cfg.workflowName,
       tokenProvider: cfg.tokenProvider,
     }
-    const signals = new SignalPoller({ ...wrcOpts, intervalMs: cfg.signalPollIntervalMs })
+    const signals = new SignalPoller({
+      ...wrcOpts,
+      intervalMs: cfg.signalPollIntervalMs,
+      runId: process.env.CLERUM_WORKFLOW_RUN_ID?.trim() || undefined,
+    })
     const status = new StatusReporter(wrcOpts)
     const coordinator = new StepCoordinator()
 
