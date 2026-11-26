@@ -2104,6 +2104,8 @@ describe('the binding and the deadline at acceptance', () => {
 
     expect(service.acceptDesktopLoginLink(link)).toBe(true)
     await until(harness, () => redeem.reached, 'the redeem fetch')
+    // D9 clears V16 at acceptance: no deadline timer stays armed while the attempt redeems.
+    expect(clock.pendingTimers()).toBe(0)
     // Past 15:00 on both: a deadline timer still armed would fire here.
     clock.advance(2_000, 'timers')
     // The handoff page's second delivery reaches the pre-match, which applies the deadline on
