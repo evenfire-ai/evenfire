@@ -64,7 +64,8 @@ five steps live together.
    editor lists, only `http_request` and `shell_exec` default to Required and
    the rest to Skip; conditionally-registered tools carry their own defaults
    (`cron_manage` and the desktop `browser_open` / `browser_navigate` tools
-   also default to Required). See
+   also default to Required; `cron_manage` and `workflow_trigger` show as
+   "Default (varies)" because their default depends on context). See
    [Configure approvals](../how-to/configure-approvals.md).
 
 4. **Constrain it** — `EgressEditor` (`components/EgressEditor.tsx`, model in

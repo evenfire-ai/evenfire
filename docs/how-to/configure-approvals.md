@@ -302,7 +302,7 @@ Open the agent in Control UI and choose the **Approvals** tab, between
   mode, who may raise it from a channel (the policy and each channel's
   approvers), and the per-tool overrides. Approver IDs and email addresses
   show on this page, which any admin who can open the agent can read. The
-  mode, channel and approver sections are read-only in this release. Change
+  mode, channel and approver sections are read-only. Change
   them on the Host as described in [Approval modes](#approval-modes); the
   tab's **How to change these** link points there.
 - **Lowers the ceiling with one button.** **Set to Manual now** is the off
@@ -325,48 +325,63 @@ the agent page read the Host's version first and refuse to save without one
 The button writes `modeCeiling: manual` and nothing else in `spec`. It needs
 no confirmation, and it is available even when the tab could not load the
 agent's settings. It reads the Host, and if the ceiling is already Manual (or
-the Host has no `spec.approval`) it reports "Already Manual" and writes
-nothing; it never creates an approval block. Otherwise it sends the Host with
-the version it just read, and retries on a version conflict, a 429, a server
-error or no answer, starting no new attempt more than 20 seconds after the
-click. Running chats apply the lower ceiling at their next tool call, as in
-[Kill switch](#kill-switch). The message that follows lists what still runs
-without a card, and it links to that section for what the switch does not
-stop.
+the Host has no `spec.approval`) it reports "Manual is saved. It was already
+Manual." and writes nothing; it never creates an approval block. Otherwise it
+sends the Host with the version it just read, and retries on a version
+conflict, a 429, a server error or no answer, starting no new attempt more
+than 20 seconds after the click. Running chats apply the lower ceiling at
+their next tool call, as in [Kill switch](#kill-switch).
 
-Other things to know:
+**What it does not stop.** The message after a save lists what still runs
+without a card:
 
-- **It can be refused.** The general Host save validates the whole spec, so
-  an unrelated field can refuse it. One case: a Host whose spec names the
-  `codex-subscription` or `grok-subscription` provider while control-api's
-  `CONTROL_API_CODEX_SUBSCRIPTION_ENABLED` or
-  `CONTROL_API_GROK_SUBSCRIPTION_ENABLED` is `false` (the `deploy/base`
-  default; the minikube overlay sets both to `true`) is answered with 422
-  `provider "..." is disabled`. The page then shows the error and this
-  command, which changes only the ceiling:
+- tools set to Skip, and tools that never ask (the page lists them);
+- approvals chats already gave: "Always allow" for every tool except shell, in
+  every chat; "Always allow" for shell and approvals for the rest of a task on
+  `shell_exec` and `http_request`, in chats that were already in Manual;
+  `cron_manage` approvals, in every chat;
+- scheduled tasks (on stateless agents they still ask before creating or
+  enabling another schedule).
 
-  ```bash
-  kubectl -n <namespace> patch host <name> --type=json \
-    -p '[{"op":"replace","path":"/spec/approval/modeCeiling","value":"manual"}]'
-  ```
+[Kill switch](#kill-switch) also covers a shell command, cron job, workflow
+step or HTTP or MCP side effect already running. None of this has an effect
+if approvals are off for the cluster (below).
 
-  The patch needs `spec.approval` to exist. On a Host without it the ceiling
-  is already Manual.
+**It can be refused.** The general Host save validates the whole spec, so an
+unrelated field can refuse it. One case: a Host whose spec names the
+`codex-subscription` or `grok-subscription` provider while control-api's
+`CONTROL_API_CODEX_SUBSCRIPTION_ENABLED` or
+`CONTROL_API_GROK_SUBSCRIPTION_ENABLED` is `false` (the `deploy/base` default;
+the minikube overlay sets both to `true`) is answered with 422
+`provider "..." is disabled`. The page then shows the error and this command,
+which changes only the ceiling:
+
+```bash
+kubectl -n <namespace> patch host <name> --type=json \
+  -p '[{"op":"replace","path":"/spec/approval/modeCeiling","value":"manual"}]'
+```
+
+The patch needs `spec.approval` to exist. On a Host without it the ceiling is
+already Manual.
+
+### Other things to know
+
 - **Agents with no approval settings of their own.** The tab says the agent
   uses the cluster default, which the page cannot show. mcp-host reads the
   ceiling and the channel switches from the Host's own block only, so such an
   agent already runs Manual. Its first per-tool save asks you to pick who may
-  approve from a channel ("Any channel user" or "Nobody (Desktop only)"),
-  writes that `defaultPolicy` with the tools, and shows a warning: mcp-host
-  uses `spec.approval` or `CLERUM_APPROVAL_CONFIG` as one whole object, so
-  the cluster rules stop applying for this agent and may have been stricter
-  than the values the page shows. **Before that first save**, if you made
-  `CLERUM_APPROVAL_CONFIG` stricter than the default, copy `defaultPolicy`,
-  `channels` and `tools` into the Host with `kubectl` first, as
-  [Dev mode](#dev-mode-no-cluster) describes. In `deploy/base` and the
-  minikube overlay `CLERUM_ENABLE_APPROVAL` defaults to `true`; if it is
-  `false` for the cluster there is no approval gate and nothing on this tab
-  has an effect.
+  approve from a channel ("Any channel user" or "Nobody (Desktop only)") and
+  writes that `defaultPolicy` with the tools. The dialog warns that the cluster
+  rules stop applying for this agent and may have been stricter than the
+  values the page shows. The reason is that mcp-host uses `spec.approval` or
+  `CLERUM_APPROVAL_CONFIG` as one whole object, never a merge.
+- **Copy a stricter `CLERUM_APPROVAL_CONFIG` first.** If you made it stricter
+  than the default, copy `defaultPolicy`, `channels` and `tools` into the Host
+  with `kubectl` before that first save, as [Dev mode](#dev-mode-no-cluster)
+  describes.
+- **`CLERUM_ENABLE_APPROVAL`.** It defaults to `true` in `deploy/base` and the
+  minikube overlay (neither sets it). If it is `false` for the cluster there is
+  no approval gate, and nothing on this tab has an effect.
 - **Agents set by a deployment manifest.** A banner appears when a manifest
   also sets `spec.approval`: a `kubectl apply` that recorded
   `spec.approval` in its `last-applied-configuration` annotation (the banner
@@ -379,7 +394,7 @@ Other things to know:
   `CLERUM_HTTP_ALLOWLIST` is set on mcp-host, it can reach any public address
   (it refuses private ones). Neither `deploy/base` nor the minikube overlay
   sets it. Setting `http_request` to Skip without an allowlist logs an
-  `[approval-config]` warning at startup.
+  `[approval-config]` warning at startup and again on every Host change.
 - **In-flight action checks.** With `CONTROL_API_USER_ACCESS_ACTION_CONTEXT_V2` on
   (off by default), any `spec.approval` change, the off switch included, makes an
   action check bound to the earlier policy come back `access_path_stale`, so it is
@@ -396,7 +411,7 @@ Other things to know:
 
 Each Host create or update through control-api that changes `spec.approval`
 writes one structured log line, event `host_approval_changed` at `info`, from
-the control-api logger. It records the Host, namespace, admin `sub`, the
+the control-api logger. It records the Host, namespace, the admin's `operatorSub`, the
 `operationId` of the administrative operation record, and `via` (`host_put` or
 `host_create`). Then:
 
