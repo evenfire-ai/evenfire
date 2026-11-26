@@ -2188,16 +2188,22 @@ export class ChannelReader {
         resetPollDeadline()
         return true
       }
-      // A pending or waiting_approval result means mcp-host still owns the run.
-      // That is liveness even when no tool heartbeat is emitted.
+      // A pending or waiting_approval result slows or resumes the poll. It does
+      // not move the poll deadline. That deadline is fixed when polling starts.
       const noteHostStillRunning = (status: string) => {
         if (status === 'waiting_approval') pollIntervalMs = 30_000
         else pollIntervalMs = RESULT_POLL_FALLBACK_INTERVAL_MS
         armRunTimer()
-        resetPollDeadline()
       }
 
       const failRun = async (reason: string): Promise<void> => {
+        if (finalDelivered || terminalDeliveryStarted || completionAnnounced) return
+        try {
+          const delivered = await deliverFinalResult()
+          if (delivered) return
+        } catch (err) {
+          logCaughtError('error', 'result_poll_failed', err, { taskId })
+        }
         if (finalDelivered || terminalDeliveryStarted || completionAnnounced) return
         finalDelivered = true
         acceptProgressUpdates = false
@@ -2318,7 +2324,7 @@ export class ChannelReader {
             return false
           }
           // Commit before any Slack edit so the silence timer cannot replace the answer.
-          // A throw clears the latch so a later poll can retry. Slack delivery does not throw.
+          // A throw clears the latch so a later poll can retry.
           terminalDeliveryStarted = true
           clearRunTimer()
           acceptProgressUpdates = false
@@ -2500,24 +2506,10 @@ export class ChannelReader {
               timer.unref?.()
             })
             if (finalDelivered) return
-            // An approval slows the poll. It still reads the host result so a
-            // decision, or a map eviction, can resume the same run.
-            if (pollPaused) resetPollDeadline()
             if (Date.now() >= pollDeadline) {
-              try {
-                const delivered = await deliverFinalResult()
-                if (delivered) {
-                  closeStream()
-                  resolveOnce()
-                  return
-                }
-              } catch (err) {
-                logCaughtError('error', 'result_poll_failed', err, { taskId })
-              }
-              // Pending and waiting_approval stay up. The silence timer owns idle cancel.
-              if (!finalDelivered) {
-                console.warn(`[Main] Result polling fallback timed out for task ${taskId}`)
-              }
+              await failRun('timed out')
+              closeStream()
+              resolveOnce()
               return
             }
             try {

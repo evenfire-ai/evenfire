@@ -295,32 +295,17 @@ describe('Slack long replies', () => {
         reason: 'approval_required',
       })
       stream!.onActivity?.()
-      await vi.advanceTimersByTimeAsync(31 * 60 * 1000)
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000)
 
       const duringApproval = editMessage.mock.calls.map(call => String(call[2])).join('\n')
       expect(duringApproval).toContain('Tool `shell_exec` requires approval.')
       expect(duringApproval).not.toContain("couldn't finish this request (timed out)")
       expect(cancelTask).not.toHaveBeenCalled()
-      expect(warn.mock.calls.map(call => String(call[0])).join('\n')).not.toContain(
-        'Result polling fallback timed out'
-      )
 
-      const pending = [
-        ...(
-          instance as unknown as {
-            pendingApprovals: Map<
-              string,
-              { updateStatusAfterDecision?: (content: string) => Promise<void> }
-            >
-          }
-        ).pendingApprovals.values(),
-      ][0]
-      expect(pending?.updateStatusAfterDecision).toEqual(expect.any(Function))
-      await pending!.updateStatusAfterDecision!('Approved. Processing...')
       hostDown = true
-      await vi.advanceTimersByTimeAsync(runTimeoutMs + 1_000)
+      await vi.advanceTimersByTimeAsync(21 * 60 * 1000)
 
-      expect(editMessage.mock.calls.map(call => String(call[2])).at(-1)).toContain(
+      expect(editMessage.mock.calls.map(call => String(call[2])).join('\n')).toContain(
         "couldn't finish this request (timed out)"
       )
       expect(cancelTask).toHaveBeenCalledWith(
@@ -332,29 +317,47 @@ describe('Slack long replies', () => {
     }
   }, 30_000)
 
-  it('stops the poll without cancelling when a pending run outlives the poll deadline', async () => {
+  it('posts a completed answer when it arrives at the poll deadline', async () => {
     vi.useFakeTimers()
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const startedAt = Date.now()
     const { instance, editMessage, cancelTask, adapter } = reader({
-      pending: true,
+      runTimeoutMs: 60 * 60 * 1000,
+      getTaskResult: async () => {
+        if (Date.now() - startedAt < 30 * 60 * 1000) {
+          return { success: true, status: 'pending' as const }
+        }
+        return { success: true, status: 'completed' as const, response: 'Saved answer' }
+      },
+    })
+    const handle = progressHandle(instance)
+    await handle.handleMessageWithProgress(slackMessage('Still working'), adapter)
+    await vi.advanceTimersByTimeAsync(31 * 60 * 1000)
+    expect(editMessage.mock.calls.map(call => String(call[2])).join('\n')).toContain('Saved answer')
+    expect(editMessage.mock.calls.map(call => String(call[2])).join('\n')).not.toContain(
+      "couldn't finish this request (timed out)"
+    )
+    expect(cancelTask).not.toHaveBeenCalled()
+  }, 30_000)
+
+  it('ends a pending run when the poll deadline is reached', async () => {
+    vi.useFakeTimers()
+    const getTaskResult = vi.fn(async () => ({ success: true, status: 'pending' as const }))
+    const { instance, editMessage, cancelTask, adapter } = reader({
+      getTaskResult,
       runTimeoutMs: 60 * 60 * 1000,
     })
     const handle = progressHandle(instance)
 
-    try {
-      await handle.handleMessageWithProgress(slackMessage('Still working'), adapter)
-      await vi.advanceTimersByTimeAsync(31 * 60 * 1000)
+    await handle.handleMessageWithProgress(slackMessage('Still working'), adapter)
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000)
+    expect(getTaskResult).toHaveBeenCalled()
+    expect(cancelTask).not.toHaveBeenCalled()
 
-      expect(editMessage.mock.calls.map(call => String(call[2])).join('\n')).not.toContain(
-        "couldn't finish this request (timed out)"
-      )
-      expect(cancelTask).not.toHaveBeenCalled()
-      expect(warn.mock.calls.map(call => String(call[0])).join('\n')).not.toContain(
-        'Result polling fallback timed out for task task-long'
-      )
-    } finally {
-      warn.mockRestore()
-    }
+    await vi.advanceTimersByTimeAsync(21 * 60 * 1000)
+    expect(editMessage.mock.calls.map(call => String(call[2])).join('\n')).toContain(
+      "couldn't finish this request (timed out)"
+    )
+    expect(cancelTask).toHaveBeenCalled()
   }, 30_000)
 
   it('treats heartbeats as activity when result polls are failing', async () => {

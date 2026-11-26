@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { format } from 'node:util'
 // ── Import under test ─────────────────────────────────────────────────────────
 
 import { SlackAdapter } from '../../src/channels/slack.js'
@@ -150,7 +151,7 @@ describe('SlackAdapter — connect()', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const adapter = new SlackAdapter()
     await adapter.connect({ slackBotToken: marker })
-    const printed = errorSpy.mock.calls.map(call => call.map(String).join(' ')).join('\n')
+    const printed = errorSpy.mock.calls.map(call => format(...call)).join('\n')
     expect(printed).toContain('slack_webapi_request_error')
     expect(printed).not.toContain(marker)
     expect(printed).not.toMatch(/authorization:\s*bearer/i)

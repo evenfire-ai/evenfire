@@ -253,7 +253,7 @@ export class SlackAdapter implements ChannelAdapter {
 
     this.defaultProviderTarget = credentials?.providerTarget ?? null
     this.botToken = token
-    this.client = new WebClient(token, { rejectRateLimitedCalls: true })
+    this.client = new WebClient(token)
 
     try {
       const response = await this.client.auth.test()

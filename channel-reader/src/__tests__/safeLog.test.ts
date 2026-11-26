@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { LogLevel, WebClient } from '@slack/web-api'
 import net from 'node:net'
+import { format } from 'node:util'
 import { logCaughtError } from '../safeLog'
 
 const MARKER = 'xoxb-probe-marker-not-a-secret'
@@ -37,7 +38,7 @@ describe('logCaughtError', () => {
     const err = await slackTransportError()
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     logCaughtError('error', 'slack_connect_failed', err)
-    const printed = errorSpy.mock.calls.map(call => call.map(String).join(' ')).join('\n')
+    const printed = errorSpy.mock.calls.map(call => format(...call)).join('\n')
     expect(printed).toContain('slack_webapi_request_error')
     expect(printed).not.toContain(MARKER)
     expect(printed).not.toMatch(/authorization:\s*bearer/i)
