@@ -389,6 +389,27 @@ describe('useAuthController: binding changes and the login model', () => {
     }
   )
 
+  // G-8 (Task 14a review M5): the screen after setup may offer only browser sign-in, so the
+  // status names no password.
+  it('reports a completed desktop setup without naming a password (G-8)', async () => {
+    const { bridge } = await createMain()
+    const { hook, setStatus } = await mountController(bridge)
+    act(() => {
+      hook.result.current.setEmail('user-b@example.test')
+      hook.result.current.setDesktopSetupAuthorizationToken('fake-setup-authorization-token')
+    })
+
+    await act(async () => {
+      await hook.result.current.handleCompleteDesktopSetup()
+    })
+
+    expect(bridge.auth.completeDesktopSetup, 'setup reached main').toHaveBeenCalledTimes(1)
+    expect(setStatus, 'the setup status names no sign-in method').toHaveBeenCalledWith(
+      'Desktop setup complete. Sign in to continue.',
+      'success'
+    )
+  })
+
   it('G2-15d re-reads after a failed save and never stays loading', async () => {
     const { harness, bridge } = await createMain()
     const { hook, setStatus } = await mountController(bridge)
