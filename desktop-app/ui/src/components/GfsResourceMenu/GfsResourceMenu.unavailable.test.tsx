@@ -330,4 +330,57 @@ describe('GfsResourceMenu: unavailable actions', () => {
     // The menu stayed open: the refusal is the model's, not a closed menu's.
     expect(screen.getByRole('menu', { name: 'Actions for report.txt' })).toBeTruthy()
   })
+
+  it('keeps the hidden file picker disabled exactly while Replace is greyed out', () => {
+    const replaceInput = () => screen.getByLabelText('Replace report.txt') as HTMLInputElement
+    const fileActions = (canReplace: boolean) =>
+      buildGfsResourceActions({
+        kind: 'file',
+        uri: URI,
+        moveApplicable: false,
+        previewable: false,
+        // The page's handler: no file yet means "open the picker".
+        handlers: {
+          replace: (file?: File, context?: { requestFileSelection?: () => void }) => {
+            if (!file) context?.requestFileSelection?.()
+          },
+        },
+        canReplace,
+      })
+
+    const refused = render(
+      <GfsResourceMenu actions={fileActions(false)} resourceName="report.txt" />
+    )
+    expect(replaceInput().disabled).toBe(true)
+    refused.unmount()
+
+    for (const bits of ['pending', 'error'] as const) {
+      const unsettled = render(
+        <GfsResourceMenu
+          actions={fileActions(true)}
+          permissionStatus={bits}
+          resourceName="report.txt"
+        />
+      )
+      expect(replaceInput().disabled).toBe(true)
+      unsettled.unmount()
+    }
+
+    const legacy = render(<GfsResourceMenu onReplace={vi.fn()} resourceName="report.txt" />)
+    expect(replaceInput().disabled).toBe(false)
+    legacy.unmount()
+
+    // An enabled Replace still reaches an enabled picker: a disabled input
+    // would swallow the programmatic click.
+    const pickedFrom: HTMLInputElement[] = []
+    vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function (
+      this: HTMLInputElement
+    ) {
+      pickedFrom.push(this)
+    })
+    const { menu } = openTriggerMenu(fileActions(true), 'report.txt')
+    fireEvent.click(item(menu, 'Replace file'))
+    expect(pickedFrom).toHaveLength(1)
+    expect(pickedFrom[0]?.disabled).toBe(false)
+  })
 })

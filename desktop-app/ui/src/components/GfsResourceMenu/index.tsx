@@ -673,6 +673,9 @@ export function GfsResourceMenu({
           ref={replaceInputRef}
           // Only the Replace item opens the picker, so the hidden input stays
           // out of the tab order and refuses a file while that item is inert.
+          // It is also disabled then, so assistive tech is not offered a live
+          // upload control on a file that cannot be replaced.
+          disabled={gatedReplace?.disabled}
           tabIndex={-1}
           type="file"
           onChange={event => {
