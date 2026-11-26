@@ -473,10 +473,11 @@ describeRealPostgres('workflow run cancel lifecycle model (S30)', () => {
   })
 
   afterAll(async () => {
-    vi.unstubAllGlobals()
-    vi.useRealTimers()
     try {
+      vi.unstubAllGlobals()
+      vi.useRealTimers()
       await endPoolAndWaitForClients(databasePool)
+      if (!adminPool) return
       await adminPool.query(
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
           WHERE datname = $1 AND pid <> pg_backend_pid()`,
@@ -484,7 +485,7 @@ describeRealPostgres('workflow run cancel lifecycle model (S30)', () => {
       )
       await adminPool.query(`DROP DATABASE IF EXISTS "${database}"`)
     } finally {
-      await adminPool.end()
+      await adminPool?.end()
     }
   })
 
