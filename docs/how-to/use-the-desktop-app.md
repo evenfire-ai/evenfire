@@ -31,8 +31,12 @@ button that opens more in your browser: **See hosted Evenfire** or
 **I have a server — enter its address**, takes you to **Connect to a server**. Use **Back** at the bottom of the card to change an
 earlier answer.
 
-After setup you sign in with your **Email** and **Password**. If you forgot
-your password, **Forgot password** opens the reset page in your browser.
+After setup you sign in with your **Email** and **Password**. Where the
+environment has member sign-in (OIDC) turned on, the sign-in screen also
+offers **Continue with** your sign-in provider: the app opens your browser,
+you finish signing in there, and the browser hands you back to the app.
+**Cancel** stops waiting. If you forgot your password, **Forgot password**
+opens the reset page in your browser.
 Environments are added and switched from the **Environment** selector at the
 bottom of the sign-in screen. See
 [Desktop setup & updates](desktop-setup-and-updates.md) for details.
@@ -283,6 +287,8 @@ Environments aren't managed in Settings. Add and switch them from the
 
 | You see                                                                                                                   | What it means / what to do                                                                                                                                                       |
 | ------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| On sign-in: **Can't reach this environment.**, with **Retry** and no sign-in form                                         | The app couldn't read the selected environment's sign-in options. Choose **Retry**, or pick another environment from the **Environment** selector.                               |
+| On sign-in: **This environment's sign-in isn't set up correctly.**                                                        | The server answered with sign-in options the app can't use. Choose **Retry**. If it keeps happening, ask your admin to check the environment's sign-in setup.                    |
 | On sign-in: **Couldn't reach `<environment>`. A local Evenfire looks like it's running — switch to `<other>` and retry?** | The selected environment isn't responding, but one on this computer is. Choose **Switch to `<other>` & retry**, or pick the right environment from the **Environment** selector. |
 | **Services Unavailable**, with `external-rest-api` or `rpc-proxy` marked unavailable                                      | The app can't reach the server. Choose **Retry Health Check**. If it keeps failing, ask your admin whether the server is up.                                                     |
 | **Desktop update required**                                                                                               | Your server needs a newer version of the app. **Download update** opens the release page. **More info** shows the version you have and the latest one.                           |
