@@ -2,7 +2,7 @@ import React, { useEffect, useId, useRef, useState } from 'react'
 import { Button, IconButton } from '@components/Common'
 import { extractArtifactNames } from '@lib/artifacts'
 import { formatTokenBreakdown, formatTokenCount } from '@lib/format'
-import { formatToolApprovalLabel } from '@lib/toolLabels'
+import { formatToolApprovalLabel, formatToolDisplayName } from '@lib/toolLabels'
 import type { ShellAction } from '../../../src/types'
 import type { ApprovalDecisionSettlement } from '../hooks/domain/approvalDecision'
 import { desktopShellCommandOffered } from '../hooks/domain/trackerToProgress'
@@ -95,17 +95,10 @@ function truncateStatusLabel(value: string): string {
   return `${value.slice(0, maxLength - 3).trimEnd()}...`
 }
 
-function stepDisplayName(step: ProgressStep): string {
-  // The historical runtime namespace is not the public product name.
-  if (step.toolName.startsWith('clerum__') && step.displayName === 'Clerum') {
-    return 'Evenfire'
-  }
-  return step.displayName
-}
-
 function stepSubjectLabel(step: ProgressStep): string {
   const fnName = toolFunctionName(step)
-  return truncateStatusLabel(stepDisplayName(step) || fnName || step.toolName)
+  const displayName = formatToolDisplayName(step)
+  return truncateStatusLabel(displayName || fnName || step.toolName)
 }
 
 function activeProgressLabel(progress: TaskProgress): string {
@@ -128,7 +121,7 @@ function activeProgressLabel(progress: TaskProgress): string {
   if (latestStep?.state === 'error') {
     const errorSummary = compactText(latestStep.errorSummary)
     const label = errorSummary
-      ? `${stepDisplayName(latestStep)}: ${errorSummary}`
+      ? `${formatToolDisplayName(latestStep)}: ${errorSummary}`
       : stepSubjectLabel(latestStep)
     return `Issue in ${truncateStatusLabel(label)}`
   }
@@ -214,7 +207,7 @@ function StepList({ steps }: { steps: TaskProgress['steps'] }) {
                 {stepIcon(step.state)}
               </span>
               <span className="stepper-step-name">
-                {stepDisplayName(step)}
+                {formatToolDisplayName(step)}
                 {fnName && <span className="stepper-step-fn">{fnName}</span>}
               </span>
               {step.state === 'completed' && step.durationMs != null && (
