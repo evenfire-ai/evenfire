@@ -993,6 +993,140 @@ describe('useAuthController: the auth gates and a browser sign-in (D14)', () => 
     }
   )
 
+  // Round-3 review minor 5: FR-C1's test lets `redeeming` commit before it calls the handler, so
+  // a guard that read the rendered phase would pass it. Here the push and the call land in one
+  // synchronous block, before React commits, as in the G2-14b test above.
+  it('G2-14b refuses a password sign-in while redeeming before React commits, and lets it reach main while waiting', async () => {
+    const { harness, bridge, relay } = await createSignInMain()
+    const page = await mountAuthPage(bridge)
+    // Committed before the block: without credentials the handler would stop before main for
+    // another reason.
+    const fillCredentials = () =>
+      act(() => {
+        page.controller().setEmail('member@example.test')
+        page.controller().setPassword('fake-password')
+      })
+    fillCredentials()
+
+    // Main redeems an attempt; its pushes have not reached the renderer yet.
+    relay.muted = true
+    const { attemptId: redeemingId, redeeming, redeem } = await redeemInMain(harness)
+    const bumps = harness.bumpLog.length
+    const rendersBefore = page.probe.renders.length
+    let rendersDuringBlock = -1
+    let login: Promise<void> = Promise.resolve()
+
+    // One synchronous block: the push writes the view's ref and queues its state, which React
+    // commits only when the block ends (V32, A3-55).
+    act(() => {
+      bridge.push(redeeming)
+      login = page.controller().handlePasswordLogin()
+      rendersDuringBlock = page.probe.renders.length
+    })
+    await act(async () => {
+      await login
+    })
+
+    expect(rendersDuringBlock, 'React had not committed during the block').toBe(rendersBefore)
+    expect(
+      bridge.auth.passwordLogin,
+      'the password sign-in does not reach main while redeeming'
+    ).not.toHaveBeenCalled()
+    expect(harness.bumpLog.length, 'the generation did not advance').toBe(bumps)
+    expect(endStatesOf(harness, redeemingId), 'the attempt has not ended').toEqual([])
+    expect(page.controller().browserSignIn.phase, 'the attempt still redeems').toBe('redeeming')
+
+    // The renderer hears main again. The redeem gets no answer; main ends the attempt and the
+    // renderer returns to idle.
+    relay.muted = false
+    redeem.release(new Error('fake network failure'))
+    await waitFor(() => expect(page.controller().browserSignIn.phase).toBe('idle'))
+
+    // Positive control: a waiting attempt does not stop the same call (decision 9), and the
+    // login's bump ends the attempt `replaced` (A3-16).
+    await act(async () => {
+      await page.controller().handleStartBrowserSignIn()
+    })
+    const waitingId = page.controller().browserSignIn.attemptId
+    expect(page.controller().browserSignIn.phase, 'a new attempt waits').toBe('waiting')
+    fillCredentials()
+    await act(async () => {
+      await page.controller().handlePasswordLogin()
+    })
+    expect(
+      bridge.auth.passwordLogin,
+      'the password sign-in reaches main while waiting'
+    ).toHaveBeenCalledTimes(1)
+    expect(endStatesOf(harness, waitingId ?? 0), "the login's bump replaced the attempt").toEqual([
+      'replaced',
+    ])
+  })
+
+  // Round-3 review minor 5: as above, for the five environment changes of the I-1 rows.
+  it.each(ENVIRONMENT_CHANGE_ROWS.map(row => [row.handler, row] as const))(
+    'G2-14b refuses %s while redeeming before React commits, and lets it reach main while waiting',
+    async (_handler, row) => {
+      const { harness, bridge, relay } = await createSignInMain()
+      const page = await mountAuthPage(bridge)
+      const reachesMain = bridge.auth[row.call]
+
+      // Main redeems an attempt; its pushes have not reached the renderer yet. What the screen
+      // holds is committed before the block.
+      relay.muted = true
+      const { attemptId: redeemingId, redeeming, redeem } = await redeemInMain(harness)
+      await row.prepare?.(page, harness)
+      const binding = bindingOf(harness)
+      const bumps = harness.bumpLog.length
+      const reads = bridge.auth.getLoginMethods.mock.calls.length
+      const rendersBefore = page.probe.renders.length
+      let rendersDuringBlock = -1
+      let changed: Promise<unknown> = Promise.resolve()
+
+      // One synchronous block: the push writes the view's ref and queues its state, which React
+      // commits only when the block ends (V32, A3-55).
+      act(() => {
+        bridge.push(redeeming)
+        changed = row.run(page, harness)
+        rendersDuringBlock = page.probe.renders.length
+      })
+      await act(async () => {
+        await changed
+      })
+
+      expect(rendersDuringBlock, 'React had not committed during the block').toBe(rendersBefore)
+      expect(
+        reachesMain,
+        `${row.handler} does not reach main while redeeming`
+      ).not.toHaveBeenCalled()
+      expect(bindingOf(harness), 'the binding is unchanged').toEqual(binding)
+      expect(harness.bumpLog.length, 'the generation did not advance').toBe(bumps)
+      expect(
+        bridge.auth.getLoginMethods.mock.calls.length,
+        'no binding change re-read the model'
+      ).toBe(reads)
+      expect(endStatesOf(harness, redeemingId), 'the attempt has not ended').toEqual([])
+      expect(page.controller().browserSignIn.phase, 'the attempt still redeems').toBe('redeeming')
+      row.afterRefusal?.(page)
+
+      // The renderer hears main again. The redeem gets no answer; main ends the attempt and the
+      // renderer returns to idle.
+      relay.muted = false
+      redeem.release(new Error('fake network failure'))
+      await waitFor(() => expect(page.controller().browserSignIn.phase).toBe('idle'))
+
+      // Positive control: a waiting attempt does not stop the same call (D14, decision 9).
+      await act(async () => {
+        await page.controller().handleStartBrowserSignIn()
+      })
+      expect(page.controller().browserSignIn.phase, 'a new attempt waits').toBe('waiting')
+      await row.prepare?.(page, harness)
+      await act(async () => {
+        await row.run(page, harness)
+      })
+      expect(reachesMain, `${row.handler} reaches main while waiting`).toHaveBeenCalledTimes(1)
+    }
+  )
+
   it('G2-14e disables the dock while a start call is held', async () => {
     const { bridge } = await createSignInMain()
     const page = await mountAuthPage(bridge)
