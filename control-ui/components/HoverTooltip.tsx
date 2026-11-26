@@ -1,14 +1,26 @@
 'use client'
 
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
-// Portal-based hover tooltip. The table viewport scrolls (overflow: auto),
-// which clips absolutely-positioned ::after tooltips at its edges; rendering
-// into document.body escapes that clipping, and fixed coordinates from the
-// trigger's bounding rect need no scroll math. Shows immediately on hover —
-// no reveal delay — and closes on scroll (capture catches inner scrollers)
-// so it never sits stale over moved content.
+const GAP_PX = 6
+const EDGE_MARGIN_PX = 8
+// Grace period for moving the pointer across the gap between the trigger and
+// the card without dismissing it (WCAG 2.2 SC 1.4.13 "hoverable").
+const HOVER_GRACE_MS = 80
+
+// Portal-based hover tooltip for the agent lifecycle type.
+//
+// - Renders into document.body with fixed coordinates, so scrollable table
+//   containers cannot clip it. The card is placed from its measured size,
+//   flipped above the trigger when there is no room below, and clamped to
+//   the window on both axes — all before paint.
+// - Interaction model per WCAG 2.2 SC 1.4.13 (Content on Hover or Focus):
+//   shows on pointer hover or keyboard focus, stays while the pointer moves
+//   onto the card, stays while the trigger keeps focus even after the pointer
+//   leaves, and Escape dismisses it until hover or focus returns.
+// - Scroll closes a pointer-open tooltip (the hover intent is stale after the
+//   content moved) and re-places one held open by keyboard focus.
 export function HoverTooltip({
   label,
   tooltip,
@@ -18,31 +30,60 @@ export function HoverTooltip({
   tooltip: string
   className?: string
 }) {
-  const [open, setOpen] = useState(false)
+  const [hovered, setHovered] = useState(false)
+  const [focused, setFocused] = useState(false)
+  const [dismissedByEscape, setDismissedByEscape] = useState(false)
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+  const [reflowTick, setReflowTick] = useState(0)
   const triggerRef = useRef<HTMLSpanElement>(null)
-  const tooltipId = React.useId()
+  const cardRef = useRef<HTMLDivElement>(null)
+  const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const tooltipId = useId()
+  const open = (hovered || focused) && !dismissedByEscape
 
+  const openHover = () => {
+    if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
+    setHovered(true)
+    setDismissedByEscape(false)
+  }
+  const closeHoverSoon = () => {
+    if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
+    hideTimerRef.current = setTimeout(() => setHovered(false), HOVER_GRACE_MS)
+  }
+
+  // Place the card before paint: measure it at its hidden provisional spot,
+  // flip above the trigger when the space below is too tight, clamp both axes.
   useLayoutEffect(() => {
     if (!open || !triggerRef.current) return
     const rect = triggerRef.current.getBoundingClientRect()
-    // Center under the trigger, clamped so the card stays inside the window.
-    const halfCard = 150
+    // jsdom reports 0 for offsetWidth/Height; `||` falls back to the same
+    // estimates a not-yet-laid-out card needs in a real browser.
+    const cardWidth = cardRef.current?.offsetWidth || 288
+    const cardHeight = cardRef.current?.offsetHeight || 40
+    const halfWidth = Math.min(cardWidth / 2, window.innerWidth / 2 - EDGE_MARGIN_PX)
     const left = Math.min(
-      Math.max(rect.left + rect.width / 2, halfCard + 8),
-      window.innerWidth - halfCard - 8
+      Math.max(rect.left + rect.width / 2, halfWidth + EDGE_MARGIN_PX),
+      window.innerWidth - halfWidth - EDGE_MARGIN_PX
     )
-    setPos({ top: rect.bottom + 6, left })
-  }, [open])
+    const spaceBelow = window.innerHeight - rect.bottom - GAP_PX
+    const flipAbove = spaceBelow < cardHeight + EDGE_MARGIN_PX && rect.top >= cardHeight + GAP_PX
+    const top = flipAbove ? rect.top - GAP_PX - cardHeight : rect.bottom + GAP_PX
+    setPos({ top, left })
+  }, [open, reflowTick])
 
   useEffect(() => {
     if (!open) return
-    const close = () => setOpen(false)
-    window.addEventListener('scroll', close, true)
-    window.addEventListener('resize', close)
+    const onScroll = () => {
+      setHovered(false)
+      setReflowTick(tick => tick + 1)
+    }
+    const onResize = () => setReflowTick(tick => tick + 1)
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', onResize)
     return () => {
-      window.removeEventListener('scroll', close, true)
-      window.removeEventListener('resize', close)
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', onResize)
+      if (hideTimerRef.current) clearTimeout(hideTimerRef.current)
     }
   }, [open])
 
@@ -53,20 +94,35 @@ export function HoverTooltip({
         className={className}
         tabIndex={0}
         aria-describedby={open ? tooltipId : undefined}
-        onMouseEnter={() => setOpen(true)}
-        onMouseLeave={() => setOpen(false)}
-        onFocus={() => setOpen(true)}
-        onBlur={() => setOpen(false)}
+        onMouseEnter={openHover}
+        onMouseLeave={closeHoverSoon}
+        onFocus={() => {
+          setFocused(true)
+          setDismissedByEscape(false)
+        }}
+        onBlur={() => setFocused(false)}
+        onKeyDown={event => {
+          if (event.key === 'Escape' && open) setDismissedByEscape(true)
+        }}
       >
         {label}
       </span>
-      {open && pos
+      {open
         ? createPortal(
             <div
+              ref={cardRef}
               role="tooltip"
               id={tooltipId}
               className="cu-hover-tooltip-card"
-              style={{ top: pos.top, left: pos.left }}
+              style={
+                pos
+                  ? { top: pos.top, left: pos.left }
+                  : // Hidden on the first open render: the placement effect
+                    // measures this node and positions it before paint.
+                    { top: -10000, left: -10000, visibility: 'hidden' }
+              }
+              onMouseEnter={openHover}
+              onMouseLeave={closeHoverSoon}
             >
               {tooltip}
             </div>,

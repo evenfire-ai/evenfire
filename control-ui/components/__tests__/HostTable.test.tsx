@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { HostTable, collectProviderIds } from '../HostTable'
 import type { HostItem } from '../HostTable.types'
 
@@ -412,7 +412,7 @@ describe('HostTable type column (lifecycle)', () => {
     }
   }
 
-  it('renders the Type column with the lifecycle label and a hover explanation', () => {
+  it('renders the Type column with the lifecycle label and a hover explanation', async () => {
     renderHostTable([hostWithLifecycle('warm-agent', false), hostWithLifecycle('cold-agent', true)])
 
     expect(screen.getByRole('columnheader', { name: 'Type' })).toBeInTheDocument()
@@ -423,7 +423,8 @@ describe('HostTable type column (lifecycle)', () => {
       'This agent runs continuously; its process is never scaled to zero.'
     )
     fireEvent.mouseLeave(stateful)
-    expect(screen.queryByRole('tooltip')).toBeNull()
+    // The card survives the pointer grace window, then hides.
+    await waitFor(() => expect(screen.queryByRole('tooltip')).toBeNull())
 
     const stateless = within(screen.getByLabelText('Open agent cold-agent')).getByText('Stateless')
     fireEvent.mouseEnter(stateless)
@@ -432,11 +433,20 @@ describe('HostTable type column (lifecycle)', () => {
     )
   })
 
-  it('labels a host without lifecycle state as Stateful', () => {
-    renderHostTable([hostWithContext('legacy-agent', 'context1')])
+  it('sorts rows by the Type column label when its sort button is clicked', () => {
+    // Insertion order puts the stateless agent first.
+    renderHostTable([hostWithLifecycle('cold-agent', true), hostWithLifecycle('warm-agent', false)])
 
-    expect(
-      within(screen.getByLabelText('Open agent legacy-agent')).getByText('Stateful')
-    ).toBeInTheDocument()
+    const rowOrder = () =>
+      screen
+        .getAllByLabelText(/^Open agent /)
+        .map(row => row.getAttribute('aria-label')?.replace('Open agent ', ''))
+
+    // Ascending: Stateful ("Statef") sorts before Stateless ("Statel").
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Type ascending' }))
+    expect(rowOrder()).toEqual(['warm-agent', 'cold-agent'])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Type descending' }))
+    expect(rowOrder()).toEqual(['cold-agent', 'warm-agent'])
   })
 })

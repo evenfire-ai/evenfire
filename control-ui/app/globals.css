@@ -10044,7 +10044,9 @@ td.cu-registry-description {
   line-height: 1.45;
   text-align: left;
   white-space: normal;
-  pointer-events: none;
+  /* Hoverable per WCAG 2.2 SC 1.4.13: the pointer may move onto the card
+   * (HoverTooltip keeps it open there); that also makes its text selectable. */
+  pointer-events: auto;
   background: var(--cu-surface);
   border: 1px solid var(--cu-border);
   border-radius: var(--cu-radius-sm);
