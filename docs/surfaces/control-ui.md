@@ -68,6 +68,9 @@ five steps live together.
    "Default (varies)" because their default depends on context). See
    [Configure approvals](../how-to/configure-approvals.md).
 
+   ![Control UI Approvals tab of an agent: Set to Manual now, the approval modes, who can raise the mode from a channel, and per-tool overrides with http_request set to Skip and shell_exec Required](../assets/control-ui-approvals-tab.webp)
+   _Local cluster, demo agent._
+
 4. **Constrain it** — `EgressEditor` (`components/EgressEditor.tsx`, model in
    `lib/egressModel.ts`): closed-by-default, exact-host, exact-CIDR/IP (where
    enabled — connector creation, connector edit, and registry install expose
