@@ -350,6 +350,8 @@ describe('V1 Host resolve: thrown and unavailable control-api answers', () => {
     return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } })
   }
 
+  // A network failure, a timeout and a body-read timeout are transport; a
+  // non-JSON 200 is hardening, control-api's host-access route never writes it.
   const THROWN_CASES = [
     {
       label: 'a network failure',
@@ -456,6 +458,8 @@ describe('V1 Host resolve: thrown and unavailable control-api answers', () => {
     }
   )
 
+  // A 503 comes only from an intermediary: control-api does not write it on the
+  // host-access route.
   it('resolveHostConnectionForUser logs one line for a returned http_status 503', async () => {
     const fetchMock = vi
       .spyOn(globalThis, 'fetch')
@@ -471,6 +475,7 @@ describe('V1 Host resolve: thrown and unavailable control-api answers', () => {
     expectNoSecret(lines[0]!, 'status-detail')
   })
 
+  // A 503 comes only from an intermediary, as above.
   it('refreshV1HostConnection logs one line for a returned http_status 503', async () => {
     const fetchMock = vi
       .spyOn(globalThis, 'fetch')

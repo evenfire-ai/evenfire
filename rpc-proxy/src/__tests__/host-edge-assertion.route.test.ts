@@ -771,6 +771,7 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
     expect(hostAccessCalls()).toHaveLength(1)
   })
 
+  // Hardening: control-api's `utils/auth/hostEdgeAssertion.ts` always signs `exp`.
   it('approve: a held assertion with no readable exp answers 502 and makes no second control-api call', async () => {
     const row = SINGLE_ATTEMPT_ROW
     authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope, 'host:wake:write']))
@@ -821,6 +822,8 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
   // Run on REFRESH_ROWS: the other denials the shared re-resolve code maps.
   const SHARED_DENIAL_CASES: DenialCase[] = [
     { label: 'control-api 404', answer: () => jsonResponse(404, { error: 'not found' }) },
+    // Hardening: the authorizer returns the request's own userId
+    // (`rpcHostAccessAuthorizer.ts:43-44,80`).
     {
       label: 'a userId mismatch',
       answer: () =>
@@ -862,6 +865,8 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
     )
   })
 
+  // Hardening within one deployment: the url comes from the hostRef and config
+  // (`rpcHostAccessAuthorizer.ts:82`).
   it.each(REFRESH_ROWS)('$label: a re-resolve that moves the Host URL answers 502', async row => {
     authTokenMock.verifyRpcToken.mockReturnValue(claimsWithScopes([row.scope, 'host:wake:write']))
     controlApiHostAccessAnswer = firstResolveThen(() =>
@@ -902,6 +907,7 @@ describe('a V1 wake-and-hold retry re-resolves the Host connection near the asse
       status: 504,
       body: { error: 'Gateway Timeout' },
     },
+    // Only from an intermediary: control-api does not write 503 on this route.
     {
       label: 'a control-api 503',
       answer: () => jsonResponse(503, { error: 'unavailable' }),
@@ -1275,7 +1281,29 @@ function withoutKey(key: string): Record<string, unknown> {
   return connection
 }
 
+// Which of these answers control-api's host-access route can send, at R
+// (paths under `control-api/src/`):
+// - Written by the route or its gates: 401 (`middleware/rpcAccessAuth.ts:24,30,
+//   47,53`, `routes/rpc-access/users.ts:98`, `middleware/internalServiceAuth.ts:
+//   38-61`); both 403 stubs (`users.ts:64-75`; without a reason also
+//   `rpcAccessAuth.ts:34,57`); 409 and 400 on POST only (`users.ts:312`, `:272`);
+//   200 without an edge assertion, only from a control-api older than it.
+// - Not written by the route, but reachable through the error handler, an
+//   intermediary or the transport: 500 (`next(error)` at `users.ts:252,329`);
+//   404 (the `app.ts:304` fallthrough under version skew, or a Kubernetes 404
+//   that `http/errorHandler.ts:46-67,217-248` forwards); a 403 without a reason
+//   also as a forwarded Kubernetes RBAC 403; 429 as a forwarded Kubernetes 429;
+//   503 only from an intermediary, never from control-api on this path; timeout
+//   and network failure. See `app.ts:100-146`, `:174-289` and
+//   `errorHandler.ts:157-300`.
+// - Hardening, the route never writes it: GET 409, GET 400, 200 text/html,
+//   200 JSON null, 200 JSON [], 204, an invalid bindingStatus (`users.ts:306,325`
+//   write only `recorded` and `unavailable`), and 200 for another user, without
+//   a url or for another hostRef (`services/access/rpcHostAccessAuthorizer.ts:
+//   44-46,77-84` returns the request's own userId and hostRef and always builds
+//   the url).
 const FAILURE_STUBS: FailureStub[] = [
+  // 401: route or gates. 409: route-written on POST only; GET 409 is hardening.
   ...[401, 409].map(
     (status): FailureStub => ({
       failure: String(status),
@@ -1293,6 +1321,7 @@ const FAILURE_STUBS: FailureStub[] = [
     })
   ),
   {
+    // Route-written (`users.ts:64-75`).
     failure: '403 with the reason team_membership_missing',
     answer: () =>
       new Response(JSON.stringify({ error: 'Forbidden' }), {
@@ -1306,17 +1335,21 @@ const FAILURE_STUBS: FailureStub[] = [
     POST: { kind: 'denied', code: 'host_access_revoked' },
   },
   {
+    // Route-written (`rpcAccessAuth.ts:34,57`), or a forwarded Kubernetes RBAC 403.
     failure: '403 without a reason',
     answer: () => jsonResponse(403, { error: 'Forbidden' }),
     GET: DENIED,
     POST: DENIED,
   },
   {
+    // Not route-written: the `app.ts:304` fallthrough under skew, or a forwarded Kubernetes 404.
     failure: '404',
     answer: () => jsonResponse(404, { error: 'not found' }),
     GET: DENIED,
     POST: UNAVAILABLE,
   },
+  // 400: route-written on POST only; GET 400 is hardening. 429 and 500: through
+  // the error handler. 503: an intermediary only.
   ...[400, 429, 500, 503].map(
     (status): FailureStub => ({
       failure: String(status),
@@ -1326,6 +1359,7 @@ const FAILURE_STUBS: FailureStub[] = [
     })
   ),
   {
+    // Transport.
     failure: 'timeout',
     answer: () => {
       throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
@@ -1334,6 +1368,7 @@ const FAILURE_STUBS: FailureStub[] = [
     POST: { kind: 'refusal', status: 504, body: { error: 'Gateway Timeout' } },
   },
   {
+    // Transport.
     failure: 'network failure',
     answer: () => {
       throw new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } })
@@ -1342,12 +1377,14 @@ const FAILURE_STUBS: FailureStub[] = [
     POST: UNAVAILABLE,
   },
   {
+    // Only a control-api older than the edge assertion.
     failure: '200 without an edge assertion',
     answer: method => connectionAnswer(method, { edgeAssertion: undefined }),
     GET: UNAVAILABLE,
     POST: UNAVAILABLE,
   },
   {
+    // Hardening: the route never writes it.
     failure: '200 text/html',
     answer: () =>
       new Response('<html>control-api-detail</html>', {
@@ -1358,18 +1395,21 @@ const FAILURE_STUBS: FailureStub[] = [
     POST: UNAVAILABLE,
   },
   {
+    // Hardening: the route never writes it.
     failure: '200 JSON null',
     answer: () => jsonResponse(200, null),
     GET: UNAVAILABLE,
     POST: UNAVAILABLE,
   },
   {
+    // Hardening: the authorizer returns the request's own userId.
     failure: '200 for another user',
     answer: method => connectionAnswer(method, { userId: 'another-user' }),
     GET: DENIED,
     POST: DENIED,
   },
   {
+    // Hardening: the authorizer always builds the url.
     failure: '200 without a url',
     answer: method =>
       jsonResponse(200, {
@@ -1380,24 +1420,28 @@ const FAILURE_STUBS: FailureStub[] = [
     POST: DENIED,
   },
   {
+    // Hardening: the authorizer returns the request's own hostRef.
     failure: '200 for another hostRef',
     answer: method => connectionAnswer(method, { hostRef: 'another-host' }),
     GET: DENIED,
     POST: DENIED,
   },
   {
+    // Hardening: the route never writes it.
     failure: '200 JSON []',
     answer: () => jsonResponse(200, []),
     GET: DENIED,
     POST: DENIED,
   },
   {
+    // Hardening: the route never writes it.
     failure: '204 without a body',
     answer: () => new Response(null, { status: 204 }),
     GET: UNAVAILABLE,
     POST: UNAVAILABLE,
   },
   {
+    // Hardening: the route writes only `recorded` and `unavailable`.
     failure: '200 with an invalid bindingStatus',
     answer: () =>
       jsonResponse(200, { ...OLD_SHAPE_CONNECTION, edgeAssertion, bindingStatus: 'not-a-status' }),

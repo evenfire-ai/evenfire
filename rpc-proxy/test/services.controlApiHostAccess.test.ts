@@ -133,6 +133,7 @@ describe('control-api canonical host access client', () => {
     ['host_disabled', 'host_access_denied'],
     ['host_missing', 'host_access_denied'],
     ['host_claim_missing', 'host_access_denied'],
+    // Only a newer control-api (version skew).
     ['unheard_of_reason', 'host_access_denied'],
   ])('a non-direct-run 403 with reason %s resolves to the denial %s', async (reason, code) => {
     const fetchImpl = jsonResponse(403, FORBIDDEN_BODY, { [REASON_HEADER]: reason })
@@ -156,6 +157,7 @@ describe('control-api canonical host access client', () => {
     expect(fetchImpl).toHaveBeenCalledOnce()
   })
 
+  // Only a newer control-api (version skew).
   it('a non-direct-run 403 with an unknown header value resolves to host_access_denied', async () => {
     const fetchImpl = jsonResponse(403, FORBIDDEN_BODY, { [REASON_HEADER]: 'a_reason_added_later' })
 
@@ -167,6 +169,7 @@ describe('control-api canonical host access client', () => {
     expect(fetchImpl).toHaveBeenCalledOnce()
   })
 
+  // Hardening: control-api's `users.ts:74` always writes a JSON body.
   it('a non-direct-run 403 with a non-JSON body still honours the header', async () => {
     // A revoking reason: a denied-anyway reason would pass even if the header
     // were ignored.
@@ -185,6 +188,8 @@ describe('control-api canonical host access client', () => {
     ).resolves.toEqual({ denied: true, code: 'host_access_revoked' })
   })
 
+  // Hardening: no control-api version sent the reason in the body; the 403 body
+  // was always {"error":"Forbidden"}.
   it('a reason present only in the body (legacy shape) is ignored', async () => {
     // Proves the body is never read: the same reason maps to host_access_revoked
     // when it arrives as the header (see the table above) but not from the body.
@@ -198,6 +203,8 @@ describe('control-api canonical host access client', () => {
     expect(fetchImpl).toHaveBeenCalledOnce()
   })
 
+  // Not route-written: the `app.ts:304` fallthrough under version skew, or a
+  // Kubernetes 404 that control-api's error handler forwards.
   it('a non-direct-run 404 resolves to host_access_denied on the parent path', async () => {
     const fetchImpl = jsonResponse(404, { error: 'not found' })
 
@@ -212,6 +219,8 @@ describe('control-api canonical host access client', () => {
     expect(init).toMatchObject({ method: 'GET' })
   })
 
+  // Not route-written: the `app.ts:304` fallthrough under version skew, or a
+  // Kubernetes 404 that control-api's error handler forwards.
   it('a direct-run-bound 404 is an unavailable authority and posts the binding to the parent path', async () => {
     const fetchImpl = vi.fn(
       async (_url: string | URL | Request, _init?: RequestInit) =>
@@ -233,6 +242,10 @@ describe('control-api canonical host access client', () => {
 
   // A status that is not an answer about access: the authority is unavailable,
   // on both methods, and the status is kept for the log line.
+  // GET 400: hardening, the route never writes it. POST 400: route-written
+  // (`users.ts:272`). 429 and 500: through control-api's error handler (a
+  // forwarded Kubernetes 429; `next(error)` at `users.ts:252,329`). 503: an
+  // intermediary only.
   it.each([
     [400, 'GET'],
     [429, 'GET'],
@@ -254,6 +267,7 @@ describe('control-api canonical host access client', () => {
     expectOneCall(fetchImpl, method)
   })
 
+  // 401: route or gates. GET 409: hardening, the route never writes it.
   it.each([401, 409] as const)('a %s on GET is a rejection', async status => {
     const fetchImpl = jsonResponse(status, { error: 'x' })
 
@@ -265,6 +279,9 @@ describe('control-api canonical host access client', () => {
     expectOneCall(fetchImpl, 'GET')
   })
 
+  // Hardening, every row: the authorizer returns the request's own userId and
+  // hostRef and always builds the url (`rpcHostAccessAuthorizer.ts:43-44,77-84`),
+  // and the route never writes a JSON array.
   it.each([
     ['userId mismatch', { userId: 'someone-else', hostRef: 'host-a', url: 'http://h:8080' }],
     ['hostRef mismatch', { userId: 'user-1', hostRef: 'host-b', url: 'http://h:8080' }],
@@ -298,6 +315,8 @@ describe('control-api canonical host access client', () => {
     expectOneCall(fetchImpl, 'POST')
   })
 
+  // Hardening: control-api sets the reason header only in `denyHostAccess`
+  // (`users.ts:73`).
   it.each([401, 409] as const)('a %s carries no denial code', async status => {
     const fetchImpl = jsonResponse(
       status,
@@ -317,6 +336,8 @@ describe('control-api canonical host access client', () => {
   // A control-api older than rpc-proxy authorizes the Host without issuing an
   // edge assertion. That answer cannot authorize a Host request: the routes
   // answer it as 503 `authority_unavailable`.
+  // 'missing': only a control-api older than the edge assertion. 'empty',
+  // 'a number' and 'null': hardening, the route always writes a signed assertion.
   it.each([
     ['missing', {}],
     ['empty', { edgeAssertion: '' }],
@@ -340,6 +361,8 @@ describe('control-api canonical host access client', () => {
 
   // The binding status is read only on POST: on GET an invalid value is ignored
   // and the connection is returned.
+  // Hardening: the route writes only `recorded` and `unavailable`
+  // (`users.ts:306,325`).
   it.each([
     ['POST', { unavailable: true, cause: 'invalid_binding_status' }],
     [
@@ -371,6 +394,7 @@ describe('control-api canonical host access client', () => {
 
   // The client holds no catch: what fetch or response.json() throws reaches the
   // one caller (resolveV1HostConnection), which classifies it.
+  // Transport.
   it('a fetch rejection propagates', async () => {
     const failure = new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } })
     const fetchImpl = vi.fn(async () => {
@@ -385,6 +409,7 @@ describe('control-api canonical host access client', () => {
     expectOneCall(fetchImpl, 'GET')
   })
 
+  // Hardening: the route never writes either answer.
   it.each([
     ['a non-JSON 200', () => new Response('<html></html>', { status: 200 })],
     ['a 204 without a body', () => new Response(null, { status: 204 })],
@@ -399,6 +424,7 @@ describe('control-api canonical host access client', () => {
     expectOneCall(fetchImpl, 'GET')
   })
 
+  // Hardening: the route never writes it.
   it('a JSON null 200 propagates', async () => {
     const fetchImpl = jsonResponse(200, null)
 
