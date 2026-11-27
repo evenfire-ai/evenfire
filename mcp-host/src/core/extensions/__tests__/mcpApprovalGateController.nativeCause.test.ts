@@ -81,6 +81,28 @@ describe('nativeApprovalCause', () => {
     expect(compared).toBe((names.length - 1) * 3)
   })
 
+  it('an approval config whose tools is null or another falsy value behaves as no overrides', () => {
+    const registry = new NativeToolRegistry(config, 'test-conv')
+    for (const tools of [null, false, 0, ''] as unknown as Array<Record<string, boolean>>) {
+      for (const [name, params, expected] of [
+        ['shell_exec', { command: 'ls' }, 'ordinary'],
+        ['json_transform', { file: 'a.json', operation: 'parse' }, 'none'],
+        ['file_read', { path: 'a.txt' }, 'none'],
+      ] as const) {
+        expect(nativeApprovalCause(registry.get(name), name, params, tools), name).toBe(expected)
+        const gate = new UnifiedApprovalGateController(
+          registry,
+          { tools } as unknown as ApprovalConfig,
+          registry
+        )
+        const result = gate.beforeTool(name, params)
+        expect(
+          result === 'proceed' ? 'none' : (result as unknown as { cause: Outcome }).cause
+        ).toBe(expected)
+      }
+    }
+  })
+
   it('keeps the old rule for an unknown tool name and for an override on another tool', () => {
     expect(nativeApprovalCause(null, 'typo_tool', {}, { typo_tool: true })).toBe('admin_forced')
     expect(nativeApprovalCause(null, 'typo_tool', {}, { typo_tool: false })).toBe('none')

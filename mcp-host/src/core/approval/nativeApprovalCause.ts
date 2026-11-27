@@ -17,7 +17,9 @@ export function nativeApprovalCause(
   params: Record<string, unknown>,
   tools: Readonly<Record<string, boolean>> | undefined
 ): NativeApprovalCause {
-  const has = (name: string): boolean => tools !== undefined && Object.hasOwn(tools, name)
+  // Truthiness, as the gate checked before: the approval config is parsed
+  // without a shape check, so `tools` may be null at run time.
+  const has = (name: string): boolean => Boolean(tools) && Object.hasOwn(tools!, name)
   const own = has(toolName) ? tools![toolName] : undefined
   if (own === true) return 'admin_forced'
   const also = tool?.approvalAlso?.(params) ?? []
