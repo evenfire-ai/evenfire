@@ -83,6 +83,23 @@ function unavailable(
   return new MemberRegistrationUnavailableError(message)
 }
 
+/**
+ * The caller's own signal ended the request, so the hub did not fail: the
+ * caller reports its deadline itself. Logged at debug, not as a hub failure,
+ * so a slow but healthy hub does not read as an outage. The client's own
+ * SEND_TIMEOUT_MS bound is not the caller's signal and stays an error.
+ */
+function stoppedByCaller(
+  context: { baseUrl: string; method: string; path: string; upstreamStatus?: number },
+  message: string
+): MemberRegistrationUnavailableError {
+  rootLogger.debug(
+    { event: 'member_registration_request_stopped_by_caller', ...context },
+    "member-registration request stopped by the caller's signal"
+  )
+  return new MemberRegistrationUnavailableError(message)
+}
+
 export async function memberRegistrationServiceRequest<T>(
   method: RequestMethod,
   path: string,
@@ -114,6 +131,9 @@ export async function memberRegistrationServiceRequest<T>(
       signal: options.signal ? AbortSignal.any([timeout, options.signal]) : timeout,
     })
   } catch (cause) {
+    if (options.signal?.aborted) {
+      throw stoppedByCaller(context, 'member-registration service is unreachable')
+    }
     throw unavailable(context, 'member-registration service is unreachable', cause)
   }
 
@@ -142,6 +162,13 @@ export async function memberRegistrationServiceRequest<T>(
   try {
     raw = await response.text()
   } catch (cause) {
+    // The caller's signal also aborts a body still arriving.
+    if (options.signal?.aborted) {
+      throw stoppedByCaller(
+        { ...context, upstreamStatus: response.status },
+        'member-registration service response could not be read'
+      )
+    }
     throw unavailable(
       { ...context, upstreamStatus: response.status },
       'member-registration service response could not be read',

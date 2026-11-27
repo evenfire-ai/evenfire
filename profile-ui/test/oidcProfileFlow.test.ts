@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import test from 'node:test'
 import {
   type OidcProfileConfiguration,
@@ -856,7 +857,15 @@ const edgeState =
   new URL(
     (edgeRecord(EDGE_ATTEMPT).body as { authorizationUrl: string }).authorizationUrl
   ).searchParams.get('state') ?? ''
-const RETURN_COOKIE = /^(__Host-ef_oidc_return_[a-f0-9]{24})=([^;]*); (.*)$/
+/**
+ * The return cookie is named from this attempt's state (the first 24 hex digits of its SHA-256),
+ * so two attempts in one browser never share one. Computed here, not with the route's own helper.
+ */
+const RETURN_COOKIE_NAME = `__Host-ef_oidc_return_${createHash('sha256')
+  .update(edgeState)
+  .digest('hex')
+  .slice(0, 24)}`
+const RETURN_COOKIE = new RegExp(`^(${RETURN_COOKIE_NAME})=([^;]*); (.*)$`)
 const signedInMarker = '__Host-ef_oidc_signed_in=1; Path=/; Max-Age=60; Secure; SameSite=Lax'
 
 function cookieParts(setCookie: string): { name: string; value: string; attributes: string } {
@@ -946,6 +955,7 @@ test('keeps only closed-set returnTo values', async () => {
   const returnTo = cookieParts(acceptedCookies[1] ?? '')
   assert.equal(binding.name, browserCookieName(edgeState))
   assert.match(acceptedCookies[1] ?? '', RETURN_COOKIE)
+  assert.equal(returnTo.name, RETURN_COOKIE_NAME)
   assert.equal(returnTo.value, 'desktop-setup')
   assert.match(returnTo.attributes, /^Path=\/; Max-Age=\d+; Secure; HttpOnly; SameSite=Lax$/)
   // Same Max-Age as the binding: both expire with the attempt.

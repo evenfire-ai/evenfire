@@ -167,6 +167,9 @@ const CLAIM_NAME_REFUSED =
   'Invalid OIDC provider configuration field(s): CONTROL_API_OIDC_REQUIRED_CLAIM_NAME'
 const CLAIM_VALUE_REFUSED =
   'Invalid OIDC provider configuration field(s): CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE'
+const ACCOUNT_CREATION_REFUSED =
+  'Invalid OIDC provider configuration field(s): CONTROL_API_OIDC_ACCOUNT_CREATION'
+const NEW_MEMBER_TEAM = '11111111-2222-4333-8444-666666666666'
 
 function requiredClaim(value: string, name?: string): Record<string, string> {
   return {
@@ -260,22 +263,116 @@ describe('OIDC member sign-in configuration', () => {
     ).toBeUndefined()
   })
 
-  it('accepts ACCOUNT_CREATION=enabled alone for a non-Entra issuer', () => {
+  it.each([
+    'https://issuer.example.test/tenant/v2.0',
+    'https://appleid.apple.com',
+    'https://gitlab.com',
+    'https://securetoken.google.com/fixture-project',
+    `https://fixture.ciamlogin.com/${TENANT}/v2.0`,
+    `https://fixture.b2clogin.com/${TENANT}/v2.0/`,
+    'https://login.salesforce.com',
+  ])('refuses ACCOUNT_CREATION=enabled without a required claim value on %s', issuer => {
+    const generic = { ...OIDC_ENV, CONTROL_API_OIDC_ISSUER: issuer }
+    for (const extra of [{}, { ...GUARD, ...SWITCH }]) {
+      expect(
+        refusal({
+          ...generic,
+          ...extra,
+          CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
+          CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: NEW_MEMBER_TEAM,
+        })
+      ).toBe(ACCOUNT_CREATION_REFUSED)
+    }
+    // Positive control: the same issuer loads once a required claim value is set.
     const provider = loadOidcProviderConfiguration(
       {
-        ...OIDC_ENV,
+        ...generic,
         ...GUARD,
         ...SWITCH,
+        ...requiredClaim(CLAIM_VALUE, 'groups'),
         CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
-        CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: '11111111-2222-4333-8444-666666666666',
+        CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: NEW_MEMBER_TEAM,
       },
       GENERATION_KEY
     )!
     expect(provider.memberSignIn).toEqual({
       entraTenantId: null,
+      requiredClaim: { name: 'groups', value: CLAIM_VALUE },
+      allowGuests: false,
+      newMemberTeamId: NEW_MEMBER_TEAM,
+      accountCreation: 'enabled',
+    })
+  })
+
+  it('loads ACCOUNT_CREATION=any_issuer_account without a required claim on a non-Entra issuer', () => {
+    const environment = {
+      ...OIDC_ENV,
+      CONTROL_API_OIDC_ACCOUNT_CREATION: 'any_issuer_account',
+      CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: NEW_MEMBER_TEAM,
+    }
+    const expected = {
+      entraTenantId: null,
       requiredClaim: null,
       allowGuests: false,
-      newMemberTeamId: '11111111-2222-4333-8444-666666666666',
+      newMemberTeamId: NEW_MEMBER_TEAM,
+      accountCreation: 'enabled',
+    }
+    expect(loadOidcProviderConfiguration(environment, GENERATION_KEY)!.memberEligibility).toEqual(
+      expected
+    )
+    expect(
+      loadOidcProviderConfiguration({ ...environment, ...GUARD, ...SWITCH }, GENERATION_KEY)!
+        .memberSignIn
+    ).toEqual(expected)
+  })
+
+  it('refuses ACCOUNT_CREATION=any_issuer_account beside a required claim value, on Google and on Entra', () => {
+    const anyIssuerAccount = { CONTROL_API_OIDC_ACCOUNT_CREATION: 'any_issuer_account' }
+    for (const claim of [requiredClaim(CLAIM_VALUE), requiredClaim(CLAIM_VALUE, 'groups')]) {
+      const message = refusal({ ...OIDC_ENV, ...GUARD, ...SWITCH, ...anyIssuerAccount, ...claim })
+      expect(message).toBe(ACCOUNT_CREATION_REFUSED)
+      expect(message).not.toContain(CLAIM_VALUE)
+    }
+    const google = { ...OIDC_ENV, CONTROL_API_OIDC_ISSUER: 'https://accounts.google.com' }
+    expect(
+      refusal({ ...google, ...anyIssuerAccount, ...requiredClaim('fixture.example.test', 'hd') })
+    ).toBe(ACCOUNT_CREATION_REFUSED)
+    expect(refusal({ ...google, ...anyIssuerAccount })).toContain(
+      'CONTROL_API_OIDC_REQUIRED_CLAIM_NAME'
+    )
+    for (const claim of [{}, requiredClaim(CLAIM_VALUE)]) {
+      expect(refusal({ ...ENTRA_ENV, ...anyIssuerAccount, ...claim })).toBe(
+        ACCOUNT_CREATION_REFUSED
+      )
+    }
+  })
+
+  it('loads ACCOUNT_CREATION=enabled with a required claim value, on Google with hd too', () => {
+    const creating = { ...GUARD, ...SWITCH, CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled' }
+    expect(
+      loadOidcProviderConfiguration(
+        { ...OIDC_ENV, ...creating, ...requiredClaim(CLAIM_VALUE) },
+        GENERATION_KEY
+      )!.memberSignIn
+    ).toEqual({
+      entraTenantId: null,
+      requiredClaim: { name: 'roles', value: CLAIM_VALUE },
+      allowGuests: false,
+      newMemberTeamId: null,
+      accountCreation: 'enabled',
+    })
+    expect(
+      loadOidcProviderConfiguration(
+        {
+          ...OIDC_ENV,
+          ...creating,
+          ...requiredClaim('fixture.example.test', 'hd'),
+          CONTROL_API_OIDC_ISSUER: 'https://accounts.google.com',
+        },
+        GENERATION_KEY
+      )!.memberSignIn
+    ).toMatchObject({
+      requiredClaim: { name: 'hd', value: 'fixture.example.test' },
       accountCreation: 'enabled',
     })
   })
@@ -293,15 +390,32 @@ describe('OIDC member sign-in configuration', () => {
     ['CONTROL_API_OIDC_REQUIRED_ROLE', 'Retired.Role.Assignment'],
   ])('fails to load with the removed setting %s', (name, value) => {
     for (const extra of [{}, { ...GUARD, ...SWITCH }]) {
-      const message = refusal({
+      // Valid apart from the removed name, so the refusal cannot come from
+      // another setting whichever check runs first.
+      const valid = {
         ...OIDC_ENV,
         ...extra,
+        ...requiredClaim(CLAIM_VALUE),
         CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
-        [name]: value,
-      })
+      }
+      expect(
+        loadOidcProviderConfiguration(valid, GENERATION_KEY)!.memberEligibility.accountCreation
+      ).toBe('enabled')
+      const message = refusal({ ...valid, [name]: value })
       expect(message).toBe(`Unsupported OIDC configuration field: ${name}`)
       expect(message).not.toContain(value)
     }
+  })
+
+  it.each([
+    ['CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS', 'retired-domain-list.example.test'],
+    ['CONTROL_API_OIDC_REQUIRED_ROLE', 'Retired.Role.Assignment'],
+  ])('fails to load a leftover %s when no registration is set', (name, value) => {
+    const message = refusal({ [name]: value })
+    expect(message).toBe(`Unsupported OIDC configuration field: ${name}`)
+    expect(message).not.toContain(value)
+    // No OIDC settings at all leaves the provider unconfigured.
+    expect(loadOidcProviderConfiguration({}, GENERATION_KEY)).toBeUndefined()
   })
 
   it('refuses a bad ACCOUNT_CREATION value and a bad team id', () => {
@@ -310,6 +424,72 @@ describe('OIDC member sign-in configuration', () => {
     )
     expect(refusal({ ...OIDC_ENV, CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: 'not-a-uuid' })).toContain(
       'CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID'
+    )
+  })
+
+  it.each(['', 'ENABLED', 'Any_Issuer_Account', 'any-issuer-account', ' any_issuer_account'])(
+    'refuses the ACCOUNT_CREATION value %j with or without a required claim',
+    value => {
+      for (const claim of [{}, requiredClaim(CLAIM_VALUE)]) {
+        expect(refusal({ ...OIDC_ENV, ...claim, CONTROL_API_OIDC_ACCOUNT_CREATION: value })).toBe(
+          ACCOUNT_CREATION_REFUSED
+        )
+      }
+    }
+  )
+
+  // Each setting at fault is named, and only those: an empty claim value is
+  // still a value, and a claim name alone is the name rule's fault.
+  it.each([
+    [
+      'enabled with no claim value',
+      { CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled' },
+      ['ACCOUNT_CREATION'],
+    ],
+    [
+      'enabled with an empty claim value',
+      { ...requiredClaim(''), CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled' },
+      ['REQUIRED_CLAIM_VALUE'],
+    ],
+    [
+      'enabled with a claim name alone',
+      {
+        CONTROL_API_OIDC_REQUIRED_CLAIM_NAME: 'groups',
+        CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
+      },
+      ['ACCOUNT_CREATION', 'REQUIRED_CLAIM_NAME'],
+    ],
+    [
+      'any_issuer_account with a claim name alone',
+      {
+        CONTROL_API_OIDC_REQUIRED_CLAIM_NAME: 'groups',
+        CONTROL_API_OIDC_ACCOUNT_CREATION: 'any_issuer_account',
+      },
+      ['REQUIRED_CLAIM_NAME'],
+    ],
+    [
+      'any_issuer_account with a claim value',
+      { ...requiredClaim(CLAIM_VALUE), CONTROL_API_OIDC_ACCOUNT_CREATION: 'any_issuer_account' },
+      ['ACCOUNT_CREATION'],
+    ],
+    [
+      'any_issuer_account with an empty claim value',
+      { ...requiredClaim(''), CONTROL_API_OIDC_ACCOUNT_CREATION: 'any_issuer_account' },
+      ['ACCOUNT_CREATION', 'REQUIRED_CLAIM_VALUE'],
+    ],
+    [
+      'enabled with no claim on accounts.google.com',
+      {
+        CONTROL_API_OIDC_ISSUER: 'https://accounts.google.com',
+        CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
+      },
+      ['ACCOUNT_CREATION', 'REQUIRED_CLAIM_NAME'],
+    ],
+  ])('names exactly the fields at fault for %s', (_label, environment, fields) => {
+    expect(refusal({ ...OIDC_ENV, ...environment })).toBe(
+      `Invalid OIDC provider configuration field(s): ${fields
+        .map(field => `CONTROL_API_OIDC_${field}`)
+        .join(', ')}`
     )
   })
 
@@ -351,10 +531,24 @@ describe('OIDC member sign-in configuration', () => {
     expect(refusal({ ...ENTRA_ENV, CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled' })).toBe(
       'Invalid OIDC provider configuration field(s): CONTROL_API_OIDC_ACCOUNT_CREATION'
     )
-    // Positive control: the same setting loads on a non-Entra issuer.
+    // Without a claim value, `enabled` is refused on any issuer, so only this
+    // row shows the Entra rule refusing it.
+    expect(
+      refusal({
+        ...ENTRA_ENV,
+        ...requiredClaim(CLAIM_VALUE),
+        CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
+      })
+    ).toBe(ACCOUNT_CREATION_REFUSED)
+    // Positive control: the same setting loads on a non-Entra issuer, which
+    // needs a required claim value for it.
     expect(
       loadOidcProviderConfiguration(
-        { ...OIDC_ENV, CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled' },
+        {
+          ...OIDC_ENV,
+          ...requiredClaim(CLAIM_VALUE),
+          CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
+        },
         GENERATION_KEY
       )?.memberEligibility.accountCreation
     ).toBe('enabled')
@@ -518,6 +712,25 @@ describe('OIDC member sign-in configuration', () => {
     }
   })
 
+  it('refuses a claim name or value that contains a format character', () => {
+    for (const name of ['groups\u200b', 'gro\u200cups', 'groups\u2060']) {
+      const message = refusal({ ...OIDC_ENV, ...requiredClaim(CLAIM_VALUE, name) })
+      expect(message).toBe(CLAIM_NAME_REFUSED)
+      expect(message).not.toContain(CLAIM_VALUE)
+      expect(message).not.toContain('groups')
+    }
+    const value = `${CLAIM_VALUE}\u200b`
+    const message = refusal({ ...OIDC_ENV, ...requiredClaim(value) })
+    expect(message).toBe(CLAIM_VALUE_REFUSED)
+    expect(message).not.toContain(CLAIM_VALUE)
+    expect(
+      loadOidcProviderConfiguration(
+        { ...OIDC_ENV, ...requiredClaim(CLAIM_VALUE, 'groups') },
+        GENERATION_KEY
+      )!.memberEligibility.requiredClaim
+    ).toEqual({ name: 'groups', value: CLAIM_VALUE })
+  })
+
   it('refuses a claim name with leading or trailing whitespace', () => {
     for (const name of [' roles', 'roles ', ' groups', 'groups ']) {
       const message = refusal({ ...OIDC_ENV, ...requiredClaim(CLAIM_VALUE, name) })
@@ -605,9 +818,9 @@ describe('OIDC member sign-in configuration', () => {
     expect(generation({ ...base, ...GUARD, ...SWITCH })).toBe(first)
     expect(generation({ ...base, ...requiredClaim('admin') })).not.toBe(first)
     expect(generation({ ...base, CONTROL_API_OIDC_ALLOW_GUESTS: 'true' })).not.toBe(first)
-    expect(generation({ ...OIDC_ENV, CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled' })).not.toBe(
-      generation(OIDC_ENV)
-    )
+    expect(
+      generation({ ...OIDC_ENV, CONTROL_API_OIDC_ACCOUNT_CREATION: 'any_issuer_account' })
+    ).not.toBe(generation(OIDC_ENV))
     const provider = loadOidcProviderConfiguration(
       { ...base, ...GUARD, ...SWITCH },
       GENERATION_KEY

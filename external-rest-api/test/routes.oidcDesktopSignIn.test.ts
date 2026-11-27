@@ -4,7 +4,9 @@ import { createRequire } from 'node:module'
 import request from 'supertest'
 import {
   type ControlApiRecord,
+  ISSUANCE_DEFERRED_RETRY_AFTER,
   controlApiAnswers,
+  controlApiRateLimits,
   controlApiRecord,
 } from './helpers/controlApiDesktopSignInRecords.js'
 
@@ -328,8 +330,9 @@ describe('edge POST /oidc/desktop-sign-in/redeem: request and answers', () => {
     expect(res.body).toEqual(body)
     expect(res.headers['set-cookie']).toBeUndefined()
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    // Every generic 503 logs one line; an answer control-api meant is relayed unlogged.
-    expect(errorLog).toHaveBeenCalledTimes(status === 503 ? 1 : 0)
+    // Every generic 503 logs one line; an answer control-api meant is relayed unlogged, and so
+    // is its session deferral, which control-api logs itself.
+    expect(errorLog).toHaveBeenCalledTimes(status === 503 && answer !== issuanceUnavailable ? 1 : 0)
   })
 
   it('answers 503 when control-api cannot be reached', async () => {
@@ -350,6 +353,100 @@ describe('edge POST /oidc/desktop-sign-in/redeem: request and answers', () => {
     expect(res.status).toBe(503)
     expect(res.body).toEqual(ISSUANCE_UNAVAILABLE)
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("relays control-api's own 429 as 429 with its Retry-After, unlogged", async () => {
+    // Part-way through control-api's window, its limiter's Retry-After is below the window.
+    const fetchMock = controlApiRateLimits('17')
+    const res = await (await edge()).post(REDEEM).send(redeemBody)
+
+    expect(res.status).toBe(429)
+    expect(res.body).toEqual({ error: 'rate_limited', retryAfterSeconds: 17 })
+    expect(res.headers['retry-after']).toBe('17')
+    expect(res.headers['set-cookie']).toBeUndefined()
+    expect(res.text).not.toContain('Too many requests')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(String(fetchMock.mock.calls[0]![0])).toMatch(
+      /\/external\/oidc\/desktop-sign-in\/redeem$/
+    )
+    // A wait, not a failure.
+    expect(errorLog).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['none', null],
+    ['an HTTP date', 'Wed, 25 Nov 2026 12:01:00 GMT'],
+    ['zero', '0'],
+    ['more than a day', '86401'],
+  ])(
+    "waits one 60-second window when control-api's 429 carries %s as Retry-After",
+    async (_label, retryAfter) => {
+      const fetchMock = controlApiRateLimits(retryAfter)
+      const res = await (await edge()).post(REDEEM).send(redeemBody)
+
+      expect(res.status).toBe(429)
+      expect(res.body).toEqual({ error: 'rate_limited', retryAfterSeconds: 60 })
+      expect(res.headers['retry-after']).toBe('60')
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(errorLog).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    ['the lowest', 1],
+    ['the highest', 86_400],
+  ])(
+    "relays %s Retry-After the bound allows, %i, from control-api's 429",
+    async (_label, seconds) => {
+      const fetchMock = controlApiRateLimits(String(seconds))
+      const res = await (await edge()).post(REDEEM).send(redeemBody)
+
+      expect(res.status).toBe(429)
+      expect(res.body).toEqual({ error: 'rate_limited', retryAfterSeconds: seconds })
+      expect(res.headers['retry-after']).toBe(String(seconds))
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    }
+  )
+
+  it("relays the Retry-After of control-api's session deferral with the 503", async () => {
+    const fetchMock = controlApiAnswers(issuanceUnavailable, {
+      'retry-after': ISSUANCE_DEFERRED_RETRY_AFTER,
+    })
+    const res = await (await edge()).post(REDEEM).send(redeemBody)
+
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual(ISSUANCE_UNAVAILABLE)
+    expect(res.headers['retry-after']).toBe(ISSUANCE_DEFERRED_RETRY_AFTER)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['an unbounded Retry-After on the deferral', issuanceUnavailable, 'soon'],
+    [
+      'a Retry-After on another 503',
+      derived(issuanceUnavailable, { error: 'oidc_storage_unavailable' }),
+      ISSUANCE_DEFERRED_RETRY_AFTER,
+    ],
+  ])('relays no Retry-After for %s', async (_label, answer, retryAfter) => {
+    const fetchMock = controlApiAnswers(answer, { 'retry-after': retryAfter })
+    const res = await (await edge()).post(REDEEM).send(redeemBody)
+
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual(ISSUANCE_UNAVAILABLE)
+    expect(res.headers['retry-after']).toBeUndefined()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("reports no budget left on a relayed 429, as the edge limiter's own 429 does", async () => {
+    const fetchMock = controlApiRateLimits('17')
+    const res = await (await edge()).post(REDEEM).send(redeemBody)
+
+    expect(res.status).toBe(429)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // The request passed the edge limiter, which stamped its own budget before control-api
+    // refused it.
+    expect(res.headers['x-ratelimit-limit']).toBe('60')
+    expect(res.headers['x-ratelimit-remaining']).toBe('0')
   })
 
   it('answers 429 rate_limited after 60 redeems a minute from one client', async () => {
@@ -469,8 +566,9 @@ describe('edge POST /oidc/desktop-sign-in/redeem: the fallback log', () => {
     }
   )
 
-  it("logs control-api's own 503 once, by class and status", async () => {
-    controlApiAnswers(issuanceUnavailable)
+  it("logs control-api's own generic 503 once, by class and status", async () => {
+    // control-api's redeem 503 for any failure but the session deferral.
+    controlApiAnswers(derived(issuanceUnavailable, { error: 'oidc_storage_unavailable' }))
     const res = await (await edge()).post(REDEEM).send(redeemBody)
 
     expect(res.status).toBe(503)
@@ -481,6 +579,20 @@ describe('edge POST /oidc/desktop-sign-in/redeem: the fallback log', () => {
       upstreamStatus: 503,
     })
     expectNothingSecret(line)
+  })
+
+  it("relays control-api's session deferral with its Retry-After and logs nothing", async () => {
+    // control-api's error handler logs the deferral at warn; the edge does not log it again.
+    const fetchMock = controlApiAnswers(issuanceUnavailable, {
+      'retry-after': ISSUANCE_DEFERRED_RETRY_AFTER,
+    })
+    const res = await (await edge()).post(REDEEM).send(redeemBody)
+
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual(ISSUANCE_UNAVAILABLE)
+    expect(res.headers['retry-after']).toBe(ISSUANCE_DEFERRED_RETRY_AFTER)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(errorLog).not.toHaveBeenCalled()
   })
 
   it('logs an unusable sign-in once, by its status and never its body', async () => {

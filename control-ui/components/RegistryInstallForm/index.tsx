@@ -1,12 +1,14 @@
 'use client'
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { ConnectorIdentity } from '@components/ConnectorIdentity'
 import { CreateStepFlow } from '@components/CreateStepFlow'
 import { EgressEditor } from '@components/EgressEditor'
 import { IconCheck } from '@components/icons'
 import { Button } from '@components/ui'
 import type { CredentialSchema } from '@lib/api'
 import { getRegistryCredentialSchema, installFromRegistry } from '@lib/api'
+import { getConnectorPresentation } from '@lib/connectorPresentation'
 import { registryEntryToEgressBindings } from '@lib/egressModel'
 import type { EgressBinding, EgressEditorStatus } from '@lib/egressModel'
 import { isValidK8sName, toK8sName } from '@lib/k8sValidation'
@@ -174,13 +176,14 @@ export function RegistryInstallForm({
               <div className="cu-form-section__header">
                 <h3 className="cu-form-section__title">Install Connector from Marketplace</h3>
                 <p className="cu-form-section__description">
-                  Configure installation details for <strong>{entry.name}</strong> v{entry.version}.
+                  Configure installation details for{' '}
+                  <strong>{getConnectorPresentation(entry.name).name}</strong> v{entry.version}.
                 </p>
               </div>
 
               <div className="cu-registry-entry-card">
                 <div className="cu-registry-entry-card__head">
-                  <strong className="cu-registry-name">{entry.name}</strong>
+                  <ConnectorIdentity name={entry.name} />
                   <span className="cu-muted">v{entry.version}</span>
                 </div>
                 {entry.description ? (
@@ -305,7 +308,7 @@ export function RegistryInstallForm({
                   </div>
                   <div className="cu-summary-list__row">
                     <span>Marketplace package</span>
-                    <strong>{entry.name}</strong>
+                    <strong>{getConnectorPresentation(entry.name).name}</strong>
                   </div>
                   <div className="cu-summary-list__row">
                     <span>Version</span>

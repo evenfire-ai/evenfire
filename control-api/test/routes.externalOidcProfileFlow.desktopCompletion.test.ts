@@ -94,6 +94,11 @@ function proofWith(signInContext: VerifiedOidcIdentityProof['signInContext']) {
 
 const desktopProof = proofWith({ kind: 'desktop_sign_in', codeChallenge: CODE_CHALLENGE })
 const plainProof = proofWith(null)
+const invitationProof = proofWith({
+  kind: 'invitation',
+  invitationId: '2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e',
+  invitedEmail: 'member@fixture.test',
+})
 
 function appCompleting(proof: object) {
   const router = createExternalOidcProfileFlowRouter({
@@ -232,5 +237,95 @@ describe('/complete for a Desktop sign-in attempt', () => {
     expect(flowLog.error).not.toHaveBeenCalled()
     expect(loggedText()).not.toContain(DESKTOP_CODE)
     expect(loggedText()).not.toContain(CODE_CHALLENGE)
+  })
+})
+
+describe('/complete for an invitation attempt', () => {
+  it('issues the Profile UI session and leaves the invitation context on the proof', async () => {
+    signInOidcMember.mockResolvedValue({
+      status: 'signed_in',
+      userId: 'user-invited-1',
+      token: SESSION_TOKEN,
+      contract: 'v1',
+      created: { account: true, link: true, byInvitation: true },
+      invitationsApplied: 1,
+    })
+
+    const response = await request(appCompleting(invitationProof))
+      .post(COMPLETE_PATH)
+      .set('x-request-id', 'request-fixture-invitation')
+      .send(completeBody)
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      outcome: 'member_signed_in',
+      memberAuthenticationActivated: true,
+      token: SESSION_TOKEN,
+      sessionContract: 'v1',
+    })
+    // The same session completion as a plain attempt; account resolution
+    // reads the invitation from the proof it is handed.
+    expect(resolveEffectiveUserAccessPolicy).toHaveBeenCalledTimes(1)
+    expect(selectExternalSessionRepresentation).toHaveBeenCalledTimes(1)
+    expect(selectExternalSessionRepresentation).toHaveBeenCalledWith({}, sessionPolicy)
+    expect(signInOidcMember).toHaveBeenCalledTimes(1)
+    expect(signInOidcMember).toHaveBeenCalledWith({
+      proof: invitationProof,
+      provider,
+      policy: provider.memberSignIn,
+      completion: { kind: 'session', contract: 'v1', sessionPolicy },
+    })
+    expect(flowLog.error).not.toHaveBeenCalled()
+    expect(flowLog.info.mock.calls.map(call => call[0].event)).toEqual([
+      'oidc_member_account_created',
+      'oidc_member_link_created',
+      'oidc_member_invitation_applied',
+      'oidc_member_signed_in',
+    ])
+    expect(loggedText()).not.toContain('member@fixture.test')
+    expect(loggedText()).not.toContain(SESSION_TOKEN)
+  })
+})
+
+describe('/complete for a sign-in context of an unknown kind', () => {
+  it('fails closed with the terminal 503 instead of issuing a Profile session', async () => {
+    // A context kind this route has no completion for, as a newer writer could store.
+    const unknownProof = proofWith({
+      kind: 'unknown_fixture_kind',
+      invitedEmail: 'member@fixture.test',
+    } as never)
+    // What member sign-in answers for an ordinary attempt: a session for this member.
+    signInOidcMember.mockResolvedValue({
+      status: 'signed_in',
+      userId: 'user-invited-1',
+      token: SESSION_TOKEN,
+      contract: 'v1',
+      created: { account: false, link: false },
+      invitationsApplied: 0,
+    })
+
+    const response = await request(appCompleting(unknownProof))
+      .post(COMPLETE_PATH)
+      .set('x-request-id', 'request-fixture-invitation')
+      .send(completeBody)
+
+    expect(response.status).toBe(503)
+    expect(response.body).toEqual({ error: 'oidc_storage_unavailable', retrySameAttempt: false })
+    expect(response.headers['set-cookie']).toBeUndefined()
+    expect(JSON.stringify(response.body)).not.toContain(SESSION_TOKEN)
+    expect(signInOidcMember).toHaveBeenCalledTimes(0)
+    expect(selectExternalSessionRepresentation).toHaveBeenCalledTimes(0)
+    expect(resolveEffectiveUserAccessPolicy).toHaveBeenCalledTimes(0)
+    // The route reached member sign-in and logged its failure, by class only.
+    expect(flowLog.error).toHaveBeenCalledTimes(1)
+    expect(flowLog.error.mock.calls[0]![0]).toEqual({
+      event: 'oidc_member_sign_in_failed',
+      registrationId: provider.registrationId,
+      issuer: provider.issuer,
+      subjectFingerprint: expect.stringMatching(/^[0-9a-f]{16}$/),
+      requestId: 'request-fixture-invitation',
+      errorClass: 'Error',
+    })
+    expect(loggedText()).not.toContain('member@fixture.test')
   })
 })

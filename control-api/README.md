@@ -292,30 +292,52 @@ Settings:
 - `CONTROL_API_OIDC_MEMBER_SIGN_IN=enabled` turns member sign-in on. It also
   needs `CONTROL_API_OIDC_UNRELEASED=acknowledged`.
 - `CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE`: the value a top-level ID token
-  claim must hold: 1–256 characters, no control characters, and no leading or
-  trailing whitespace (inner spaces are allowed). The claim matches when it is
+  claim must hold: 1–256 characters, no control or format characters, and no
+  leading or trailing whitespace (inner spaces are allowed). A format
+  character such as U+200B is invisible and would match no token. The claim
+  matches when it is
   a string exactly equal to the value, or an array of strings with one element
   exactly equal to it. Anything else does not match, including a missing
   claim, a prefix or substring, and an array with a non-string element. A
   claim value the sign-in cannot read, such as an array of more than 32 items
   or a string over 512 characters, refuses sign-in too, and so does an
   unreadable `roles` claim, whichever claim is required.
-- `CONTROL_API_OIDC_REQUIRED_CLAIM_NAME`: the claim's name, `roles` when
-  unset. A name without a value is refused, and so is a name that is an OIDC
-  protocol claim (`iss`, `sub`, `aud`, `exp`, `iat`, `nbf`, `jti`, `nonce`,
-  `azp`, `auth_time`, `at_hash`, `c_hash`, `s_hash`, `sid`), a claim
+- `CONTROL_API_OIDC_REQUIRED_CLAIM_NAME`: the claim's name. It is `roles`
+  when a value is set and the name is omitted. Omitting both settings adds no
+  claim check. A name without a value is refused, and so is a name that is an
+  OIDC protocol claim (`iss`, `sub`, `aud`, `exp`, `iat`, `nbf`, `jti`,
+  `nonce`, `azp`, `auth_time`, `at_hash`, `c_hash`, `s_hash`, `sid`), a claim
   eligibility already reads (`tid`, `idp`, `acct`, `email`, `email_verified`,
-  `xms_edov`), empty, over 128 characters, or has control characters or
-  leading or trailing whitespace.
-- `CONTROL_API_OIDC_ACCOUNT_CREATION=enabled`: a first sign-in that finds no
-  account creates one. Set it only when the issuer signs in only your
-  company's people. Without it, a non-Entra issuer signs in only existing
-  accounts, with one exception: a sign-in started from a pending member
-  invitation link creates the account that invitation was sent to, when the
-  verified email matches the invited address. The required claim still
-  applies, and that account joins only the teams of the person's pending
-  invitations. The setting is refused for Entra ID, which always creates
-  accounts for the pinned tenant.
+  `xms_edov`), empty, over 128 characters, or has control characters, format
+  characters, or leading or trailing whitespace. Use a claim only an
+  identity-provider admin can set, such as an app role, a group, or
+  `app_metadata`. Do not use a profile claim the person can edit, such as
+  `name`, `nickname`, `preferred_username`, or `given_name`.
+- `CONTROL_API_OIDC_ACCOUNT_CREATION`: what a first sign-in that finds no
+  account does. Unset, a non-Entra issuer signs in only existing accounts,
+  with one exception: a sign-in started from a pending member invitation link
+  creates the account that invitation was sent to, when the verified email
+  matches the invited address. The required claim still applies, and that
+  account joins only the teams of the person's pending invitations. The
+  setting is refused for Entra ID, which always creates accounts for the
+  pinned tenant. Two values turn creation on for other issuers. With either,
+  an account is created only when the ID token has an `email` claim and
+  `email_verified` is `true`; a first sign-in without them is refused.
+  - `enabled` creates an account for each person whose ID token holds the
+    required claim, and needs `CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE`. Without
+    a value it is refused. Use a group or app role your administrators
+    assign, not a profile claim people can edit.
+  - `any_issuer_account` creates an account for every person the issuer signs
+    in with a verified email, with no claim check, and is refused when a
+    required claim value is set. Use it only when the issuer cannot sign in
+    anyone outside your company: the application requires assignment, and
+    self-service sign-up and social or external logins are off at the
+    issuer. Sign in with Apple, Entra External ID user flows with sign-up on,
+    and Auth0 tenants with sign-up on sign in people who registered
+    themselves. With this value each of them gets an active account, and
+    joins `CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID` if it is set. Google's
+    `accounts.google.com` needs the `hd` required claim, so only `enabled`
+    can turn creation on there.
 - `CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID`: a team UUID that each account the
   sign-in creates joins as a `member`. It is not applied to an account an
   invitation link creates while account creation is off.
@@ -335,13 +357,22 @@ A configuration that breaks these rules does not stop control-api. Every OIDC
 route answers 503 `oidc_configuration_unavailable`, and each request logs
 `oidc_configuration_unavailable` with the names of the settings at fault,
 never their values. Profile UI then shows only the password form, and
-password sign-in keeps working. An unknown `CONTROL_API_OIDC_*` name fails the
-same way, even with no registration set. That includes the removed
-`CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS` and `CONTROL_API_OIDC_REQUIRED_ROLE`,
-which the required claim and account creation settings replace. While
-`CONTROL_API_OIDC_MEMBER_SIGN_IN` is set, a configuration that fails to load
-still counts as member sign-in on when a member is removed: the member is kept
-as a retired row rather than deleted.
+password sign-in keeps working. `CONTROL_API_OIDC_ACCOUNT_CREATION` in the
+list means a value other than exactly `enabled` or `any_issuer_account`, any
+value on Entra ID, `enabled` with no required claim value, or
+`any_issuer_account` beside one. Set a claim value, or use
+`any_issuer_account` if every person the issuer signs in should get an
+account. On `accounts.google.com`, `any_issuer_account` is always refused:
+use `enabled` with the `hd` claim there. An empty
+`CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE` is refused, and the list names it.
+It still counts as a value, so `any_issuer_account` beside it is refused as
+well. An unknown `CONTROL_API_OIDC_*` name fails the same way, even with no
+registration set. That includes the removed
+`CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS` and
+`CONTROL_API_OIDC_REQUIRED_ROLE`, which the required claim and account
+creation settings replace. While `CONTROL_API_OIDC_MEMBER_SIGN_IN` is set, a
+configuration that fails to load still counts as member sign-in on when a
+member is removed: the member is kept as a retired row rather than deleted.
 
 Provider checklist:
 

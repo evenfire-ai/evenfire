@@ -15,13 +15,14 @@ import {
  * `createApp()`, and what the edge sends is recorded to edge.json. Profile UI and Desktop tests
  * read only that file.
  *
- * Each recorded answer is first checked against its design §7.6 row in the table below. The
- * table is this test's own claim about the contract, never the edge's output pasted back.
+ * Each recorded answer is first checked against its row in the table below: what the edge must
+ * answer for it. The table is this test's own claim about the contract, never the edge's output
+ * pasted back.
  */
 
 /**
  * The edge's configured public URL: `desktop_code_issued` carries it as `environment`. Desktop's
- * tests (PR 3) compare a code's environment with this same value.
+ * tests compare a code's environment with this same value.
  */
 const EDGE_PUBLIC_BASE_URL = 'https://edge-fixture.example.test'
 
@@ -56,7 +57,7 @@ type EdgeRoute = Readonly<{
   send: (edge: EdgeClient) => request.Test
 }>
 
-/** A design §7.6 row: what the edge must answer, given control-api's recorded answer. */
+/** A row: what the edge must answer, given control-api's recorded answer. */
 type Row = Readonly<{
   status: number
   body: unknown
@@ -167,7 +168,7 @@ function stampedExpiresAt(upstream: ControlApiRecord): unknown {
 }
 
 /**
- * The expectation table: one design §7.6 row per control-api record. Error codes and rebuilt
+ * The expectation table: one row per control-api record. Error codes and rebuilt
  * shapes are the contract's literals; relayed values (URLs, codes, tokens, `me`) come from
  * control-api's record, because relaying them unchanged is the claim.
  */
@@ -328,7 +329,7 @@ const replays: Readonly<Record<string, Replay>> = {
       }
     },
   },
-  // Row "404 (a control-api older than PR 1)": 404.
+  // Row "404 (a control-api older than the methods route)": 404.
   'GET /external/unknown not-found': {
     route: routes.methods,
     olderControlApi: true,

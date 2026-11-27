@@ -432,7 +432,8 @@ describeRealPostgres('OIDC sign-in from an invitation link on real PostgreSQL', 
     creatingFake = createOidcMemberSignInFakeProvider({
       memberSignInEnv: {
         CONTROL_API_OIDC_REGISTRATION_ID: 'fake-invitation-creation',
-        CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
+        // Creation on for everyone the issuer signs in: these sign-ins carry no required claim.
+        CONTROL_API_OIDC_ACCOUNT_CREATION: 'any_issuer_account',
       },
     })
     expect(policyOf(defaultFake).accountCreation).toBe('disabled')
@@ -769,7 +770,8 @@ describeRealPostgres('OIDC sign-in from an invitation link on real PostgreSQL', 
             : createOidcMemberSignInFakeProvider({
                 memberSignInEnv: {
                   CONTROL_API_OIDC_REGISTRATION_ID: registrationId,
-                  CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
+                  // Loads as the `enabled` policy, with no required claim to carry.
+                  CONTROL_API_OIDC_ACCOUNT_CREATION: 'any_issuer_account',
                   CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: newMemberTeamId,
                 },
               })

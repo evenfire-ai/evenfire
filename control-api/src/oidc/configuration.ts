@@ -2,7 +2,11 @@ import { createHash, createHmac } from 'node:crypto'
 import { isIP } from 'node:net'
 import { z } from 'zod'
 import { deriveOAuthEncryptionKey } from '../oauth/encryption.js'
-import { OIDC_ELIGIBILITY_RESERVED_CLAIMS, isAcceptableEvidenceClaimName } from './claimNames.js'
+import {
+  OIDC_ELIGIBILITY_RESERVED_CLAIMS,
+  hasDisallowedClaimCharacters,
+  isAcceptableEvidenceClaimName,
+} from './claimNames.js'
 
 const ENV = {
   registrationId: 'CONTROL_API_OIDC_REGISTRATION_ID',
@@ -63,10 +67,12 @@ const MAX_REQUIRED_CLAIM_VALUE_LENGTH = 256
 
 /**
  * Whether a first sign-in with no matching account creates one. `entra`: an
- * Entra issuer pinned to one tenant always creates. `enabled`: the operator
- * attests that the non-Entra issuer signs in only the company's people.
- * `disabled`: only existing accounts sign in, except that a pending member
- * invitation creates the one account it was sent to.
+ * Entra issuer pinned to one tenant always creates. `enabled`: a non-Entra
+ * issuer creates an account for each person eligibility admits, which is the
+ * holders of the required claim (`ACCOUNT_CREATION=enabled`) or, when the
+ * operator set `ACCOUNT_CREATION=any_issuer_account`, everyone the issuer
+ * signs in. `disabled`: only existing accounts sign in, except that a pending
+ * member invitation creates the one account it was sent to.
  */
 export type OidcAccountCreation = 'entra' | 'enabled' | 'disabled'
 
@@ -289,7 +295,7 @@ function parseMemberEligibility(
     (claimValueRaw.length === 0 ||
       claimValueRaw.length > MAX_REQUIRED_CLAIM_VALUE_LENGTH ||
       claimValueRaw !== claimValueRaw.trim() ||
-      /[\u0000-\u001f\u007f]/.test(claimValueRaw))
+      hasDisallowedClaimCharacters(claimValueRaw))
   ) {
     bad.add(OPTIONAL_ENV.requiredClaimValue)
   }
@@ -323,17 +329,30 @@ function parseMemberEligibility(
     else bad.add(OPTIONAL_ENV.newMemberTeamId)
   }
 
-  if (creationRaw !== undefined && creationRaw !== 'enabled') bad.add(OPTIONAL_ENV.accountCreation)
+  const creationOn = creationRaw === 'enabled' || creationRaw === 'any_issuer_account'
+  if (creationRaw !== undefined && !creationOn) bad.add(OPTIONAL_ENV.accountCreation)
   // Entra always creates for the pinned tenant, so the setting would be ignored there.
   if (creationRaw !== undefined && entraIssuer) bad.add(OPTIONAL_ENV.accountCreation)
+  // `enabled` creates accounts for the holders of the required claim. Without
+  // a claim value it would create one for everyone the issuer signs in, and it
+  // could not tell that choice from a forgotten claim, so that choice has its
+  // own value, `any_issuer_account`, which a claim value would contradict.
+  if (creationRaw === 'enabled' && claimValueRaw === undefined) {
+    bad.add(OPTIONAL_ENV.accountCreation)
+  }
+  if (creationRaw === 'any_issuer_account' && claimValueRaw !== undefined) {
+    bad.add(OPTIONAL_ENV.accountCreation)
+  }
 
   if (bad.size > 0) {
     throw new Error(`Invalid OIDC provider configuration field(s): ${[...bad].sort().join(', ')}`)
   }
 
+  // Both values map to `enabled`: the policy's required claim, or its
+  // absence, already says whom creation admits.
   const accountCreation: OidcAccountCreation = entraIssuer
     ? 'entra'
-    : creationRaw === 'enabled'
+    : creationOn
       ? 'enabled'
       : 'disabled'
   return Object.freeze({

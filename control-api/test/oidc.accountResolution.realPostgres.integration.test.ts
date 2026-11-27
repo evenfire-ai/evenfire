@@ -555,6 +555,35 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
     expect(memberships.rowCount).toBe(0)
   })
 
+  it('creates an account for a person without the claim under any_issuer_account', async () => {
+    const fake = creatingFake('fake-creation-any-issuer-account', {
+      CONTROL_API_OIDC_ACCOUNT_CREATION: 'any_issuer_account',
+      CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE: undefined,
+    })
+    expect(policyOf(fake)).toMatchObject({ accountCreation: 'enabled', requiredClaim: null })
+    const subject = uniqueLabel('any-issuer-account-subject')
+    const email = `${uniqueLabel('any-issuer-account')}@unrelated.fixture.test`
+
+    // No roles claim: the claim `enabled` would require is absent.
+    const created = await resolve(
+      fake,
+      await fake.signIn({ sub: subject, email, email_verified: true, name: 'Any Issuer Account' })
+    )
+
+    expect(created.status).toBe('resolved')
+    if (created.status !== 'resolved') return
+    expect(created.account.created).toEqual({ account: true, link: true })
+    expect(await usersWithEmail(email)).toEqual([
+      {
+        id: created.account.userId,
+        email,
+        name: 'Any Issuer Account',
+        lifecycle_state: 'active',
+      },
+    ])
+    expect(await linksFor(subject)).toHaveLength(1)
+  })
+
   it('refuses not_eligible with creation enabled and the claim absent, writing no users row', async () => {
     const fake = creatingFake('fake-creation-claim-absent')
     const before = await watchedTables()

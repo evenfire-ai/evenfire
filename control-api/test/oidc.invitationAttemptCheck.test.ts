@@ -188,6 +188,31 @@ function stepFailures(): unknown[][] {
     .map(entry => [entry[0], entry[2]])
 }
 
+/** The member-registration client's own request events: level, event, upstream status. */
+function clientEvents(): unknown[][] {
+  return logged
+    .filter(entry =>
+      String((entry[2] as { event?: unknown })?.event).startsWith('member_registration_request')
+    )
+    .map(entry => [
+      entry[0],
+      (entry[2] as { event?: unknown }).event,
+      (entry[2] as { upstreamStatus?: unknown }).upstreamStatus,
+    ])
+}
+
+/** Every line logged at error, from any logger. */
+function errorLines(): unknown[][] {
+  return logged.filter(entry => entry[0] === 'error')
+}
+
+const STORED_CREDENTIAL = {
+  boundDomain: HOST,
+  tenantId: 'fixture-tenant',
+  kid: 'fixture-kid',
+  secret: 'fixture-hub-secret',
+}
+
 describe('the hub check for an OIDC attempt started from an invitation', () => {
   beforeEach(() => {
     __resetMemberRegistrationEnrollmentForTests()
@@ -557,7 +582,93 @@ describe('the hub check for an OIDC attempt started from an invitation', () => {
     // The closed socket: the validate request's own signal aborted.
     expect(calls[0].signal.aborted).toBe(true)
     expect(settled).toStrictEqual(HUB_DEADLINE)
+    // The deadline's warn reports the abort. The client saw the abort it
+    // caused (debug) and logged no hub failure.
+    expect(fellBackLevels()).toEqual([['warn', 'hub_deadline']])
+    expect(clientEvents()).toEqual([
+      ['debug', 'member_registration_request_stopped_by_caller', undefined],
+    ])
+    expect(errorLines()).toEqual([])
   })
+
+  it('logs a body the deadline cut short at debug, not as an unreadable answer', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    credentials.getActiveMemberRegistrationCredential.mockResolvedValue(STORED_CREDENTIAL)
+    // The hub sends its headers, then the body stalls until the request aborts.
+    const signals: AbortSignal[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string | URL, init: RequestInit) => {
+        const signal = init.signal as AbortSignal
+        signals.push(signal)
+        const body = new ReadableStream<Uint8Array>({
+          start(stream) {
+            signal.addEventListener(
+              'abort',
+              () => stream.error(new DOMException('The operation was aborted.', 'AbortError')),
+              { once: true }
+            )
+          },
+        })
+        return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } })
+      })
+    )
+    const check = createOidcInvitationAttemptCheck({ limiter: allowedLimiter })
+
+    let settled: OidcInvitationCheck | undefined
+    void check(input()).then(result => {
+      settled = result
+    })
+    await vi.advanceTimersByTimeAsync(3_000)
+
+    expect(signals).toHaveLength(1)
+    expect(signals[0].aborted).toBe(true)
+    expect(settled).toStrictEqual(HUB_DEADLINE)
+    expect(fellBackLevels()).toEqual([['warn', 'hub_deadline']])
+    expect(clientEvents()).toEqual([
+      ['debug', 'member_registration_request_stopped_by_caller', 200],
+    ])
+    expect(errorLines()).toEqual([])
+  })
+
+  it.each([
+    ['a network failure', 'network'],
+    ["the client's own 20 s bound", 'own_timeout'],
+  ] as const)(
+    'still logs %s at error when the caller passed a signal it did not abort',
+    async (_label, failure) => {
+      credentials.getActiveMemberRegistrationCredential.mockResolvedValue(STORED_CREDENTIAL)
+      const ownTimeout = new AbortController()
+      const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(ownTimeout.signal)
+      let calls: Array<{ url: string; signal: AbortSignal }> = []
+      if (failure === 'network') {
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async () => {
+            throw new TypeError('fetch failed')
+          })
+        )
+      } else {
+        calls = stubAbortAwareFetch()
+      }
+      const caller = new AbortController()
+      try {
+        const request = validateInvitationFlowToken(TOKEN, undefined, { signal: caller.signal })
+        if (failure === 'own_timeout') {
+          await vi.waitFor(() => expect(calls).toHaveLength(1))
+          ownTimeout.abort(new DOMException('The operation timed out.', 'TimeoutError'))
+        }
+
+        await expect(request).rejects.toBeInstanceOf(MemberRegistrationUnavailableError)
+        expect(caller.signal.aborted).toBe(false)
+        expect(clientEvents()).toEqual([['error', 'member_registration_request_failed', undefined]])
+        expect(errorLines()).toHaveLength(1)
+        expect(errorLines()[0][3]).toBe('member-registration service is unreachable')
+      } finally {
+        timeoutSpy.mockRestore()
+      }
+    }
+  )
 
   it('keeps the 20 s bound alone on the validate request of a caller that passes no signal', async () => {
     credentials.getActiveMemberRegistrationCredential.mockResolvedValue({

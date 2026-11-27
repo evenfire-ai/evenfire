@@ -69,7 +69,8 @@ export class ControlApiNonJsonResponseError extends ControlApiError {
  * its `requireValidExternalSessionToken` (`/external/users/*` except `/me`,
  * `/external/teams/*`, `/external/members/*` and the other session-plane routes) answers
  * an ended session with a bare 401, the same body its service-credential guard sends when
- * it refuses this edge's credential; the two cannot be told apart.
+ * it refuses this edge's credential. Only the guard's refusal header tells the two apart
+ * (isControlApiServiceCredentialRejection).
  */
 export function isControlApiInvalidSession(error: unknown): error is ControlApiError {
   if (!(error instanceof ControlApiError) || error.status !== 401) return false
@@ -81,6 +82,26 @@ export function isControlApiInvalidSession(error: unknown): error is ControlApiE
     envelope !== null &&
     'code' in envelope &&
     envelope.code === 'invalid_session'
+  )
+}
+
+/**
+ * control-api's internal-service gate (control-api/src/middleware/internalServiceAuth.ts) marks
+ * every refusal of a caller's own service credential with this header and value, beside the bare
+ * `401 {"error":"Unauthorized"}` a route also sends for an ended session or a missing account.
+ */
+const INTERNAL_SERVICE_AUTH_REFUSAL_HEADER = 'x-internal-service-auth-refusal'
+const INTERNAL_SERVICE_CREDENTIAL_REJECTED = 'service_credential_rejected'
+
+/**
+ * A 401 in which control-api refused this edge's own service credential, not the member's
+ * session: an outage of the edge, which signing in again cannot fix.
+ */
+export function isControlApiServiceCredentialRejection(error: unknown): error is ControlApiError {
+  return (
+    error instanceof ControlApiError &&
+    error.status === 401 &&
+    error.headers[INTERNAL_SERVICE_AUTH_REFUSAL_HEADER] === INTERNAL_SERVICE_CREDENTIAL_REJECTED
   )
 }
 
@@ -213,6 +234,14 @@ function forwardableResponseHeaders(headers: Headers, status: number): Record<st
   // transient authority failure. Only that literal value is relayed.
   if (status === 503 && headers.get('cache-control')?.trim().toLowerCase() === 'no-store') {
     result['cache-control'] = 'no-store'
+  }
+  // Kept for isControlApiServiceCredentialRejection, and only as its one literal value. No
+  // relay allowlist names it, so it never reaches a public response.
+  if (
+    status === 401 &&
+    headers.get(INTERNAL_SERVICE_AUTH_REFUSAL_HEADER) === INTERNAL_SERVICE_CREDENTIAL_REJECTED
+  ) {
+    result[INTERNAL_SERVICE_AUTH_REFUSAL_HEADER] = INTERNAL_SERVICE_CREDENTIAL_REJECTED
   }
   return result
 }
