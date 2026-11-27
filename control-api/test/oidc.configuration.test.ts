@@ -390,12 +390,18 @@ describe('OIDC member sign-in configuration', () => {
     ['CONTROL_API_OIDC_REQUIRED_ROLE', 'Retired.Role.Assignment'],
   ])('fails to load with the removed setting %s', (name, value) => {
     for (const extra of [{}, { ...GUARD, ...SWITCH }]) {
-      const message = refusal({
+      // Valid apart from the removed name, so the refusal cannot come from
+      // another setting whichever check runs first.
+      const valid = {
         ...OIDC_ENV,
         ...extra,
+        ...requiredClaim(CLAIM_VALUE),
         CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
-        [name]: value,
-      })
+      }
+      expect(
+        loadOidcProviderConfiguration(valid, GENERATION_KEY)!.memberEligibility.accountCreation
+      ).toBe('enabled')
+      const message = refusal({ ...valid, [name]: value })
       expect(message).toBe(`Unsupported OIDC configuration field: ${name}`)
       expect(message).not.toContain(value)
     }
