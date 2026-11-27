@@ -1214,7 +1214,7 @@ describe('App sidebar GFS resource menu', () => {
   describe('model-based oracle', () => {
     type Row = 'notes' | 'summary'
     // `okWithoutParent`: the row's bits arrived and its parent's read failed,
-    // so only Move is withheld.
+    // so only Move is greyed out.
     type Bits = 'ok' | 'pending' | 'error' | 'okWithoutParent'
     type Read = 'row' | 'parent'
     type Answer = 'pending' | 'ok' | 'error'

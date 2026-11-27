@@ -2359,7 +2359,7 @@ describe('FilesPage', () => {
     })
     expect(screen.queryByRole('menu', { name: 'Actions for notes.txt' })).toBeNull()
 
-    // Same row with manage_acl held: the entry appears and opens the modal.
+    // Same row with manage_acl held: the entry is enabled and opens the modal.
     hookMock.useGfsBrowserController.mockReturnValue({
       ...controller,
       rowAffordancesResourceId: 'child-1',
