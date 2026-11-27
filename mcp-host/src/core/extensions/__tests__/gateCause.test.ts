@@ -131,6 +131,7 @@ describe('approval cause tags', () => {
     const call: ToolCall = { id: 'c1', name: 'shell_exec', arguments: { command: 'ls' } }
     const reg = registry([tool('shell_exec', true)])
     const ask = {
+      derivedFileReadDecision: () => undefined,
       async decide(_id: unknown, input: Record<string, unknown>) {
         return {
           decision: 'ask' as const,

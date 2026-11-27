@@ -85,6 +85,7 @@ import {
 import { turnStopResult } from '../core/orchestration/toolUseLoopRuntime'
 import {
   type PreparedGfsFile,
+  type TurnContextFolderTools,
   attachedFilesForTurnContext,
   attachedImagesForTurnContext,
   buildTurnContextBlock,
@@ -160,7 +161,10 @@ import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkfl
 import type { Workspace } from '../workspace/service'
 import { attachmentContextWindow } from './attachmentContextWindow'
 import type { CronScheduler } from './cronScheduler'
-import { referencedFilesForTurnContext } from './fileReferenceResolver'
+import {
+  referencedFilesForTurnContext,
+  referencedFoldersForTurnContext,
+} from './fileReferenceResolver'
 import {
   gfsManagedWorkspaceExecution,
   gfsStoreCallerIdentity,
@@ -179,6 +183,15 @@ import { sourceMessageForResume } from './sourceMessageForResume'
 import { TaskExecutionBudget, TaskLimitError } from './taskExecutionBudget'
 import { TurnTimingRecorder } from './turnTiming'
 import type { AgentConfig, ExecutorFailoverSupport } from './types'
+
+// The tools that take a referenced folder as `parentResourceId`.
+// clerum__gfs_copy needs gfs.write too, which always registers create_file.
+const FOLDER_WRITE_TOOLS = [
+  'clerum__gfs_create_file',
+  'clerum__gfs_create_folder',
+  GFS_SAVE_ATTACHMENT_TOOL,
+] as const
+const GFS_LIST_TOOL = 'clerum__gfs_list'
 
 export type ExecutorState = 'processing' | 'waiting_approval' | 'completed' | 'failed'
 
@@ -1373,20 +1386,35 @@ export class TaskExecutor {
     // message of the turn. Only the first user message of the turn gets it;
     // `tool` messages keep their content untouched.
     // #666 — the block is also the only carrier of the `attached_file` and
-    // `referenced_file` lines, so a message with file attachments or resolved
-    // file references gets it with the cache off too; the attachment
-    // condition also registers `clerum__attachment_read`.
+    // `referenced_file` and `referenced_folder` lines, so a message with file
+    // attachments or resolved file or location references gets it with the
+    // cache off too; the attachment condition also registers
+    // `clerum__attachment_read`.
     const hasFileAttachments =
       this.task.sourceMessage?.attachments?.some(attachment => attachment.kind === 'file') === true
     const hasFileReferences = (this.task.sourceMessage?.fileReferenceResolutions?.length ?? 0) > 0
+    const hasLocationReferences =
+      (this.task.sourceMessage?.locationReferenceResolutions?.length ?? 0) > 0
     const promptAssemblyStart = Date.now()
     const loopConfig = await withAbort(() => this.buildLoopConfig(), this.abortController.signal)
     const promptAssemblyMs = Date.now() - promptAssemblyStart
     // The save instruction follows the registry that was actually built, so it
     // appears exactly when the model can call the tool.
     const saveAvailable = loopConfig.toolRegistry.get(GFS_SAVE_ATTACHMENT_TOOL) !== null
-    if (appConfig.promptCacheEnabled || hasFileAttachments || hasFileReferences || saveAvailable) {
-      this.prependTurnContextBlock(messages, saveAvailable)
+    // The folder instruction follows the same registry: a Host with gfs.read
+    // and no gfs.write resolves the folder but has no tool that writes into it.
+    const folderTools: TurnContextFolderTools = {
+      write: FOLDER_WRITE_TOOLS.some(name => loopConfig.toolRegistry.get(name) !== null),
+      list: loopConfig.toolRegistry.get(GFS_LIST_TOOL) !== null,
+    }
+    if (
+      appConfig.promptCacheEnabled ||
+      hasFileAttachments ||
+      hasFileReferences ||
+      hasLocationReferences ||
+      saveAvailable
+    ) {
+      this.prependTurnContextBlock(messages, saveAvailable, folderTools)
     }
     if (this.turnTiming) {
       // buildLoopConfig assembles the tool registry (MCP schemas) and the
@@ -1408,7 +1436,11 @@ export class TaskExecutor {
    * no human user text we inject a synthetic `<cron task>` placeholder so the
    * wire shape stays consistent (P1-004 §5.5).
    */
-  private prependTurnContextBlock(messages: ChatMessage[], saveAvailable: boolean): void {
+  private prependTurnContextBlock(
+    messages: ChatMessage[],
+    saveAvailable: boolean,
+    folderTools: TurnContextFolderTools
+  ): void {
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]
       if (m.role !== 'user') continue
@@ -1431,6 +1463,10 @@ export class TaskExecutor {
         referencedFiles: referencedFilesForTurnContext(
           this.task.sourceMessage?.fileReferenceResolutions
         ),
+        referencedFolders: referencedFoldersForTurnContext(
+          this.task.sourceMessage?.locationReferenceResolutions
+        ),
+        folderTools,
         preparedGfsFiles: this.preparedGfsFiles,
       })
       const isCron = this.task.cronJobId !== undefined

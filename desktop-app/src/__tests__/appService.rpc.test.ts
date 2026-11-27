@@ -3,7 +3,11 @@ import fs from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
-import { buildGfsFileReference, classifyBytes } from '@clerum/gfs-interaction-policy'
+import {
+  buildGfsFileReference,
+  buildGfsLocationReference,
+  classifyBytes,
+} from '@clerum/gfs-interaction-policy'
 import { AppService } from '../appService.js'
 import { __setChatStoreBaseDirForTests } from '../chatStoreBinding.js'
 import { ApiError } from '../httpClient.js'
@@ -106,7 +110,72 @@ describe('AppService.invokeHostMessage', () => {
       threadId: undefined,
       attachments: undefined,
     })
-    expect(service.rpcClient.invokeHostMessage.mock.calls[0][3]).toEqual({ async: true })
+    expect(service.rpcClient.invokeHostMessage.mock.calls[0][3]).toEqual({
+      async: true,
+      idempotencyKey: expect.any(String),
+    })
+  })
+
+  it('the refresh retry reuses the Idempotency-Key of the first attempt', async () => {
+    const service = new AppService() as any
+    service.sessionToken = 'session-token'
+    service.me = {
+      id: '00000000-0000-4000-8000-000000000001',
+      teamId: '00000000-0000-4000-8000-0000000000aa',
+    }
+    service.rpcTokenManager = {
+      getOrIssue: vi
+        .fn()
+        .mockResolvedValueOnce({ token: 'rpc-test-token-1' })
+        .mockResolvedValueOnce({ token: 'rpc-test-token-2' }),
+      clear: vi.fn(),
+    }
+    service.rpcClient = {
+      invokeHostMessage: vi
+        .fn()
+        .mockRejectedValueOnce(new ApiError('401 Unauthorized: bad token', 401, ''))
+        .mockResolvedValueOnce({ taskId: 'task-1', status: 'pending' }),
+    }
+
+    await service.invokeHostMessage('chatllm', { content: 'hello' }, ['chatllm'], { async: true })
+
+    const calls = service.rpcClient.invokeHostMessage.mock.calls
+    expect(calls).toHaveLength(2)
+    // Witnesses that the refresh-retry branch ran: the cached token was
+    // dropped and the retry carried the re-issued token.
+    expect(service.rpcTokenManager.clear).toHaveBeenCalledTimes(1)
+    expect(calls[0][0]).toBe('rpc-test-token-1')
+    expect(calls[1][0]).toBe('rpc-test-token-2')
+    expect(calls[0][3].idempotencyKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    )
+    expect(calls[1][3]).toEqual({ async: true, idempotencyKey: calls[0][3].idempotencyKey })
+  })
+
+  it('two sends get different Idempotency-Keys', async () => {
+    const service = new AppService() as any
+    service.sessionToken = 'session-token'
+    service.me = {
+      id: '00000000-0000-4000-8000-000000000001',
+      teamId: '00000000-0000-4000-8000-0000000000aa',
+    }
+    service.rpcTokenManager = {
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token' }),
+      clear: vi.fn(),
+    }
+    service.rpcClient = {
+      invokeHostMessage: vi.fn().mockResolvedValue({ taskId: 'task-1', status: 'pending' }),
+    }
+
+    await service.invokeHostMessage('chatllm', { content: 'same text' }, ['chatllm'])
+    await service.invokeHostMessage('chatllm', { content: 'same text' }, ['chatllm'])
+
+    const calls = service.rpcClient.invokeHostMessage.mock.calls
+    expect(calls).toHaveLength(2)
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    expect(calls[0][3].idempotencyKey).toMatch(uuid)
+    expect(calls[1][3].idempotencyKey).toMatch(uuid)
+    expect(calls[1][3].idempotencyKey).not.toBe(calls[0][3].idempotencyKey)
   })
 
   it('forwards a 5 MiB JPEG without letting the payload choose identity, host, or scopes', async () => {
@@ -338,6 +407,50 @@ describe('AppService.invokeHostMessage', () => {
       ])
       expect(issueToken).toHaveBeenCalledTimes(1)
       expect(service.rpcClient.invokeHostMessage).toHaveBeenCalledTimes(1)
+    })
+
+    it('forwards the folder next to the file references', async () => {
+      const service = serviceWithRpc()
+      const reference = fileReference()
+      const built = buildGfsLocationReference({
+        drive: 'main',
+        resourceId: 'abcdef1234567890abcdef1234567890',
+        gfsUri: 'gfs://main/abcdef1234567890abcdef1234567890',
+        name: 'Reports',
+      })
+      if (!built.ok) throw new Error(built.message)
+
+      await service.invokeHostMessage(
+        'chatllm',
+        {
+          content: 'Save it here',
+          fileReferences: [reference],
+          locationReferences: [built.value],
+        },
+        ['chatllm']
+      )
+
+      expect(service.rpcClient.invokeHostMessage.mock.calls[0][2]).toMatchObject({
+        content: 'Save it here',
+        fileReferences: [reference],
+        locationReferences: [built.value],
+      })
+    })
+
+    it('rejects a non-list folder value before issuing an RPC token', async () => {
+      const service = serviceWithRpc()
+      const issueToken = vi.spyOn(service, 'issueRpcTokenForHostRefs')
+      await expect(
+        service.invokeHostMessage('chatllm', { content: 'hello', locationReferences: {} }, [
+          'chatllm',
+        ])
+      ).rejects.toThrow('Location references must be a list.')
+      expect(issueToken).toHaveBeenCalledTimes(0)
+      // Positive control: without the field the message goes out.
+      await service.invokeHostMessage('chatllm', { content: 'hello' }, ['chatllm'])
+      expect(service.rpcClient.invokeHostMessage.mock.calls[0][2]).not.toHaveProperty(
+        'locationReferences'
+      )
     })
   })
 

@@ -1,0 +1,533 @@
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { onlineManager } from '@tanstack/react-query'
+import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { describeGfsGrantError } from '@lib/gfsGrantErrors'
+import {
+  DIRECT_GRANT,
+  DOWNGRADE_SUCCESS,
+  MEMBER,
+  PARENT_ONE,
+  PARENT_ONE_GRANT,
+  PARENT_TWO,
+  PARENT_TWO_GRANT,
+  type ParentUpdatePage,
+  REMOVE_SUCCESS,
+  SESSION_GENERATION,
+  TARGET_ID,
+  deferred,
+  mountParentUpdatePage,
+  waitSettled,
+  writeTargets,
+} from './__fixtures__/parentUpdateHarness'
+
+const pages: ParentUpdatePage[] = []
+async function mount(options?: Parameters<typeof mountParentUpdatePage>[0]) {
+  const page = await mountParentUpdatePage(options)
+  pages.push(page)
+  return page
+}
+
+afterEach(() => {
+  cleanup()
+  pages.forEach(page => page.queryClient.clear())
+  pages.length = 0
+  onlineManager.setOnline(true)
+  vi.restoreAllMocks()
+})
+
+const REMOVE_WRITES = [
+  `revokeGrant:${PARENT_ONE_GRANT}`,
+  `revokeGrant:${PARENT_TWO_GRANT}`,
+  `revokeGrant:${DIRECT_GRANT}`,
+]
+const DOWNGRADE_WRITES = [`grant:${PARENT_ONE}`, `grant:${PARENT_TWO}`, `grant:${TARGET_ID}`]
+const DENIED_PREFLIGHT = `Your access on Team folder does not allow making ${MEMBER} Read-only.`
+
+/** Inherited re-walks of the ancestors: the dialog's closing refresh, not a mutation's own. */
+function ancestorReads(page: ParentUpdatePage): number {
+  return page.listGrants.mock.calls.filter(([resourceId]) => resourceId === PARENT_ONE).length
+}
+
+const modes = [
+  {
+    name: 'remove',
+    ipc: (page: ParentUpdatePage) => page.revokeGrant,
+    open: (page: ParentUpdatePage) => page.openRemovePlan(),
+    writes: REMOVE_WRITES,
+    success: REMOVE_SUCCESS,
+  },
+  {
+    name: 'change-role',
+    ipc: (page: ParentUpdatePage) => page.grant,
+    open: (page: ParentUpdatePage) => page.startDowngrade(),
+    writes: DOWNGRADE_WRITES,
+    success: DOWNGRADE_SUCCESS,
+  },
+] as const
+
+/** Starts a run whose first write is held; returns once that write left. */
+async function startHeldRun(page: ParentUpdatePage, mode: (typeof modes)[number]) {
+  mode.ipc(page).hold()
+  await mode.open(page)
+  await page.confirmPlan()
+  await waitFor(() => expect(mode.ipc(page).pending).toHaveLength(1))
+}
+
+async function releaseWrite(page: ParentUpdatePage, mode: (typeof modes)[number], index: number) {
+  await act(async () => mode.ipc(page).pending[index]!.resolve(undefined))
+}
+
+async function finishRun(page: ParentUpdatePage, mode: (typeof modes)[number]) {
+  mode.ipc(page).hold(false)
+  for (const call of mode.ipc(page).pending) await act(async () => call.resolve(undefined))
+  await waitSettled()
+}
+
+describe('parent-folder pre-flight', () => {
+  it('S-1 shows nothing once the renderer publishes another session mid pre-flight', async () => {
+    const page = await mount()
+    page.holdAffordancesOf(PARENT_ONE)
+    await page.startDowngrade()
+    await waitFor(() => expect(page.heldAffordances(PARENT_ONE)).toHaveLength(1))
+
+    page.switchMain()
+    await page.publishGeneration()
+    await waitFor(() => expect(page.shareDialog()).toBeNull())
+    await act(async () => page.heldAffordances(PARENT_ONE)[0]!.resolve(page.freshDenied))
+    await waitSettled()
+
+    expect(page.affordances).toHaveBeenCalledWith(PARENT_ONE, 'main')
+    expect(page.pushToast).not.toHaveBeenCalled()
+    expect(page.confirmation()).toBeNull()
+  })
+
+  it('S-1b shows nothing once the session is revoked mid pre-flight', async () => {
+    const page = await mount()
+    page.holdAffordancesOf(PARENT_ONE)
+    await page.startDowngrade()
+    await waitFor(() => expect(page.heldAffordances(PARENT_ONE)).toHaveLength(1))
+
+    page.revoke()
+    await waitFor(() => expect(page.shareDialog()).toBeNull())
+    await act(async () => page.heldAffordances(PARENT_ONE)[0]!.resolve(page.freshDenied))
+    await waitSettled()
+
+    expect(page.accessState()).toBe('revoked')
+    expect(page.affordances).toHaveBeenCalledWith(PARENT_ONE, 'main')
+    expect(page.pushToast).not.toHaveBeenCalled()
+  })
+
+  it('S-1c reports a pre-flight refusal only while the Share dialog is still open', async () => {
+    const open = await mount()
+    open.holdAffordancesOf(PARENT_ONE)
+    await open.startDowngrade()
+    await waitFor(() => expect(open.heldAffordances(PARENT_ONE)).toHaveLength(1))
+    await act(async () => open.heldAffordances(PARENT_ONE)[0]!.resolve(open.freshDenied))
+    await waitFor(() => expect(open.pushToast).toHaveBeenCalledWith(DENIED_PREFLIGHT, 'error'))
+    cleanup()
+
+    const closed = await mount()
+    closed.holdAffordancesOf(PARENT_ONE)
+    await closed.startDowngrade()
+    await waitFor(() => expect(closed.heldAffordances(PARENT_ONE)).toHaveLength(1))
+    fireEvent.click(closed.closeButton())
+    await waitFor(() => expect(closed.shareDialog()).toBeNull())
+    await act(async () => closed.heldAffordances(PARENT_ONE)[0]!.resolve(closed.freshDenied))
+    await waitSettled()
+
+    expect(closed.affordances).toHaveBeenCalledWith(PARENT_ONE, 'main')
+    expect(closed.pushToast).not.toHaveBeenCalled()
+  })
+
+  it('S-7p shows no pre-flight refusal once main runs another session', async () => {
+    const page = await mount()
+    page.holdAffordancesOf(PARENT_ONE)
+    await page.startDowngrade()
+    await waitFor(() => expect(page.heldAffordances(PARENT_ONE)).toHaveLength(1))
+    page.switchMain()
+    const confirmations = page.getSessionGeneration.mock.calls.length
+
+    await act(async () => page.heldAffordances(PARENT_ONE)[0]!.resolve(page.freshDenied))
+    await waitSettled()
+
+    expect(page.pushToast).not.toHaveBeenCalled()
+    // The refusal was reached and asked main before deciding.
+    expect(page.getSessionGeneration.mock.calls.length).toBeGreaterThan(confirmations)
+    expect(page.shareDialog()).not.toBeNull()
+  })
+
+  it('S-1c reports a pre-flight read failure only while the Share dialog is still open', async () => {
+    const open = await mount()
+    const failure = await open.affordancesFailure(500)
+    const message = describeGfsGrantError(new Error(failure)).message
+    open.holdAffordancesOf(PARENT_ONE)
+    await open.startDowngrade()
+    await waitFor(() => expect(open.heldAffordances(PARENT_ONE)).toHaveLength(1))
+    await act(async () => open.heldAffordances(PARENT_ONE)[0]!.reject(new Error(failure)))
+    await waitFor(() => expect(open.pushToast).toHaveBeenCalledWith(message, 'error'))
+    expect(open.accessState()).toBe('active')
+    cleanup()
+
+    const closed = await mount()
+    closed.holdAffordancesOf(PARENT_ONE)
+    await closed.startDowngrade()
+    await waitFor(() => expect(closed.heldAffordances(PARENT_ONE)).toHaveLength(1))
+    fireEvent.click(closed.closeButton())
+    await waitFor(() => expect(closed.shareDialog()).toBeNull())
+    await act(async () => closed.heldAffordances(PARENT_ONE)[0]!.reject(new Error(failure)))
+    await waitSettled()
+
+    expect(closed.pushToast).not.toHaveBeenCalled()
+    expect(closed.affordances).toHaveBeenCalledWith(PARENT_ONE, 'main')
+    expect(closed.accessState()).toBe('active')
+  })
+
+  it('S-1d revokes on a pre-flight 401 even after the Share dialog closed', async () => {
+    const page = await mount()
+    const unauthorized = await page.affordancesFailure(401)
+    page.holdAffordancesOf(PARENT_ONE)
+    await page.startDowngrade()
+    await waitFor(() => expect(page.heldAffordances(PARENT_ONE)).toHaveLength(1))
+    fireEvent.click(page.closeButton())
+    await waitFor(() => expect(page.shareDialog()).toBeNull())
+    expect(page.accessState()).toBe('active')
+
+    await act(async () => page.heldAffordances(PARENT_ONE)[0]!.reject(new Error(unauthorized)))
+    await waitSettled()
+
+    expect(page.accessState()).toBe('revoked')
+    expect(page.pushToast).not.toHaveBeenCalled()
+  })
+})
+
+describe('parent-folder confirmation run', () => {
+  for (const mode of modes) {
+    it(`S-2 writes nothing when main switched before the ${mode.name} confirmation`, async () => {
+      const page = await mount()
+      await mode.open(page)
+      await screen.findByRole('alertdialog')
+      page.switchMain()
+      const confirmations = page.getSessionGeneration.mock.calls.length
+
+      await page.confirmPlan()
+      await waitSettled()
+
+      expect(page.writes).toEqual([])
+      expect(page.pushToast).not.toHaveBeenCalled()
+      expect(page.getSessionGeneration.mock.calls.length).toBeGreaterThan(confirmations)
+      expect(page.closeButton().disabled).toBe(false)
+    })
+
+    it(`${mode.name === 'remove' ? 'S-3' : 'S-4'} stops the ${mode.name} run when main switches between writes`, async () => {
+      const page = await mount()
+      await startHeldRun(page, mode)
+      const walks = ancestorReads(page)
+      page.switchMain()
+      const confirmations = page.getSessionGeneration.mock.calls.length
+
+      await finishRun(page, mode)
+
+      expect(writeTargets(page.writes)).toEqual(mode.writes.slice(0, 1))
+      expect(page.getSessionGeneration.mock.calls.length).toBeGreaterThan(confirmations)
+      expect(page.pushToast).not.toHaveBeenCalled()
+      expect(ancestorReads(page)).toBe(walks)
+      expect(page.closeButton().disabled).toBe(false)
+    })
+
+    it(`S-3c skips the direct alignment of a ${mode.name} run when main switches after the folders`, async () => {
+      const page = await mount()
+      await startHeldRun(page, mode)
+      await releaseWrite(page, mode, 0)
+      await waitFor(() => expect(mode.ipc(page).pending).toHaveLength(2))
+      page.switchMain()
+
+      await finishRun(page, mode)
+
+      expect(writeTargets(page.writes)).toEqual(mode.writes.slice(0, 2))
+      expect(page.pushToast).not.toHaveBeenCalled()
+    })
+
+    it(`S-7 shows no ${mode.name} outcome when main switches after the last write`, async () => {
+      const page = await mount()
+      await startHeldRun(page, mode)
+      await releaseWrite(page, mode, 0)
+      await waitFor(() => expect(mode.ipc(page).pending).toHaveLength(2))
+      await releaseWrite(page, mode, 1)
+      await waitFor(() => expect(mode.ipc(page).pending).toHaveLength(3))
+      page.switchMain()
+      const confirmations = page.getSessionGeneration.mock.calls.length
+
+      await finishRun(page, mode)
+
+      expect(page.pushToast).not.toHaveBeenCalled()
+      expect(writeTargets(page.writes)).toEqual(mode.writes)
+      // The outcome was attempted: it asked main before deciding.
+      expect(page.getSessionGeneration.mock.calls.length).toBeGreaterThan(confirmations)
+    })
+  }
+
+  it('S-3b stops the run once the session is revoked between writes', async () => {
+    const page = await mount()
+    await startHeldRun(page, modes[0])
+    page.revoke()
+    await waitFor(() => expect(page.shareDialog()).toBeNull())
+
+    await finishRun(page, modes[0])
+
+    expect(page.accessState()).toBe('revoked')
+    expect(writeTargets(page.writes)).toEqual(REMOVE_WRITES.slice(0, 1))
+    expect(page.pushToast).not.toHaveBeenCalled()
+  })
+
+  for (const revocation of ['revokeGfsSessionAccess', 'purgeGfsSessionCache'] as const) {
+    it(`S-3d stays stopped after ${revocation} and a retry that restores access mid-write`, async () => {
+      const page = await mount()
+      await startHeldRun(page, modes[0])
+      if (revocation === 'revokeGfsSessionAccess') page.revoke()
+      else page.purge()
+      await waitFor(() => expect(page.shareDialog()).toBeNull())
+      await page.retryAccess()
+
+      await finishRun(page, modes[0])
+
+      // Access really is back for this session; only the run remembers.
+      expect(page.accessState()).toBe('active')
+      expect(writeTargets(page.writes)).toEqual(REMOVE_WRITES.slice(0, 1))
+      expect(page.pushToast).not.toHaveBeenCalled()
+    })
+  }
+
+  it('S-5 keeps Share open while the run writes, then completes it and frees the dialog', async () => {
+    const page = await mount()
+    const confirmations = page.getSessionGeneration.mock.calls.length
+    await startHeldRun(page, modes[0])
+    const dialog = page.shareDialog()!
+
+    expect(page.closeButton().disabled).toBe(true)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    fireEvent.mouseDown(dialog.parentElement!)
+    fireEvent.click(page.closeButton())
+    await waitSettled()
+    expect(page.shareDialog()).not.toBeNull()
+
+    await finishRun(page, modes[0])
+
+    expect(writeTargets(page.writes)).toEqual(REMOVE_WRITES)
+    await waitFor(() => expect(page.pushToast).toHaveBeenCalledWith(REMOVE_SUCCESS, 'success'))
+    expect(page.pushToast).toHaveBeenCalledOnce()
+    // One session confirmation per write, plus the outcome's own.
+    expect(page.getSessionGeneration.mock.calls.length - confirmations).toBe(
+      REMOVE_WRITES.length + 1
+    )
+    await waitFor(() => expect(page.closeButton().disabled).toBe(false))
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitFor(() => expect(page.shareDialog()).toBeNull())
+  })
+
+  it('S-5b writes nothing when the user navigates away before the first write is admitted', async () => {
+    const page = await mount()
+    const admission = deferred<number>()
+    await page.openRemovePlan()
+    await screen.findByRole('alertdialog')
+    page.getSessionGeneration.mockImplementationOnce(() => admission.promise)
+    const confirmations = page.getSessionGeneration.mock.calls.length
+
+    await page.confirmPlan()
+    await waitFor(() => expect(page.getSessionGeneration.mock.calls.length).toBe(confirmations + 1))
+    await page.navigateAway()
+    await act(async () => admission.resolve(SESSION_GENERATION))
+    await waitSettled()
+
+    expect(page.writes).toEqual([])
+    expect(page.pushToast).not.toHaveBeenCalled()
+  })
+
+  it('S-5n finishes a started run and reports it after the user navigates away', async () => {
+    const page = await mount()
+    await startHeldRun(page, modes[0])
+    await page.navigateAway()
+    expect(screen.queryByRole('heading', { name: 'Files' })).toBeNull()
+
+    await finishRun(page, modes[0])
+
+    expect(writeTargets(page.writes)).toEqual(REMOVE_WRITES)
+    await waitFor(() => expect(page.pushToast).toHaveBeenCalledWith(REMOVE_SUCCESS, 'success'))
+    expect(page.pushToast).toHaveBeenCalledOnce()
+  })
+
+  it('S-5c keeps Share open until the run ends, not until a direct role change ends', async () => {
+    const page = await mount({ agentGrant: true })
+    page.revokeGrant.hold()
+    page.holdAffordancesOf(TARGET_ID)
+    await page.startAgentRoleChange()
+    await waitFor(() => expect(page.heldAffordances(TARGET_ID)).toHaveLength(1))
+    await page.openRemovePlan()
+    await page.confirmPlan()
+    await waitFor(() => expect(page.revokeGrant.pending).toHaveLength(1))
+
+    await act(async () => page.heldAffordances(TARGET_ID)[0]!.resolve(page.freshPositive))
+    await waitFor(() =>
+      expect(page.grant.fn).toHaveBeenCalledWith(
+        TARGET_ID,
+        ['host:1st:mcp-host/chatllm'],
+        expect.arrayContaining(['read', 'write']),
+        'main',
+        true
+      )
+    )
+    await waitSettled()
+
+    expect(page.closeButton().disabled).toBe(true)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitSettled()
+    expect(page.shareDialog()).not.toBeNull()
+
+    await finishRun(page, modes[0])
+    expect(writeTargets(page.writes.filter(write => write.name === 'revokeGrant'))).toEqual(
+      REMOVE_WRITES
+    )
+    await waitFor(() => expect(page.closeButton().disabled).toBe(false))
+  })
+
+  it('S-5d never starts a second confirmation while one runs', async () => {
+    const page = await mount({ agentGrant: true })
+    page.revokeGrant.hold()
+    page.holdAffordancesOf(TARGET_ID)
+    await page.startAgentRoleChange()
+    await waitFor(() => expect(page.heldAffordances(TARGET_ID)).toHaveLength(1))
+    await page.openRemovePlan()
+    await page.confirmPlan()
+    await waitFor(() => expect(page.revokeGrant.pending).toHaveLength(1))
+    await act(async () => page.heldAffordances(TARGET_ID)[0]!.resolve(page.freshPositive))
+    await waitFor(() => expect(page.grant.fn).toHaveBeenCalledOnce())
+    await waitSettled()
+
+    const memberRole = screen.getByRole('button', {
+      name: `Access role for ${MEMBER}`,
+    }) as HTMLButtonElement
+    expect(memberRole.disabled).toBe(true)
+    // The user still tries: the disabled control opens no second plan.
+    fireEvent.click(memberRole)
+    expect(screen.queryByRole('option', { name: 'Read' })).toBeNull()
+    await waitSettled()
+    expect(writeTargets(page.writes.filter(write => write.name === 'grant'))).toEqual([
+      `grant:${TARGET_ID}`,
+    ])
+
+    await finishRun(page, modes[0])
+    expect(writeTargets(page.writes.filter(write => write.name === 'revokeGrant'))).toEqual(
+      REMOVE_WRITES
+    )
+    expect(page.grant.fn).toHaveBeenCalledOnce()
+    await waitFor(() => expect(memberRole.disabled).toBe(false))
+  })
+
+  it('S-5e holds a plan opened mid-run until the run ends, then confirms it', async () => {
+    const page = await mount()
+    await startHeldRun(page, modes[1])
+    await page.openRemovePlan()
+    const plan = await screen.findByRole('alertdialog')
+    const remove = () => within(plan).getByRole('button', { name: 'Remove' }) as HTMLButtonElement
+    const cancel = () => within(plan).getByRole('button', { name: 'Cancel' }) as HTMLButtonElement
+
+    expect(remove().disabled).toBe(true)
+    expect(cancel().disabled).toBe(true)
+    fireEvent.click(remove())
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitSettled()
+    expect(screen.queryByRole('alertdialog')).not.toBeNull()
+    expect(page.revokeGrant.fn).not.toHaveBeenCalled()
+    // The first run is the one in flight, held on its first folder.
+    expect(writeTargets(page.writes)).toEqual(DOWNGRADE_WRITES.slice(0, 1))
+
+    await finishRun(page, modes[1])
+    expect(writeTargets(page.writes)).toEqual(DOWNGRADE_WRITES)
+    await waitFor(() => expect(remove().disabled).toBe(false))
+    fireEvent.click(remove())
+    await waitFor(() =>
+      expect(writeTargets(page.writes.slice(DOWNGRADE_WRITES.length))).toEqual(REMOVE_WRITES)
+    )
+  })
+
+  it('S-6 reports how far a run got after an ordinary failure and refreshes the lists', async () => {
+    const page = await mount()
+    const failure = await page.failureMessage(500)
+    await startHeldRun(page, modes[0])
+    await releaseWrite(page, modes[0], 0)
+    await waitFor(() => expect(page.revokeGrant.pending).toHaveLength(2))
+    const walks = ancestorReads(page)
+
+    await act(async () => page.revokeGrant.pending[1]!.reject(new Error(failure)))
+    await waitSettled()
+
+    expect(writeTargets(page.writes)).toEqual(REMOVE_WRITES.slice(0, 2))
+    await waitFor(() =>
+      expect(page.pushToast).toHaveBeenCalledWith(
+        expect.stringContaining(`Removed from 1 of 2 folders — Root share still grants access`),
+        'error'
+      )
+    )
+    expect(page.pushToast).toHaveBeenCalledOnce()
+    await waitFor(() => expect(ancestorReads(page)).toBeGreaterThan(walks))
+  })
+
+  it('S-8 stops without a toast or refresh when main cannot confirm the session', async () => {
+    const page = await mount()
+    await startHeldRun(page, modes[0])
+    const walks = ancestorReads(page)
+    page.getSessionGeneration.mockRejectedValueOnce(new Error('session IPC failed'))
+    const confirmations = page.getSessionGeneration.mock.calls.length
+
+    await finishRun(page, modes[0])
+
+    expect(page.getSessionGeneration.mock.calls.length).toBe(confirmations + 1)
+    expect(writeTargets(page.writes)).toEqual(REMOVE_WRITES.slice(0, 1))
+    expect(page.pushToast).not.toHaveBeenCalled()
+    expect(ancestorReads(page)).toBe(walks)
+    expect(page.closeButton().disabled).toBe(false)
+  })
+
+  for (const mode of modes) {
+    it(`S-10 sends every ${mode.name} write while the renderer is offline instead of pausing it`, async () => {
+      const page = await mount()
+      await mode.open(page)
+      await screen.findByRole('alertdialog')
+      page.goOffline()
+      expect(onlineManager.isOnline()).toBe(false)
+
+      await page.confirmPlan()
+      await waitSettled()
+
+      expect(writeTargets(page.writes)).toEqual(mode.writes)
+      await waitFor(() => expect(page.pushToast).toHaveBeenCalledWith(mode.success, 'success'))
+      expect(page.closeButton().disabled).toBe(false)
+    })
+  }
+})
+
+describe('direct role change', () => {
+  it('reports a missing manage permission only into the session that asked', async () => {
+    const message = 'You do not have manage access to Folder A.'
+    const same = await mount({ agentGrant: true })
+    same.holdAffordancesOf(TARGET_ID)
+    await same.startAgentRoleChange()
+    await waitFor(() => expect(same.heldAffordances(TARGET_ID)).toHaveLength(1))
+    await act(async () => same.heldAffordances(TARGET_ID)[0]!.resolve(same.freshDenied))
+    await waitFor(() => expect(same.pushToast).toHaveBeenCalledWith(message, 'error'))
+    cleanup()
+
+    const switched = await mount({ agentGrant: true })
+    switched.holdAffordancesOf(TARGET_ID)
+    await switched.startAgentRoleChange()
+    await waitFor(() => expect(switched.heldAffordances(TARGET_ID)).toHaveLength(1))
+    switched.switchMain()
+    const confirmations = switched.getSessionGeneration.mock.calls.length
+    await act(async () => switched.heldAffordances(TARGET_ID)[0]!.resolve(switched.freshDenied))
+    await waitSettled()
+
+    expect(switched.pushToast).not.toHaveBeenCalled()
+    expect(switched.getSessionGeneration.mock.calls.length).toBeGreaterThan(confirmations)
+    expect(switched.grant.fn).not.toHaveBeenCalled()
+  })
+})

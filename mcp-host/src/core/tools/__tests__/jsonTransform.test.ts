@@ -1,11 +1,18 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { logger } from '../../../logger'
 import { protectedWorkspacePathMessage } from '../../../workspace/protectedPaths'
 import type { ToolOutput } from '../../types'
-import { JSON_TRANSFORM_MAX_FILE_BYTES, JsonTransformTool } from '../jsonTransform'
+import {
+  JSON_TRANSFORM_MAX_FILE_BYTES,
+  JSON_TRANSFORM_MAX_RESULT_BYTES,
+  JSON_TRANSFORM_MAX_RESULT_DEPTH,
+  JsonTransformTool,
+} from '../jsonTransform'
 
 /** The tool before `file` and before `path` applied to every operation (8b3da2e2b), verbatim. */
 class PreviousJsonTransform {
@@ -392,6 +399,172 @@ describe('JsonTransformTool with file', () => {
     expect(strip(await tool.execute({ file: 'data/big.json', operation: 'parse' }))).toEqual({
       content: 'Error: the file is not valid JSON.',
       is_error: true,
+    })
+  })
+})
+
+describe('JsonTransformTool result bound (indented size and depth)', () => {
+  let root: string
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'json-transform-bound-'))
+  })
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  const TOO_LARGE = {
+    content: 'Transform error: the result is larger than 10 MiB.',
+    is_error: true,
+  }
+  const TOO_DEEP = {
+    content: 'Transform error: the result is nested more than 256 levels deep.',
+    is_error: true,
+  }
+  const indentedBytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v, null, 2))
+  const nested = (depth: number, leaf: unknown): unknown => {
+    let v = leaf
+    for (let i = 1; i < depth; i++) v = [v]
+    return v
+  }
+
+  it('a small file whose indented result is just over 10 MiB is refused at every indenting site', async () => {
+    // 30 levels of arrays around 170,000 zeros: about 340 KB compact, about 11 MB indented.
+    const value = { data: nested(30, new Array(170_000).fill(0)) }
+    const text = JSON.stringify(value)
+    expect(Buffer.byteLength(text)).toBeLessThan(JSON_TRANSFORM_MAX_FILE_BYTES)
+    expect(indentedBytes(value)).toBeGreaterThan(JSON_TRANSFORM_MAX_RESULT_BYTES)
+    expect(indentedBytes(value)).toBeLessThan(JSON_TRANSFORM_MAX_RESULT_BYTES * 1.2)
+    writeFileSync(join(root, 'big.json'), text)
+    const tool = new JsonTransformTool(root)
+    for (const source of [{ file: 'big.json' }, { input: text }]) {
+      for (const call of [
+        { operation: 'parse' },
+        { operation: 'stringify' },
+        { operation: 'values' },
+        { operation: 'get', path: 'data' },
+        { operation: 'stringify', path: 'data' },
+      ]) {
+        expect(strip(await tool.execute({ ...source, ...call }))).toEqual(TOO_LARGE)
+      }
+      // The same value under the bound still answers: length needs no indenting.
+      expect(strip(await tool.execute({ ...source, operation: 'length', path: 'data' }))).toEqual({
+        content: '1',
+        is_error: false,
+      })
+    }
+  })
+
+  it.each([
+    ['a flat object', (pad: string) => ({ k: pad, n: 1, e: [], o: {} })],
+    [
+      'nested arrays and objects',
+      (pad: string) => ({ a: [[1, [2, { b: pad }]], {}], c: { d: [] } }),
+    ],
+    ['multi-byte text and escapes', (pad: string) => ({ 'clé\n': ['é\t"', pad, null, true] })],
+    ['a deep chain', (pad: string) => nested(200, { pad })],
+  ])(
+    '%s: exactly 10 MiB indented is returned whole, one byte more is refused',
+    async (_l, shape) => {
+      const tool = new JsonTransformTool(root)
+      const base = indentedBytes(shape(''))
+      const atBound = shape('x'.repeat(JSON_TRANSFORM_MAX_RESULT_BYTES - base))
+      expect(indentedBytes(atBound)).toBe(JSON_TRANSFORM_MAX_RESULT_BYTES)
+      const result = await tool.execute({ input: JSON.stringify(atBound), operation: 'parse' })
+      expect(result.is_error).toBe(false)
+      expect(result.content).toBe(JSON.stringify(atBound, null, 2))
+      const over = shape('x'.repeat(JSON_TRANSFORM_MAX_RESULT_BYTES - base + 1))
+      expect(
+        strip(await tool.execute({ input: JSON.stringify(over), operation: 'parse' }))
+      ).toEqual(TOO_LARGE)
+    }
+  )
+
+  it('256 levels are indented; 257 levels, and a stack-deep chain, are refused with fixed text', async () => {
+    const tool = new JsonTransformTool(root)
+    const atLimit = nested(JSON_TRANSFORM_MAX_RESULT_DEPTH, 0)
+    const ok = await tool.execute({ input: JSON.stringify(atLimit), operation: 'parse' })
+    expect(strip(ok)).toEqual({ content: JSON.stringify(atLimit, null, 2), is_error: false })
+    for (const depth of [JSON_TRANSFORM_MAX_RESULT_DEPTH + 1, 20_000]) {
+      const deep = '['.repeat(depth) + ']'.repeat(depth)
+      writeFileSync(join(root, 'deep.json'), deep)
+      for (const source of [{ input: deep }, { file: 'deep.json' }]) {
+        expect(strip(await tool.execute({ ...source, operation: 'stringify' }))).toEqual(TOO_DEEP)
+      }
+    }
+  })
+})
+
+describe('JsonTransformTool error branches and path edges', () => {
+  let root: string
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'json-transform-edge-'))
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('a file tools root that cannot be resolved returns the fixed text and logs the code', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const missingRoot = join(root, 'no-such-root')
+    const tool = new JsonTransformTool(missingRoot)
+    expect(strip(await tool.execute({ file: 'a.json', operation: 'parse' }))).toEqual({
+      content: 'Error: the file could not be read.',
+      is_error: true,
+    })
+    expect(warn).toHaveBeenCalledWith(
+      { tool: 'json_transform', code: 'ENOENT' },
+      'json_transform could not resolve the file tools root'
+    )
+  })
+
+  it('an open that fails with another errno returns the fixed text, never the host path', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    // open(2) on a Unix socket fails with ENXIO on Linux and EOPNOTSUPP on macOS
+    // (which Node reports as an unknown system error), whoever runs the test.
+    const server = createServer()
+    await new Promise<void>(resolve => server.listen(join(root, 's.sock'), resolve))
+    try {
+      const result = await new JsonTransformTool(root).execute({
+        file: 's.sock',
+        operation: 'parse',
+      })
+      expect(strip(result)).toEqual({
+        content: 'Error: the file could not be read.',
+        is_error: true,
+      })
+      expect(result.content).not.toContain(root)
+      const [fields, message] = warn.mock.calls.at(-1) as [Record<string, unknown>, string]
+      expect(message).toBe('json_transform file read failed')
+      expect(fields.tool).toBe('json_transform')
+      expect(typeof fields.code).toBe('string')
+      expect(['ENOENT', 'EISDIR']).not.toContain(fields.code)
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
+  it('stringify at a missing path returns null', async () => {
+    const tool = new JsonTransformTool()
+    expect(
+      strip(await tool.execute({ input: '{"a":1}', operation: 'stringify', path: 'b.c' }))
+    ).toEqual({ content: 'null', is_error: false })
+  })
+
+  it('a path indexes into a string by position, and reads its length', async () => {
+    const tool = new JsonTransformTool()
+    const input = '{"name":"abc"}'
+    expect(strip(await tool.execute({ input, operation: 'get', path: 'name.1' }))).toEqual({
+      content: 'b',
+      is_error: false,
+    })
+    expect(strip(await tool.execute({ input, operation: 'get', path: 'name.length' }))).toEqual({
+      content: '3',
+      is_error: false,
+    })
+    expect(strip(await tool.execute({ input, operation: 'get', path: 'name.9' }))).toEqual({
+      content: 'null',
+      is_error: false,
     })
   })
 })

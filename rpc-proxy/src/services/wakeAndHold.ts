@@ -3,6 +3,7 @@ import type { AuthorizedActionV2 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
 import type { ResolvedServerConnection, RpcAccessClaims } from '../types.js'
 import { type HostWakeApiResponse, requestHostWakeFromControlApi } from './controlApiRestService.js'
+import type { HostResolveRefusal } from './hostAccessDenial.js'
 import { forwardHostHealth } from './mcpHostRestService.js'
 
 /** Strip control characters and newlines from user-derived hostRef before log interpolation. */
@@ -758,6 +759,19 @@ export type RespondWithWakeAndHoldOptions = {
   authorizedActionV2?: AuthorizedActionV2
   reauthorizeV2?: () => Promise<void>
   /**
+   * V1 requests: runs before each retry attempt and re-resolves the Host
+   * connection when the held edge assertion is near its `exp`, so the retry
+   * carries a fresh edge assertion; otherwise it makes no control-api call and
+   * the retry reuses the held assertion. A returned refusal (denial, rejection
+   * or unavailable authority) ends the retry through `respondRefused`, the
+   * route's answer for that refusal at its first resolve. Called where
+   * `reauthorizeV2` is called, for requests without `authorizedActionV2`.
+   */
+  refreshV1Host?: {
+    refresh: () => Promise<HostResolveRefusal | null>
+    respondRefused: (refusal: HostResolveRefusal) => void
+  }
+  /**
    * Re-issues the original upstream request with a deadline-bounded timeout.
    * The route's FIRST attempt runs without a client-side timeout for mutating
    * calls; `timeoutMs` only ever applies to these hold retries. `deadlineMs`
@@ -828,6 +842,9 @@ export async function respondWithWakeAndHold(
     case 'proceed': {
       let availabilityFailures = 0
       let attempts = 0
+      // Which step of the retry threw: the control-api authority re-check before
+      // the forward, or the forward to the Host itself.
+      let retryStage: 'authority re-check' | 'upstream' = 'authority re-check'
       const maxAttempts = options.retryUntilDeadline ? Infinity : 1
       const minAttemptTimeoutMs = Math.min(MIN_ADMISSION_RETRY_TIMEOUT_MS, config.upstreamTimeoutMs)
       while (Date.now() < deadlineMs) {
@@ -844,7 +861,17 @@ export async function respondWithWakeAndHold(
           const remainingMs = deadlineMs - Date.now()
           if (remainingMs < minAttemptTimeoutMs) break
           attempts++
-          if (options.reauthorizeV2) await options.reauthorizeV2()
+          retryStage = 'authority re-check'
+          if (options.reauthorizeV2) {
+            await options.reauthorizeV2()
+          } else if (options.refreshV1Host) {
+            const refusal = await options.refreshV1Host.refresh()
+            if (refusal) {
+              options.refreshV1Host.respondRefused(refusal)
+              return
+            }
+          }
+          retryStage = 'upstream'
           await options.attemptUpstream(Math.min(config.upstreamTimeoutMs, remainingMs), deadlineMs)
           return
         } catch (error) {
@@ -885,9 +912,11 @@ export async function respondWithWakeAndHold(
             return
           }
           // The host answered with a non-availability failure — exactly
-          // today's behavior for an up-but-erroring host.
+          // today's behavior for an up-but-erroring host — or the authority
+          // re-check before the forward threw (for example a held V1 assertion
+          // without a readable `exp`, or a re-resolved Host URL that changed).
           console.warn(
-            `[RPC_PROXY] wake-hold upstream retry failed host=${safeHostRef} error=${describeErrorForLog(
+            `[RPC_PROXY] wake-hold ${retryStage} retry failed host=${safeHostRef} error=${describeErrorForLog(
               error
             )}`
           )

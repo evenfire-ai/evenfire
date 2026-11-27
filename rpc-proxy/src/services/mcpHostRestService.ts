@@ -127,6 +127,9 @@ export type HostRuntimeMessageRequest = {
   // verbatim. mcp-host owns the contract and answers 200 `success:false` with
   // a typed code for any malformed value.
   fileReferences?: unknown
+  // Structured folder references (`LocationReferenceV1[]`), forwarded
+  // verbatim under the same contract ownership as `fileReferences`.
+  locationReferences?: unknown
   [key: string]: unknown
 }
 

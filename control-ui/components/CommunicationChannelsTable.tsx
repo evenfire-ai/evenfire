@@ -1,6 +1,7 @@
 'use client'
 
 import { useMemo, useState } from 'react'
+import Image from 'next/image'
 import {
   DataTable,
   TableRow,
@@ -8,6 +9,8 @@ import {
   TableViewport,
   useTableSort,
 } from '@clerum/frontend-components'
+import { TabBar } from '@components/TabBar'
+import { CONTROL_ROUTES } from '@constants/routes'
 import {
   COMMUNICATION_CHANNEL_PROVIDERS,
   type CommunicationChannelProvider,
@@ -35,9 +38,8 @@ function summary(item: CommunicationChannelItem): string {
 }
 
 const COMMUNICATION_CHANNEL_COLUMNS: TableHeaderColumn[] = [
-  { key: 'name', label: 'Name', width: '50%' },
-  { key: 'agent', label: 'Agent', width: '22%' },
-  { key: 'type', label: 'Type', width: '16%' },
+  { key: 'name', label: 'Name' },
+  { key: 'agent', label: 'Agent' },
   { key: 'actions', width: '3.5rem', align: 'right', ariaLabel: 'Actions' },
 ]
 
@@ -93,7 +95,9 @@ export function CommunicationChannelsTable({
   onCreateChannel,
   onCopyChannel,
   onOpenChannel,
+  provider,
 }: {
+  provider?: CommunicationChannelProvider
   items: CommunicationChannelItem[]
   onChanged: () => Promise<void>
   loading?: boolean
@@ -119,8 +123,11 @@ export function CommunicationChannelsTable({
   )
   const normalizedSearch = searchQuery.trim().toLowerCase()
   const filteredRows = useMemo(() => {
-    if (!normalizedSearch) return rows
-    return rows.filter(({ item, key }) => {
+    const providerRows = provider
+      ? rows.filter(({ item }) => configuredProviders(item).has(provider))
+      : rows
+    if (!normalizedSearch) return providerRows
+    return providerRows.filter(({ item, key }) => {
       const spec = item.spec || {}
       const channelIds = [
         ...(spec.telegram || []).map(group => group.channelId || ''),
@@ -133,20 +140,14 @@ export function CommunicationChannelsTable({
         .toLowerCase()
         .includes(normalizedSearch)
     })
-  }, [normalizedSearch, rows])
-  const channelSort = useTableSort<(typeof filteredRows)[number], 'name' | 'agent' | 'type'>({
+  }, [normalizedSearch, rows, provider])
+  const channelSort = useTableSort<(typeof filteredRows)[number], 'name' | 'agent'>({
     rows: filteredRows,
     defaultKey: 'name',
     identity: row => row.key,
     accessors: {
       name: row => row.item.metadata?.name,
       agent: row => row.item.spec?.hostRef,
-      type: row =>
-        COMMUNICATION_CHANNEL_PROVIDERS.filter(provider =>
-          configuredProviders(row.item).has(provider)
-        )
-          .map(communicationChannelProviderLabel)
-          .join(', '),
     },
   })
   const columns = COMMUNICATION_CHANNEL_COLUMNS.map(column =>
@@ -155,7 +156,7 @@ export function CommunicationChannelsTable({
       : {
           ...column,
           activeDirection: channelSort.key === column.key ? channelSort.direction : null,
-          onSort: () => channelSort.sortBy(column.key as 'name' | 'agent' | 'type'),
+          onSort: () => channelSort.sortBy(column.key as 'name' | 'agent'),
         }
   )
 
@@ -237,6 +238,31 @@ export function CommunicationChannelsTable({
             />
           }
         />
+        {provider ? (
+          <div className="cu-card__body cu-card__body--auto cu-channel-provider-tabs">
+            <TabBar
+              ariaLabel="Channel providers"
+              activeValue={provider}
+              className="cu-tabs--flush"
+              options={COMMUNICATION_CHANNEL_PROVIDERS.map(value => ({
+                value,
+                href: CONTROL_ROUTES.externalChannels.provider(value),
+                label: (
+                  <span className="cu-channel-provider-tabs__label">
+                    <Image
+                      src={`/brand/${value}.svg`}
+                      alt=""
+                      width={16}
+                      height={16}
+                      aria-hidden="true"
+                    />
+                    {communicationChannelProviderLabel(value)}
+                  </span>
+                ),
+              }))}
+            />
+          </div>
+        ) : null}
         {error ? (
           <div className="cu-banner cu-banner--error" role="alert">
             {error}
@@ -265,10 +291,6 @@ export function CommunicationChannelsTable({
                 channelSort.sortedRows.map(({ key, item }) => {
                   const name = item.metadata?.name || '-'
                   const spec = item.spec || {}
-                  const configuredProviderTypes = configuredProviders(item)
-                  const providerTypes = COMMUNICATION_CHANNEL_PROVIDERS.filter(provider =>
-                    configuredProviderTypes.has(provider)
-                  )
                   return (
                     <TableRow
                       key={key}
@@ -279,9 +301,6 @@ export function CommunicationChannelsTable({
                       </td>
                       <td>
                         <span className="cu-table__cell-muted">{spec.hostRef || '-'}</span>
-                      </td>
-                      <td>
-                        {providerTypes.map(communicationChannelProviderLabel).join(', ') || '-'}
                       </td>
                       <td className="cu-table__cell-actions">
                         <div className="cu-table-actions">

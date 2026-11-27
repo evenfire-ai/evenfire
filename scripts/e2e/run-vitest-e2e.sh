@@ -19,6 +19,9 @@ DEFAULT_NODE_UNIT_VITEST_SUITES=(
   # Chat body budget parity (#678): compares rpc-proxy, mcp-host and composer
   # sources, so it needs no cluster either.
   integration/chat-body-budget-parity.test.ts
+  # E2E helper contract: stubs fetch and checks which edge each helper uses,
+  # so it needs no cluster.
+  helpers.test.ts
 )
 DEFAULT_CLUSTER_VITEST_SUITES=(
   gfsUploadProductMutation.test.ts

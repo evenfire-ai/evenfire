@@ -70,10 +70,9 @@ export interface ToolLaneGuardrail {
   /**
    * The rule decision `file_read` would get for the files another native tool
    * call reads (`Tool.fileReads`). Synchronous, rules only: hooks are not called.
-   * `undefined` when the Host has no rules. Optional for test doubles; the
-   * builder below always provides it.
+   * `undefined` when the Host has no rules.
    */
-  derivedFileReadDecision?(reads: FileReads): { decision: Decision; reasonCode: string } | undefined
+  derivedFileReadDecision(reads: FileReads): { decision: Decision; reasonCode: string } | undefined
   /**
    * PostToolUse redaction (spec §6.2 / §10 #3): transform the model-visible tool
    * result through the installed `post_tool_use` hooks, in order. Optional — a

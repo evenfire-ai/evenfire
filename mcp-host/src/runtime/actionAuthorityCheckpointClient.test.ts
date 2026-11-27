@@ -120,6 +120,10 @@ describe('mcp-host action-authority checkpoint client', () => {
       })
     )
     const credential = auth()
+    // control-api issues the edge assertion only to caller rpc-proxy; an mcp-host checkpoint
+    // never receives one.
+    expect(allowed()).toMatchObject({ status: 'allowed', destination: { kind: 'host' } })
+    expect(allowed()).not.toHaveProperty('hostEdgeAssertion')
 
     await expect(
       checkpointMcpHostActionAuthority(binding, credential, fetchImpl)

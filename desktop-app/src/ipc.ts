@@ -11,7 +11,7 @@ import {
 import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { parseFileReferenceV1 } from '@clerum/gfs-interaction-policy'
+import { parseFileReferenceV1, parseLocationReferenceV1 } from '@clerum/gfs-interaction-policy'
 import { AppService } from './appService.js'
 import { runChatGetIndex } from './chatGetIndexHandler.js'
 import {
@@ -399,23 +399,41 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
   ) {
     throw new Error('Invalid host message request: approvalMode')
   }
-  if (parsed.fileReferences !== undefined) {
-    // Checks shape only; mcp-host enforces the count limit and resolves each reference.
-    if (!Array.isArray(parsed.fileReferences)) {
-      throw new Error('Invalid host message request: fileReferences')
-    }
-    const fileReferences = parsed.fileReferences.map((entry, index) => {
-      const result = parseFileReferenceV1(entry)
-      if (!result.ok) {
-        throw new Error(
-          `Invalid host message request: fileReferences[${index}] ${result.code}: ${result.message}`
-        )
-      }
-      return result.value
-    })
-    return { ...parsed, fileReferences }
+  // Both reference lists are checked for shape only; mcp-host enforces the count
+  // limits and resolves each reference.
+  const fileReferences = parseReferenceList(
+    parsed.fileReferences,
+    'fileReferences',
+    parseFileReferenceV1
+  )
+  const locationReferences = parseReferenceList(
+    parsed.locationReferences,
+    'locationReferences',
+    parseLocationReferenceV1
+  )
+  return {
+    ...parsed,
+    ...(fileReferences === undefined ? {} : { fileReferences }),
+    ...(locationReferences === undefined ? {} : { locationReferences }),
   }
-  return parsed
+}
+
+function parseReferenceList<T>(
+  value: unknown,
+  field: string,
+  parse: (entry: unknown) => { ok: true; value: T } | { ok: false; code: string; message: string }
+): T[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) throw new Error(`Invalid host message request: ${field}`)
+  return value.map((entry, index) => {
+    const result = parse(entry)
+    if (!result.ok) {
+      throw new Error(
+        `Invalid host message request: ${field}[${index}] ${result.code}: ${result.message}`
+      )
+    }
+    return result.value
+  })
 }
 
 export function assertTrustedSender(event: IpcMainInvokeEvent | IpcMainEvent): void {

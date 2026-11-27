@@ -1,0 +1,461 @@
+{
+  "schemaVersion": 1,
+  "vectors": [
+    {
+      "name": "valid folder reference",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+        "name": "Reports",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+        }
+      },
+      "expected": {
+        "ok": true
+      }
+    },
+    {
+      "name": "folder name with a backslash",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+        "name": "Q3\\drafts",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+        }
+      },
+      "expected": {
+        "ok": true
+      }
+    },
+    {
+      "name": "folder name of 255 code points",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+        "name": "ñññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññ",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+        }
+      },
+      "expected": {
+        "ok": true
+      }
+    },
+    {
+      "name": "dashed resourceId with a normalized gfsUri",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:3F2A9C1E-7B4D-4E0A-9C8B-6D5E4F3A2B1C",
+        "name": "Reports",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3F2A9C1E-7B4D-4E0A-9C8B-6D5E4F3A2B1C",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+        }
+      },
+      "expected": {
+        "ok": true
+      }
+    },
+    {
+      "name": "missing schemaVersion",
+      "input": {
+        "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+        "name": "Reports",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_SCHEMA_VERSION_UNSUPPORTED"
+      }
+    },
+    {
+      "name": "schemaVersion 2",
+      "input": {
+        "schemaVersion": 2,
+        "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+        "name": "Reports",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_SCHEMA_VERSION_UNSUPPORTED"
+      }
+    },
+    {
+      "name": "not an object",
+      "input": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "a list",
+      "input": [
+        {
+          "schemaVersion": 1,
+          "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "name": "Reports",
+          "source": {
+            "kind": "gfs",
+            "drive": "personal",
+            "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+            "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+          }
+        }
+      ],
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "forged id",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "name": "Reports",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "file reference id",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c@v7",
+        "name": "Reports",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "missing id",
+      "input": {
+        "schemaVersion": 1,
+        "name": "Reports",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "unknown top-level field",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+        "name": "Reports",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+        },
+        "byteLength": 0
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "source with a version",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+        "name": "Reports",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "version": 7
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "unknown source field",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+        "name": "Reports",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "path": "/x"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "attachment source",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+        "name": "Reports",
+        "source": {
+          "kind": "attachment",
+          "attachmentId": "a",
+          "messageId": "m"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "source without drive",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+        "name": "Reports",
+        "source": {
+          "kind": "gfs",
+          "drive": "",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "resourceId that is not 32 hex digits",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:res-42",
+        "name": "Reports",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "res-42",
+          "gfsUri": "gfs://personal/res-42"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "gfsUri naming another resource",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+        "name": "Reports",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "gfsUri on another drive",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+        "name": "Reports",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://shared/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "gfsUri with the dashed resourceId",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:3F2A9C1E-7B4D-4E0A-9C8B-6D5E4F3A2B1C",
+        "name": "Reports",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3F2A9C1E-7B4D-4E0A-9C8B-6D5E4F3A2B1C",
+          "gfsUri": "gfs://personal/3F2A9C1E-7B4D-4E0A-9C8B-6D5E4F3A2B1C"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "empty name",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+        "name": "",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "name with a slash",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+        "name": "a/b",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "name ..",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+        "name": "..",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "name with a control character",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+        "name": "Re\u0007ports",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "name not in NFC",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+        "name": "Café",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    },
+    {
+      "name": "name of 256 code points",
+      "input": {
+        "schemaVersion": 1,
+        "id": "gfs-folder:personal:3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+        "name": "ññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññññ",
+        "source": {
+          "kind": "gfs",
+          "drive": "personal",
+          "resourceId": "3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c",
+          "gfsUri": "gfs://personal/3f2a9c1e7b4d4e0a9c8b6d5e4f3a2b1c"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "code": "FILE_REFERENCE_INVALID"
+      }
+    }
+  ]
+}

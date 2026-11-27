@@ -22,7 +22,7 @@ import {
   type FileReferenceGfscClient,
   parseIncomingFileReferences,
   referencedFilesForTurnContext,
-  resolveFileReferences,
+  resolveMessageReferences,
 } from '../fileReferenceResolver'
 
 const RID = '1234567890abcdef1234567890abcdef'
@@ -196,11 +196,11 @@ describe('parseIncomingFileReferences (#666)', () => {
   })
 })
 
-describe('resolveFileReferences (#666)', () => {
+describe('resolveMessageReferences — files (#666)', () => {
   it('reports available when gfsc returns the same file at the same version', async () => {
     const gfsc = client(() => view())
     const ref = gfsReference()
-    const result = await resolveFileReferences([ref], gfsc)
+    const result = await resolveMessageReferences([ref], [], gfsc)
     expect(result).toEqual({
       ok: true,
       resolutions: [
@@ -216,6 +216,7 @@ describe('resolveFileReferences (#666)', () => {
           },
         },
       ],
+      locationResolutions: [],
     })
     expect(gfsc.resolve).toHaveBeenCalledTimes(1)
     expect(gfsc.resolve.mock.calls[0]![0]).toEqual({ uri: `gfs://main/${RID}` })
@@ -224,7 +225,7 @@ describe('resolveFileReferences (#666)', () => {
 
   it('reports stale with the current version when the file changed', async () => {
     const gfsc = client(() => view({ version: 4, bytes: 999 }))
-    const result = await resolveFileReferences([gfsReference()], gfsc)
+    const result = await resolveMessageReferences([gfsReference()], [], gfsc)
     expect(result).toMatchObject({
       ok: true,
       resolutions: [{ availability: 'stale', resolvedVersion: 4 }],
@@ -233,19 +234,21 @@ describe('resolveFileReferences (#666)', () => {
 
   it('reports not_a_file for a directory', async () => {
     const gfsc = client(() => view({ kind: 'directory', bytes: 0 }))
-    const result = await resolveFileReferences([gfsReference()], gfsc)
+    const result = await resolveMessageReferences([gfsReference()], [], gfsc)
     expect(result).toMatchObject({ ok: true, resolutions: [{ availability: 'not_a_file' }] })
   })
 
   it('reports too_large above the per-file ceiling, and available at it', async () => {
     const limit = GFS_FILE_LIMITS.maxFileBytes
-    const atLimit = await resolveFileReferences(
+    const atLimit = await resolveMessageReferences(
       [gfsReference({ byteLength: limit })],
+      [],
       client(() => view({ bytes: limit }))
     )
     expect(atLimit).toMatchObject({ ok: true, resolutions: [{ availability: 'available' }] })
-    const above = await resolveFileReferences(
+    const above = await resolveMessageReferences(
       [gfsReference({ byteLength: limit + 1 })],
+      [],
       client(() => view({ bytes: limit + 1 }))
     )
     expect(above).toMatchObject({ ok: true, resolutions: [{ availability: 'too_large' }] })
@@ -259,23 +262,24 @@ describe('resolveFileReferences (#666)', () => {
     const gfsc = client(() => {
       throw new GfscHttpError(status, 'no')
     })
-    const result = await resolveFileReferences([gfsReference()], gfsc)
+    const result = await resolveMessageReferences([gfsReference()], [], gfsc)
     expect(gfsc.resolve).toHaveBeenCalledTimes(1)
     expect(result).toMatchObject({ ok: true, resolutions: [{ availability }] })
   })
 
   it('marks every reference unsupported without calling gfsc when the Host has no read scope', async () => {
     const refs = [gfsReference(), gfsReference({ resourceId: RID_2 })]
-    const result = await resolveFileReferences(refs, null)
+    const result = await resolveMessageReferences(refs, [], null)
     expect(result).toEqual({
       ok: true,
       resolutions: refs.map(reference => ({ availability: 'unsupported', reference })),
+      locationResolutions: [],
     })
   })
 
   it('marks an attachment-sourced reference unsupported and still resolves the GFS one', async () => {
     const gfsc = client(() => view())
-    const result = await resolveFileReferences([attachmentReference(), gfsReference()], gfsc)
+    const result = await resolveMessageReferences([attachmentReference(), gfsReference()], [], gfsc)
     expect(result).toMatchObject({
       ok: true,
       resolutions: [{ availability: 'unsupported' }, { availability: 'available' }],
@@ -288,7 +292,7 @@ describe('resolveFileReferences (#666)', () => {
     const gfsc = client(() => {
       throw new GfscHttpError(status, 'busy')
     })
-    expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+    expect(await resolveMessageReferences([gfsReference()], [], gfsc)).toEqual({
       ok: false,
       failure: 'transient',
       errorClass: 'GfscHttpError',
@@ -301,7 +305,7 @@ describe('resolveFileReferences (#666)', () => {
     const gfsc = client(() => {
       throw new GfscHttpError(401, 'unauthorized')
     })
-    expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+    expect(await resolveMessageReferences([gfsReference()], [], gfsc)).toEqual({
       ok: false,
       failure: 'credentials',
       errorClass: 'GfscHttpError',
@@ -316,7 +320,7 @@ describe('resolveFileReferences (#666)', () => {
       const gfsc = client(() => {
         throw new GfscHttpError(status, 'unexpected')
       })
-      expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+      expect(await resolveMessageReferences([gfsReference()], [], gfsc)).toEqual({
         ok: false,
         failure: 'contract',
         errorClass: 'GfscHttpError',
@@ -334,7 +338,7 @@ describe('resolveFileReferences (#666)', () => {
       const gfsc = client(() => {
         throw new GfscHttpError(status, 'gfsc body text')
       })
-      expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+      expect(await resolveMessageReferences([gfsReference()], [], gfsc)).toEqual({
         ok: false,
         failure: 'contract',
         errorClass: 'GfscHttpError',
@@ -350,7 +354,7 @@ describe('resolveFileReferences (#666)', () => {
     })
     let caught: unknown
     try {
-      await resolveFileReferences([gfsReference()], { resolve })
+      await resolveMessageReferences([gfsReference()], [], { resolve })
     } catch (error) {
       caught = error
     }
@@ -374,7 +378,7 @@ describe('resolveFileReferences (#666)', () => {
     })
     const logged = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
     try {
-      await expect(resolveFileReferences([gfsReference()], { resolve })).rejects.toThrow(
+      await expect(resolveMessageReferences([gfsReference()], [], { resolve })).rejects.toThrow(
         'file reference resolution failed: unexpected Host error'
       )
       // The log call is the witness: the serializer reduces `err` to name, code
@@ -391,7 +395,7 @@ describe('resolveFileReferences (#666)', () => {
     const gfsc = client(() => {
       throw new DOMException('The operation timed out.', 'TimeoutError')
     })
-    expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+    expect(await resolveMessageReferences([gfsReference()], [], gfsc)).toEqual({
       ok: false,
       failure: 'transient',
       errorClass: 'TimeoutError',
@@ -405,7 +409,7 @@ describe('resolveFileReferences (#666)', () => {
       const cause = Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })
       throw new TypeError('fetch failed', { cause })
     })
-    expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+    expect(await resolveMessageReferences([gfsReference()], [], gfsc)).toEqual({
       ok: false,
       failure: 'transient',
       errorClass: 'TypeError',
@@ -416,7 +420,7 @@ describe('resolveFileReferences (#666)', () => {
     const gfsc = client(() => {
       throw new SyntaxError('Unexpected token < in JSON at position 0')
     })
-    expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+    expect(await resolveMessageReferences([gfsReference()], [], gfsc)).toEqual({
       ok: false,
       failure: 'contract',
       errorClass: 'SyntaxError',
@@ -430,7 +434,7 @@ describe('resolveFileReferences (#666)', () => {
     })
     let caught: unknown
     try {
-      await resolveFileReferences([gfsReference()], gfsc)
+      await resolveMessageReferences([gfsReference()], [], gfsc)
     } catch (wrapper) {
       caught = wrapper
     }
@@ -447,7 +451,7 @@ describe('resolveFileReferences (#666)', () => {
     const gfsc = client(() => {
       throw new GfscHttpError(400, 'path_invalid')
     })
-    expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+    expect(await resolveMessageReferences([gfsReference()], [], gfsc)).toEqual({
       ok: false,
       failure: 'invalid',
       errorClass: 'GfscHttpError',
@@ -457,7 +461,7 @@ describe('resolveFileReferences (#666)', () => {
 
   it('fails invalid when the same version reports a different size', async () => {
     const gfsc = client(() => view({ bytes: 121 }))
-    expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+    expect(await resolveMessageReferences([gfsReference()], [], gfsc)).toEqual({
       ok: false,
       failure: 'invalid',
       errorClass: 'SizeMismatch',
@@ -480,7 +484,7 @@ describe('resolveFileReferences (#666)', () => {
     ['a negative size', view({ bytes: -1 })],
   ])('fails contract on %s', async (_label, body) => {
     const gfsc = client(() => body)
-    expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+    expect(await resolveMessageReferences([gfsReference()], [], gfsc)).toEqual({
       ok: false,
       failure: 'contract',
       errorClass: 'UnexpectedMetadata',
@@ -501,8 +505,9 @@ describe('resolveFileReferences (#666)', () => {
         )
       }),
     }
-    const result = await resolveFileReferences(
+    const result = await resolveMessageReferences(
       [gfsReference(), gfsReference({ resourceId: RID_2 })],
+      [],
       gfsc
     )
     expect(result).toEqual({
@@ -531,7 +536,7 @@ describe('resolveFileReferences (#666)', () => {
         }),
       }
       const startedAt = Date.now()
-      const pending = resolveFileReferences([gfsReference()], gfsc)
+      const pending = resolveMessageReferences([gfsReference()], [], gfsc)
       expect(deadlineMs).toBe(startedAt + VISUAL_INPUT_LIMITS.validationTimeoutMs)
       await vi.advanceTimersByTimeAsync(VISUAL_INPUT_LIMITS.validationTimeoutMs - 1)
       let settled = false
@@ -603,9 +608,9 @@ describe('resolveFileReferences (#666)', () => {
       await writeFile(empty, '\n')
       for (const tokenFile of [join(dir, 'absent-token'), empty]) {
         const fetch = vi.fn<NonNullable<GfsRuntimeEnv['fetch']>>()
-        expect(await resolveFileReferences([gfsReference()], realClient(tokenFile, fetch))).toEqual(
-          { ok: false, failure: 'credentials', errorClass: 'TokenReadError' }
-        )
+        expect(
+          await resolveMessageReferences([gfsReference()], [], realClient(tokenFile, fetch))
+        ).toEqual({ ok: false, failure: 'credentials', errorClass: 'TokenReadError' })
         expect(fetch).not.toHaveBeenCalled()
       }
       // Witness: with a readable token the same client reaches gfsc.
@@ -618,7 +623,9 @@ describe('resolveFileReferences (#666)', () => {
             headers: { 'content-type': 'application/json' },
           })
       )
-      expect(await resolveFileReferences([gfsReference()], realClient(readable, fetch))).toEqual({
+      expect(
+        await resolveMessageReferences([gfsReference()], [], realClient(readable, fetch))
+      ).toEqual({
         ok: true,
         resolutions: [
           {
@@ -633,6 +640,7 @@ describe('resolveFileReferences (#666)', () => {
             },
           },
         ],
+        locationResolutions: [],
       })
       expect(fetch).toHaveBeenCalledTimes(1)
     })
@@ -644,7 +652,9 @@ describe('resolveFileReferences (#666)', () => {
         async () =>
           new Response('<html>', { status: 200, headers: { 'content-type': 'application/json' } })
       )
-      expect(await resolveFileReferences([gfsReference()], realClient(readable, fetch))).toEqual({
+      expect(
+        await resolveMessageReferences([gfsReference()], [], realClient(readable, fetch))
+      ).toEqual({
         ok: false,
         failure: 'contract',
         errorClass: 'SyntaxError',
@@ -664,7 +674,7 @@ describe('resolveFileReferences (#666)', () => {
       try {
         const { port } = server.address() as AddressInfo
         const gfsc = realHttpClient(authFile, `http://127.0.0.1:${port}`)
-        expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+        expect(await resolveMessageReferences([gfsReference()], [], gfsc)).toEqual({
           ok: false,
           failure: 'contract',
           errorClass: 'TypeError',
@@ -684,7 +694,7 @@ describe('resolveFileReferences (#666)', () => {
       const { port } = holder.address() as AddressInfo
       await close(holder)
       const gfsc = realHttpClient(authFile, `http://127.0.0.1:${port}`)
-      expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+      expect(await resolveMessageReferences([gfsReference()], [], gfsc)).toEqual({
         ok: false,
         failure: 'transient',
         errorClass: 'TypeError',
@@ -697,7 +707,7 @@ describe('resolveFileReferences (#666)', () => {
       // Node's fetch reports this port as a TypeError whose Error cause says
       // "bad port" and carries no code, so the code-based test cannot see it.
       const gfsc = realHttpClient(authFile, 'http://127.0.0.1:1')
-      expect(await resolveFileReferences([gfsReference()], gfsc)).toEqual({
+      expect(await resolveMessageReferences([gfsReference()], [], gfsc)).toEqual({
         ok: false,
         failure: 'transient',
         errorClass: 'TypeError',

@@ -1,4 +1,8 @@
-import { type FileReferenceV1, classifyBytes } from '@clerum/gfs-interaction-policy'
+import {
+  type FileReferenceV1,
+  type LocationReferenceV1,
+  classifyBytes,
+} from '@clerum/gfs-interaction-policy'
 import {
   COMPOSER_FILE_ENTRY_METADATA_BYTES,
   COMPOSER_FORWARDED_FIELDS_BYTES,
@@ -26,6 +30,11 @@ export type ComposerNonImageShareRequest = {
   content: string
   /** The structured Global Files references posted next to the text. */
   fileReferences: ReadonlyArray<FileReferenceV1>
+  /**
+   * The structured folder references posted next to the text. Required, so
+   * every caller that measures a request says which folders it carries.
+   */
+  locationReferences: ReadonlyArray<LocationReferenceV1>
   /** The agent the message is posted to. */
   hostRef: string
   files: ReadonlyArray<{ filename: string }>
@@ -89,6 +98,7 @@ export function composerNonImageShareBytes(request: ComposerNonImageShareRequest
     COMPOSER_FORWARDED_FIELDS_BYTES +
     jsonBytes(request.content) +
     (request.fileReferences.length ? jsonBytes(request.fileReferences) : 0) +
+    (request.locationReferences.length ? jsonBytes(request.locationReferences) : 0) +
     2 * jsonBytes(request.hostRef) +
     request.files.reduce((total, file) => total + composerFileDetailBytes(file), 0) +
     request.images.reduce(

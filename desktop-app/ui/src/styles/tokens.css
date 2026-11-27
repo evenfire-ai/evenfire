@@ -224,6 +224,8 @@
   --layer-toast: 60;
   --layer-chat-overlay: 90;
   --layer-dropdown: 120;
+  /* Window-level dialogs: above the sidebar and its flyouts (layer-dropdown + 1000..1060). */
+  --layer-window-dialog: calc(var(--layer-dropdown) + 1100);
 }
 
 :root[data-theme='light'] {

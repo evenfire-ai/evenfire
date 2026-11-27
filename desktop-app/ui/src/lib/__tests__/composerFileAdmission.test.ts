@@ -34,7 +34,7 @@ const FIXED_SHARE_BYTES =
 
 /** The rest of a posted request whose message text is `content`. */
 function requestWithText(content = '') {
-  return { content, fileReferences: [], hostRef: 'agent-1', images: [] }
+  return { content, fileReferences: [], locationReferences: [], hostRef: 'agent-1', images: [] }
 }
 
 const EMPTY_CONTEXT = { attachedCount: 0, files: [], request: requestWithText() }

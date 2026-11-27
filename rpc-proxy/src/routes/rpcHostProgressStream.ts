@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { HOST_EDGE_RPC_PROXY_ROUTE_SCOPES } from '@clerum/action-context-contracts'
 import { config } from '../config.js'
 import { getHostRpcPreflight } from '../hostRpcPreflight.js'
 import {
@@ -8,7 +9,7 @@ import {
   requireRpcAuth,
 } from '../middleware/auth.js'
 import { runtimeHostEdgeContext } from '../routeActionBindingV2.js'
-import { isHostAccessDenied, respondHostAccessDenied } from '../services/hostAccessDenial.js'
+import { isHostResolveRefusal, respondHostResolveRefusal } from '../services/hostAccessDenial.js'
 import { resolveHostConnectionForUser } from '../services/mcpProxyService.js'
 
 function sanitizedStreamErrorMessage(): string {
@@ -42,7 +43,9 @@ export function createRpcHostProgressStreamRouter(): Router {
   router.get(
     '/rpc/hosts/:hostRef/tasks/:taskId/progress/stream',
     requireRpcAuth,
-    requireHostRpcPreflightScope('host:activity:read'),
+    requireHostRpcPreflightScope(
+      HOST_EDGE_RPC_PROXY_ROUTE_SCOPES['GET /v1/runtime/tasks/:taskId/progress/stream']
+    ),
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -55,12 +58,8 @@ export function createRpcHostProgressStreamRouter(): Router {
           rpcAccessToken,
           runtimeHostEdgeContext(req)
         )
-        if (isHostAccessDenied(host)) {
-          respondHostAccessDenied(res, host)
-          return
-        }
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        if (isHostResolveRefusal(host)) {
+          respondHostResolveRefusal(res, host, 'forbidden')
           return
         }
 

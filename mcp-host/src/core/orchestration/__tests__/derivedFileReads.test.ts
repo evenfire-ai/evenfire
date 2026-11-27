@@ -5,6 +5,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { type GuardrailRule, buildToolLaneGuardrail } from '../../guardrails'
+import type { Decision } from '../../guardrails/types'
 import type {
   AgentEventEmitter,
   FileReads,
@@ -227,4 +228,112 @@ describe('guardrail file_read rules over a native tool’s declared reads', () =
 
     expect((await admitToolCall(read('secrets/a.json'), config, 0)).kind).toBe('execute')
   })
+})
+
+describe('the derived check after a guardrail rewrite', () => {
+  it('declares the reads of the rewritten arguments, not the submitted ones', async () => {
+    const tool = new ReaderTool()
+    const real = buildToolLaneGuardrail({ rules: [allowNative, denySecrets] })!
+    const rewriteTo = (file: string) => {
+      const config = makeConfig(tool, [])
+      config.guardrails = {
+        // A hook rewrote the call: the submitted file is replaced.
+        async decide(_identity, _input) {
+          return {
+            decision: 'allow',
+            reasonCode: 'hook_rewrite',
+            effectiveInput: { file },
+            source: 'hook',
+          }
+        },
+        derivedFileReadDecision: reads => real.derivedFileReadDecision(reads),
+      }
+      return config
+    }
+    // pub → secrets: the rewritten read is denied.
+    expect(await admitToolCall(read('pub/a.json'), rewriteTo('secrets/a.json'), 0)).toMatchObject({
+      kind: 'result',
+      toolResult: { content: 'Blocked by guardrail policy (rule:deny-secrets).', is_error: true },
+    })
+    // secrets → pub: the rewritten read runs, with the rewritten arguments.
+    expect(await admitToolCall(read('secrets/a.json'), rewriteTo('pub/a.json'), 0)).toMatchObject({
+      kind: 'execute',
+      call: { arguments: { file: 'pub/a.json' } },
+    })
+  })
+})
+
+describe('the merge of a call’s own decision with its derived file_read decision', () => {
+  // The strictness order the merge applies: deny > ask > allow > no_decision.
+  const DECISIONS: Decision[] = ['no_decision', 'allow', 'ask', 'deny']
+  const rank = (d: Decision) => DECISIONS.indexOf(d)
+  const cells = DECISIONS.flatMap(own => DECISIONS.map(derived => [own, derived] as const))
+
+  const decisionEvent = async (config: LoopConfig, events: AgentEvent[]) => {
+    await admitToolCall(read('data/a.json'), config, 0)
+    const seen = events.filter(e => e.type === 'guardrail:decision')
+    expect(seen).toHaveLength(1)
+    const { decision, reasonCode, source } = seen[0].data as Record<string, unknown>
+    return { decision, reasonCode, source }
+  }
+
+  it.each(cells)(
+    'own %s, derived %s: only a strictly stricter derived decision wins',
+    async (own, derived) => {
+      const events: AgentEvent[] = []
+      const config = makeConfig(new ReaderTool(), [], { events })
+      config.guardrails = {
+        async decide(_identity, input) {
+          return {
+            decision: own,
+            reasonCode: `own_${own}`,
+            effectiveInput: input,
+            source: 'current',
+          }
+        },
+        derivedFileReadDecision: () => ({ decision: derived, reasonCode: `derived_${derived}` }),
+      }
+      const expected =
+        rank(derived) > rank(own)
+          ? // The derived source is reported as host_rule (review finding 11, a follow-up:
+            // an unmatched derived ask has no rule).
+            { decision: derived, reasonCode: `derived_${derived}`, source: 'host_rule' }
+          : { decision: own, reasonCode: `own_${own}`, source: 'current' }
+      expect(await decisionEvent(config, events)).toEqual(expected)
+    }
+  )
+
+  const RULE_ACTIONS = ['allow', 'ask', 'deny'] as const
+  it.each(RULE_ACTIONS.flatMap(own => RULE_ACTIONS.map(derived => [own, derived] as const)))(
+    'real rules, own %s and file_read %s: the stricter wins, and a tie keeps the call’s own rule',
+    async (own, derived) => {
+      const events: AgentEvent[] = []
+      const config = makeConfig(
+        new ReaderTool(),
+        [
+          {
+            id: 'own',
+            action: own,
+            reasonCode: `own_${own}`,
+            match: { tool: { provenance: 'native', name: 'reader_tool' } },
+          },
+          {
+            id: 'read',
+            action: derived,
+            reasonCode: `read_${derived}`,
+            match: {
+              tool: { provenance: 'native', name: 'file_read' },
+              arguments: [{ type: 'path', pointer: '/path', op: 'under', value: 'data' }],
+            },
+          },
+        ],
+        { events }
+      )
+      const expected =
+        rank(derived) > rank(own)
+          ? { decision: derived, reasonCode: `read_${derived}`, source: 'host_rule' }
+          : { decision: own, reasonCode: `own_${own}`, source: 'host_rule' }
+      expect(await decisionEvent(config, events)).toEqual(expected)
+    }
+  )
 })

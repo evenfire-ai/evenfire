@@ -1,4 +1,4 @@
-import type { FileReferenceV1 } from '@clerum/gfs-interaction-policy'
+import type { FileReferenceV1, LocationReferenceV1 } from '@clerum/gfs-interaction-policy'
 import type { ImageInputDecision } from './imageInputDecision'
 
 export type Role = 'admin' | 'inviter' | 'member'
@@ -620,6 +620,11 @@ export type HostMessageRequest = {
    * references. mcp-host re-authorizes each one before the task exists.
    */
   fileReferences?: FileReferenceV1[]
+  /**
+   * The Global Files folder the message is about, as the place to work in.
+   * mcp-host re-authorizes it with its own principal before the task exists.
+   */
+  locationReferences?: LocationReferenceV1[]
   [key: string]: unknown
 }
 
@@ -691,6 +696,11 @@ export type HostMessageResponse = {
    * delivered without it.
    */
   acceptedFileReferenceIds?: readonly string[]
+  /**
+   * The LocationReference ids the Host admitted with this message. A sent
+   * folder whose id is missing here did not reach the Host.
+   */
+  acceptedLocationReferenceIds?: readonly string[]
   approval?: {
     taskId: string
     requestId: string
@@ -1388,7 +1398,14 @@ export interface MessageToolStep {
 
 export interface ChatMessageAttachment {
   id: string
-  type: 'plugin' | 'connector' | 'agent_file' | 'global_file' | 'uploaded_file' | 'response_file'
+  type:
+    | 'plugin'
+    | 'connector'
+    | 'agent_file'
+    | 'global_file'
+    | 'global_folder'
+    | 'uploaded_file'
+    | 'response_file'
   label: string
   tooltip?: string
   addedOrder?: number

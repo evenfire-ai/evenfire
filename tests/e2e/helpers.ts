@@ -11,16 +11,19 @@ export const KUBE_CONTEXT =
   process.env.MINIKUBE_PROFILE ||
   'clerum-test'
 export const MCP_HOST_NAMESPACE = process.env.E2E_MCP_HOST_NAMESPACE || 'mcp-host'
-const DEFAULT_HOST_REF = process.env.E2E_HOST_REF ?? 'chatllm'
+export const RPC_PROXY_URL = process.env.RPC_PROXY_URL || 'http://localhost:8094'
+export const DEFAULT_HOST_REF = process.env.E2E_HOST_REF ?? 'chatllm'
 
 let cachedMcpHostDeployment: string | undefined
 
-type McpHostEdgeCaller = 'channel-reader' | 'rpc-proxy'
+// A test can speak to the Host directly only as a channel. The rpc-proxy
+// caller requires an edge assertion that only control-api can sign, so reads
+// on behalf of a user go through rpc-proxy with a real RPC token instead.
+type McpHostEdgeCaller = 'channel-reader'
 
 export type McpHostEdgeContext = {
   caller: McpHostEdgeCaller
   hostRef?: string
-  userId?: string
   channelType?: string
   channelId?: string
   sender?: string
@@ -28,25 +31,17 @@ export type McpHostEdgeContext = {
 }
 
 function mcpHostEdgeHeaders(ctx: McpHostEdgeContext): Record<string, string> {
-  const headers: Record<string, string> = {
+  return {
     'x-clerum-edge-caller': ctx.caller,
     'x-clerum-edge-host-ref': ctx.hostRef ?? DEFAULT_HOST_REF,
     'x-clerum-edge-request-id': ctx.requestId ?? `e2e-${Date.now()}`,
+    'x-clerum-edge-channel-type': ctx.channelType ?? 'telegram',
+    'x-clerum-edge-channel-id': ctx.channelId ?? 'test-channel',
+    'x-clerum-edge-sender': ctx.sender ?? 'test-user',
   }
-
-  if (ctx.caller === 'rpc-proxy') {
-    headers['x-clerum-edge-user-id'] = ctx.userId ?? 'e2e-vitest-runtime'
-    headers['x-clerum-edge-team-id'] = 'e2e-team'
-  } else {
-    headers['x-clerum-edge-channel-type'] = ctx.channelType ?? 'telegram'
-    headers['x-clerum-edge-channel-id'] = ctx.channelId ?? 'test-channel'
-    headers['x-clerum-edge-sender'] = ctx.sender ?? 'test-user'
-  }
-
-  return headers
 }
 
-function defaultEdgeForRuntimeUrl(url: string, method = 'GET'): McpHostEdgeContext | undefined {
+function defaultEdgeForRuntimeUrl(url: string): McpHostEdgeContext | undefined {
   if (!url.startsWith(MCP_HOST_URL)) return undefined
 
   const path = url.slice(MCP_HOST_URL.replace(/\/+$/, '').length)
@@ -58,29 +53,21 @@ function defaultEdgeForRuntimeUrl(url: string, method = 'GET'): McpHostEdgeConte
     return undefined
   }
 
-  if (
-    method === 'GET' &&
-    (path.startsWith('/v1/runtime/status') ||
-      path.startsWith('/v1/runtime/activity') ||
-      path.startsWith('/v1/runtime/sessions'))
-  ) {
-    return { caller: 'rpc-proxy' }
-  }
-
   return { caller: 'channel-reader' }
 }
 
 /**
  * Direct port-forwarded mcp-host runtime routes require edge caller headers.
- * Bearer JWTs are rejected on these paths (see edgeRuntimeAuth.ts).
+ * Bearer JWTs are rejected on these paths (see edgeRuntimeAuth.ts). Routes
+ * that admit only rpc-proxy (status, activity, sessions) are reached through
+ * rpc-proxy with a real RPC token, as getStatus and getHostActivity do.
  */
 function withMcpHostRuntime(
   url: string,
   opts?: RequestInit,
   edge?: McpHostEdgeContext
 ): RequestInit | undefined {
-  const method = opts?.method ?? 'GET'
-  const resolvedEdge = edge ?? defaultEdgeForRuntimeUrl(url, method)
+  const resolvedEdge = edge ?? defaultEdgeForRuntimeUrl(url)
   if (!resolvedEdge) return opts
 
   const headers = new Headers(opts?.headers)
@@ -169,10 +156,38 @@ export async function sendMessage(
   )
 }
 
-/** GET mcp-host /v1/runtime/status. */
-export async function getStatus(): Promise<any> {
-  const { data } = await fetchJson(`${MCP_HOST_URL}/v1/runtime/status`)
+function rpcHostUrl(hostRef: string, route: string): string {
+  return `${RPC_PROXY_URL}/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/${route}`
+}
+
+/**
+ * GET the Host runtime status through rpc-proxy
+ * (`/api/v1/rpc/hosts/:hostRef/status`). The token needs `host:status:read`.
+ */
+export async function getStatus(token: string, hostRef: string = DEFAULT_HOST_REF): Promise<any> {
+  const { data } = await fetchJson(rpcHostUrl(hostRef, 'status'), {
+    headers: { Authorization: `Bearer ${token}` },
+  })
   return data
+}
+
+/**
+ * GET the Host activity snapshot through rpc-proxy
+ * (`/api/v1/rpc/hosts/:hostRef/activity`). The token needs `host:activity:read`.
+ */
+export async function getHostActivity(
+  token: string,
+  query: { limit?: number; sinceEventId?: string } = {},
+  hostRef: string = DEFAULT_HOST_REF
+): Promise<{ status: number; data: any }> {
+  const params = new URLSearchParams()
+  if (query.limit !== undefined) params.set('limit', String(query.limit))
+  if (query.sinceEventId) params.set('sinceEventId', query.sinceEventId)
+  const encoded = params.toString()
+  const search = encoded ? `?${encoded}` : ''
+  return fetchJson(`${rpcHostUrl(hostRef, 'activity')}${search}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
 }
 
 /** GET service health, using mcp-host's runtime path only for mcp-host. */
@@ -187,11 +202,11 @@ export async function healthCheck(url: string = MCP_HOST_URL, path?: string): Pr
   }
 }
 
-/** Poll mcp-host /v1/runtime/status until agent is idle or timeout. */
-export async function waitForIdle(timeoutMs = 30_000): Promise<any> {
+/** Poll the Host status through rpc-proxy until the agent is idle or timeout. */
+export async function waitForIdle(token: string, timeoutMs = 30_000): Promise<any> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
-    const status = await getStatus()
+    const status = await getStatus(token)
     if (status.agent?.state === 'idle') return status
     await sleep(500)
   }
@@ -200,13 +215,14 @@ export async function waitForIdle(timeoutMs = 30_000): Promise<any> {
 
 /** Wait for agent to process at least N total tasks. */
 export async function waitForTasksProcessed(
+  token: string,
   minCount: number,
   timeoutMs = 60_000,
   pollIntervalMs = 1000
 ): Promise<any> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
-    const status = await getStatus()
+    const status = await getStatus(token)
     if ((status.agent?.tasksProcessed ?? 0) >= minCount) return status
     await sleep(pollIntervalMs)
   }
@@ -310,11 +326,15 @@ export async function denyRequest(
   )
 }
 
-/** Poll mcp-host /v1/runtime/status until agent reaches targetState or timeout. */
-export async function waitForAgentState(targetState: string, timeoutMs = 30_000): Promise<any> {
+/** Poll the Host status through rpc-proxy until the agent reaches targetState or timeout. */
+export async function waitForAgentState(
+  token: string,
+  targetState: string,
+  timeoutMs = 30_000
+): Promise<any> {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
-    const status = await getStatus()
+    const status = await getStatus(token)
     if (status.agent?.state === targetState) return status
     await sleep(500)
   }
@@ -340,4 +360,80 @@ export async function getTaskResult(
   }
   // Return last result even if not completed
   return fetchJson(`${MCP_HOST_URL}/v1/runtime/tasks/${taskId}/result`)
+}
+
+export type TaskProgressEvent = { type: string; data: any }
+
+function parseSseBlock(block: string): TaskProgressEvent | undefined {
+  let type = 'message'
+  const dataLines: string[] = []
+  for (const line of block.split('\n')) {
+    if (line.startsWith(':')) continue
+    if (line.startsWith('event:')) type = line.slice('event:'.length).trim()
+    else if (line.startsWith('data:')) dataLines.push(line.slice('data:'.length).trimStart())
+  }
+  if (dataLines.length === 0) return undefined
+  return { type, data: JSON.parse(dataLines.join('\n')) }
+}
+
+/**
+ * Read the Host progress stream `/v1/runtime/tasks/:taskId/progress/stream`
+ * as a channel caller, hand every event to `onEvent` in order, and resolve
+ * with the data of the `terminal` event. The Host never closes the stream by
+ * itself, so this aborts it after the terminal event. An `error` event, a
+ * stream that ends before its terminal event and the timeout all throw.
+ */
+export async function readTaskProgressStream(
+  taskId: string,
+  edge: McpHostEdgeContext,
+  onEvent: (event: TaskProgressEvent) => Promise<void> | void,
+  timeoutMs = 90_000
+): Promise<any> {
+  const url = `${MCP_HOST_URL}/v1/runtime/tasks/${encodeURIComponent(taskId)}/progress/stream`
+  const controller = new AbortController()
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
+  try {
+    const res = await fetch(url, {
+      ...withMcpHostRuntime(url, { headers: { Accept: 'text/event-stream' } }, edge),
+      signal: controller.signal,
+    })
+    if (res.status !== 200 || !res.body) {
+      throw new Error(`Task ${taskId} progress stream returned ${res.status}: ${await res.text()}`)
+    }
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) throw new Error(`Task ${taskId} progress stream ended before its terminal event`)
+      buffer += decoder.decode(value, { stream: true })
+      let boundary = buffer.indexOf('\n\n')
+      while (boundary !== -1) {
+        const event = parseSseBlock(buffer.slice(0, boundary))
+        buffer = buffer.slice(boundary + 2)
+        boundary = buffer.indexOf('\n\n')
+        if (!event) continue
+        if (event.type === 'error') {
+          throw new Error(`Task ${taskId} progress stream error: ${JSON.stringify(event.data)}`)
+        }
+        await onEvent(event)
+        if (event.type === 'terminal') return event.data
+      }
+    }
+  } catch (error) {
+    if (timedOut) {
+      throw new Error(`Task ${taskId} progress stream timed out after ${timeoutMs}ms`, {
+        cause: error,
+      })
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+    // Close the stream on every exit: the Host keeps it open after terminal.
+    controller.abort()
+  }
 }

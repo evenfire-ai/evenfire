@@ -49,7 +49,12 @@ import { shouldAcceptSandboxUiProtocolLink } from './sandboxUiProtocolWindowPoli
 import { notifySandboxUiHostResumed } from './sandboxUiSessionRefresh.js'
 import { wireHostDesktopShortcutRouting } from './shortcutRouter.js'
 import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.js'
-import { TokenStore } from './tokenStore.js'
+import {
+  TokenStore,
+  closeTokenStoreAdmission,
+  openTokenStoreAdmission,
+  waitForTokenStoreOperations,
+} from './tokenStore.js'
 
 const EVENFIRE_APP_NAME = 'Evenfire'
 const EVENFIRE_APP_ID = 'ai.evenfire.desktop'
@@ -342,8 +347,39 @@ const mainWindowCoordinator = createMainWindowCoordinator<BrowserWindow>({
   getWindow: () => mainWindow,
 })
 
+let pendingQuitDrain: object | null = null
+
+function cancelPendingQuitDrain(): void {
+  if (!pendingQuitDrain) return
+  pendingQuitDrain = null
+  openTokenStoreAdmission()
+}
+
+app.on('browser-window-created', () => cancelPendingQuitDrain())
+app.on('will-quit', event => {
+  if (process.platform !== 'darwin') return
+  const operationsPending = closeTokenStoreAdmission()
+  if (!operationsPending) {
+    queueMicrotask(() => {
+      if (event.defaultPrevented) openTokenStoreAdmission()
+    })
+    return
+  }
+
+  event.preventDefault()
+  if (pendingQuitDrain) return
+  const attempt = {}
+  pendingQuitDrain = attempt
+  void waitForTokenStoreOperations().then(() => {
+    if (pendingQuitDrain !== attempt) return
+    pendingQuitDrain = null
+    app.quit()
+  })
+})
+
 function requestMainWindow(): void {
   if (!mainWindowLifecycleReady || !app.isReady()) return
+  cancelPendingQuitDrain()
   void mainWindowCoordinator.ensureWindow().catch(error => {
     console.error('[Desktop] Could not create the main window for a deep link:', error)
   })

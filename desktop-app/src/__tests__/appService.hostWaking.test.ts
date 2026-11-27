@@ -177,7 +177,7 @@ describe('AppService.invokeHostMessage host-availability plumbing', () => {
       'rpc-token',
       'myhost',
       expect.objectContaining({ content: 'hi', model: 'claude-opus-4-8' }),
-      undefined
+      { idempotencyKey: expect.any(String) }
     )
   })
 
