@@ -1546,6 +1546,57 @@ assert_an_empty_target_list_survives_set_u() {
   fi
 }
 
+# CI runs this suite on ubuntu-latest, whose bash (4.4 and later) accepts
+# "${arr[@]}" on an empty array under set -u, so the case above cannot fail
+# there. This literal check can. Every function in pre-gate-incremental.sh that
+# expands one of the file's INCREMENTAL_* arrays must use the
+# ${arr[@]+"${arr[@]}"} form, or read the array's count first: the build loops
+# return on ${#INCREMENTAL_TARGETS[@]} == 0 before they expand it.
+assert_every_incremental_array_expansion_is_guarded() {
+  local src arrays report unguarded fn body missing=""
+  src="$REPO_ROOT/scripts/minikube/pre-gate-incremental.sh"
+  arrays="$(sed -n 's/^\(INCREMENTAL_[A-Z_]*\)=()$/\1/p' "$src" | tr '\n' ' ')"
+  report="$(awk -v arrays="$arrays" '
+    function strip(text, needle,   at, kept) {
+      kept = ""
+      while ((at = index(text, needle)) > 0) {
+        kept = kept substr(text, 1, at - 1)
+        text = substr(text, at + length(needle))
+      }
+      return kept text
+    }
+    function check(   i, name, rest) {
+      print "scanned " fn
+      for (i = 1; i <= count; i++) {
+        name = names[i]
+        rest = strip(body, "${" name "[@]+\"${" name "[@]}\"}")
+        if (index(rest, "\"${" name "[@]}\"") && !index(body, "${#" name "[@]}")) {
+          print "unguarded " fn " " name
+        }
+      }
+    }
+    BEGIN { count = split(arrays, names, " ") }
+    /^[a-z_]+[(][)] [{]$/ { fn = $1; sub(/[(][)]$/, "", fn); body = ""; infn = 1; next }
+    infn && /^[}]$/ { check(); infn = 0; next }
+    infn { body = body $0 "\n" }
+  ' "$src")"
+  unguarded="$(grep '^unguarded ' <<< "$report")"
+  for fn in incremental_has_target incremental_restart_targets incremental_target_summary; do
+    body="$(sed -n "/^${fn}() {\$/,/^}\$/p" "$src")"
+    # shellcheck disable=SC2016
+    if ! grep -Fqx "scanned ${fn}" <<< "$report" \
+       || [[ "$body" != *'for target in ${INCREMENTAL_TARGETS[@]+"${INCREMENTAL_TARGETS[@]}"}; do'* ]]; then
+      missing+="${fn} "
+    fi
+  done
+  if [ -z "$unguarded" ] && [ -z "$missing" ] \
+     && [[ " $arrays " == *" INCREMENTAL_TARGETS "* ]]; then
+    pass "every INCREMENTAL_* array expansion is guarded for bash 3.2 under set -u"
+  else
+    fail "an INCREMENTAL_* array expansion can abort bash 3.2 under set -u: ${unguarded:-} missing=${missing:-none} arrays=${arrays}"
+  fi
+}
+
 assert_every_defined_case_is_invoked() {
   local self defined invoked missing
   self="$REPO_ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh"
@@ -1602,6 +1653,7 @@ assert_the_touched_scripts_parse
 assert_incremental_runtime_calls_are_bounded
 assert_empty_incremental_docker_env_fails_closed
 assert_an_empty_target_list_survives_set_u
+assert_every_incremental_array_expansion_is_guarded
 assert_every_defined_case_is_invoked
 
 exit $FAIL
