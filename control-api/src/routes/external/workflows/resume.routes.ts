@@ -48,7 +48,7 @@ export function createExternalWorkflowResumeRoutes(gateway: K8sGateway): Router 
           authority,
           db: pool,
         })
-        res.json({ run: mapDbRun(row) })
+        res.json({ run: mapDbRun(row, 'tenant') })
       } catch (error) {
         if (error instanceof WorkflowAuthorityError) {
           res.status(error.status).json({ error: error.code })

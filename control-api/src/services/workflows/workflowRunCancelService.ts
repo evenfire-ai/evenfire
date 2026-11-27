@@ -91,13 +91,73 @@ function requireUpdatedRow(rows: unknown[], statement: string, runId: string): W
 }
 
 /**
- * Cancels a workflow run for a user-session caller, in one transaction:
- * lock the run, check the caller may cancel it (a caller who may not gets the
- * same 404 as for a missing run), then by phase: `Canceled` or an existing
- * request answers with the row unchanged; `Succeeded` and `Failed` are not
- * cancellable; a run without a child becomes `Canceled`; a run with a child
- * gets a cancel request. A run that got a request has its unexpired pending
- * step approvals cancelled in the same transaction.
+ * The `canceled_by` value an operator cancel records: the prefix marks the
+ * subject as a Control UI operator (an admin user id), not an application user
+ * id, so readers can tell the two apart.
+ */
+export const OPERATOR_CANCELED_BY_PREFIX = 'operator:'
+
+export function operatorCanceledBy(operatorId: string): string {
+  return `${OPERATOR_CANCELED_BY_PREFIX}${operatorId}`
+}
+
+/**
+ * The cancel of a run already locked by `LOCK_RUN_FOR_CANCEL` in this
+ * transaction, once the caller may cancel it. By phase: `Canceled` or an
+ * existing request answers with the row unchanged; `Succeeded` and `Failed`
+ * are not cancellable; a run without a child becomes `Canceled`; a run with a
+ * child gets a cancel request. A run that got a request has its unexpired
+ * pending step approvals cancelled in the same transaction.
+ */
+async function cancelLockedRun(
+  db: DbClient,
+  run: WorkflowRunRow,
+  canceledBy: string
+): Promise<WorkflowRunRow> {
+  const runId = run.run_id
+  switch (run.phase) {
+    case 'Canceled':
+      return run
+    case 'Succeeded':
+    case 'Failed':
+      throw new WorkflowRunCancelError(409, 'workflow_run_not_cancellable')
+    case 'Pending':
+    case 'Running':
+    case 'AuthorizationPaused':
+      break
+    default:
+      throw new Error(`workflow run ${runId} has unknown phase ${String(run.phase)}`)
+  }
+
+  if (run.cancel_requested_at !== null) {
+    // Asked before: the first canceller stays recorded; the notification is
+    // sent again so a lost delivery is retried.
+    await notifyRunUpdate(db, runId)
+    return run
+  }
+
+  let cancelled: WorkflowRunRow
+  if (run.child_recipe_name === null) {
+    if (run.phase === 'Running') {
+      // Only legacy rows: a claim sets the child together with `Running`.
+      throw new WorkflowRunCancelError(409, 'workflow_run_not_cancellable')
+    }
+    const updated = await db.query(CANCEL_RUN_WITHOUT_CHILD, [runId, canceledBy])
+    cancelled = requireUpdatedRow(updated.rows, 'CANCEL_RUN_WITHOUT_CHILD', runId)
+  } else {
+    const updated = await db.query(REQUEST_CANCEL_OF_RUN_WITH_CHILD, [runId, canceledBy])
+    cancelled = requireUpdatedRow(updated.rows, 'REQUEST_CANCEL_OF_RUN_WITH_CHILD', runId)
+    await notifyRunUpdate(db, runId)
+  }
+
+  await cancelPendingRequestsForRun(db, runId, canceledBy)
+  return cancelled
+}
+
+/**
+ * Cancels a workflow run for a user-session caller, in one transaction: lock
+ * the run, check the caller may cancel it (a caller who may not gets the same
+ * 404 as for a missing run), then `cancelLockedRun` with the caller's user id.
  */
 export async function cancelWorkflowRun(input: {
   runId: string
@@ -139,42 +199,40 @@ export async function cancelWorkflowRun(input: {
       throw new WorkflowRunCancelError(404, 'workflow_run_not_found')
     }
 
-    switch (run.phase) {
-      case 'Canceled':
-        return run
-      case 'Succeeded':
-      case 'Failed':
-        throw new WorkflowRunCancelError(409, 'workflow_run_not_cancellable')
-      case 'Pending':
-      case 'Running':
-      case 'AuthorizationPaused':
-        break
-      default:
-        throw new Error(`workflow run ${input.runId} has unknown phase ${String(run.phase)}`)
-    }
+    return cancelLockedRun(db, run, cancelledBy)
+  }, input.db ?? pool)
+}
 
-    if (run.cancel_requested_at !== null) {
-      // Asked before: the first canceller stays recorded; the notification is
-      // sent again so a lost delivery is retried.
-      await notifyRunUpdate(db, input.runId)
-      return run
-    }
+/**
+ * Cancels a workflow run for a Control UI operator (owner decision: an
+ * operator may cancel any run of a recipe), in one transaction: lock the run
+ * of the recipe in the path (a run of another recipe gets the same 404 as a
+ * missing run), then `cancelLockedRun` with `canceled_by = operator:<id>`.
+ * No team or grant row is read; the route authenticates the operator.
+ */
+export async function cancelWorkflowRunAsOperator(input: {
+  runId: string
+  recipeNamespace: string
+  recipeName: string
+  operatorId: string
+  db?: Pool
+}): Promise<WorkflowRunRow> {
+  if (!canonicalWorkflowRunId(input.runId)) {
+    throw new WorkflowRunCancelError(404, 'workflow_run_not_found')
+  }
+  if (typeof input.operatorId !== 'string' || input.operatorId.length === 0) {
+    throw new Error('cancelWorkflowRunAsOperator requires an operator id')
+  }
+  const canceledBy = operatorCanceledBy(input.operatorId)
 
-    let cancelled: WorkflowRunRow
-    if (run.child_recipe_name === null) {
-      if (run.phase === 'Running') {
-        // Only legacy rows: a claim sets the child together with `Running`.
-        throw new WorkflowRunCancelError(409, 'workflow_run_not_cancellable')
-      }
-      const updated = await db.query(CANCEL_RUN_WITHOUT_CHILD, [input.runId, cancelledBy])
-      cancelled = requireUpdatedRow(updated.rows, 'CANCEL_RUN_WITHOUT_CHILD', input.runId)
-    } else {
-      const updated = await db.query(REQUEST_CANCEL_OF_RUN_WITH_CHILD, [input.runId, cancelledBy])
-      cancelled = requireUpdatedRow(updated.rows, 'REQUEST_CANCEL_OF_RUN_WITH_CHILD', input.runId)
-      await notifyRunUpdate(db, input.runId)
-    }
-
-    await cancelPendingRequestsForRun(db, input.runId, cancelledBy)
-    return cancelled
+  return withTransaction(async db => {
+    const locked = await db.query(LOCK_RUN_FOR_CANCEL, [
+      input.runId,
+      input.recipeNamespace,
+      input.recipeName,
+    ])
+    const run = locked.rows[0] as WorkflowRunRow | undefined
+    if (!run) throw new WorkflowRunCancelError(404, 'workflow_run_not_found')
+    return cancelLockedRun(db, run, canceledBy)
   }, input.db ?? pool)
 }

@@ -43,7 +43,8 @@ lower overrides lower the effective workload capacity.
 | Subscription callback | CONTROL_API_SUBSCRIPTION_OAUTH_CALLBACK_PER_MIN=100 | Per supplied state (20 in `dev`); no-state IP safeguard 20. An edge-only ceiling of the same value per source IP per pod bounds `state` rotation; `dev` had no per-IP bound on callbacks that carry a state. Presence is not state validation. |
 | Workflow administrative reads | CONTROL_API_ADMIN_WORKFLOW_READ_PER_MIN=300 | Existing verified administrator credential. |
 | Workflow grant reads/writes | CONTROL_API_ADMIN_WORKFLOW_GRANT_READ_PER_MIN=300; CONTROL_API_ADMIN_WORKFLOW_GRANT_WRITE_PER_MIN=100 | Separate families and aligned verified edge/ledger. |
-| Administrative workflow trigger | CONTROL_API_ADMIN_WORKFLOW_TRIGGER_PER_MIN=50 | Existing verified caller. External/MCP trigger contract remains 10. |
+| Administrative workflow trigger | CONTROL_API_ADMIN_WORKFLOW_TRIGGER_PER_MIN=50 | Existing verified caller. An unverified credential keeps the fixed source-IP budget of 10. |
+| External and mcp-host workflow trigger | CONTROL_API_WORKFLOW_TRIGGER_PER_MIN=10 | External trigger, resume and cancel, and the mcp-host trigger. Every key follows this value, including the external source-IP fallback and a raw bearer. The administrative trigger's unverified-credential budget stays 10. |
 | Outputs reads | CONTROL_API_ADMIN_OUTPUTS_READ_PER_MIN=150 | Existing administrator binding. |
 | Host wake | CONTROL_API_HOST_WAKE_RL_PER_MIN=150 | Verified Host reference after authentication and Host match. |
 | Registry keys/grants/status/connect/recovery | CONTROL_API_ADMIN_REGISTRY_KEYS_PER_MIN=150; GRANTS=150; CONNECT_STATUS=150; CONNECT_REQUEST=15; CONNECT_RECOVERY=50 | Separate authenticated administrator-subject families; each suffix uses the CONTROL_API_ADMIN_REGISTRY_ prefix. |

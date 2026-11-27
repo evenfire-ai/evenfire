@@ -1275,7 +1275,7 @@ export async function cancelRequest(
  * binding (`resolveWorkflowApprovalRunBinding`). An approval already past
  * `expires_at` is left for the expiry path, which records it `expired`.
  */
-export const CANCEL_PENDING_APPROVALS_FOR_RUN = `
+const CANCEL_PENDING_APPROVALS_FOR_RUN = `
   UPDATE workflow_approval_requests
      SET status = 'cancelled',
          cancelled_at = NOW(),

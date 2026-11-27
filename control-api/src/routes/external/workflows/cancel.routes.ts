@@ -34,7 +34,7 @@ export function createExternalWorkflowCancelRoutes(): Router {
           caller,
           db: pool,
         })
-        res.json({ run: mapDbRun(row) })
+        res.json({ run: mapDbRun(row, 'tenant') })
       } catch (error) {
         if (error instanceof WorkflowRunCancelError) {
           res.status(error.status).json({ error: error.code })

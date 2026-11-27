@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import type { K8sGateway } from '../../../k8s.js'
+import { createAdminWorkflowCancelRoutes } from './cancel.routes.js'
 import { createAdminWorkflowGrantRoutes } from './grants.routes.js'
 import { createAdminWorkflowReadRoutes } from './read.routes.js'
 import { createAdminWorkflowRunsRoutes } from './runs.routes.js'
@@ -17,6 +18,7 @@ export function createWorkflowsAdminRouter(
   const router = Router()
   router.use(createAdminWorkflowRunsRoutes(gateway, options))
   router.use(createAdminWorkflowTriggerRoutes(gateway))
+  router.use(createAdminWorkflowCancelRoutes())
   router.use(createAdminWorkflowGrantRoutes(gateway))
   router.use(createAdminWorkflowReadRoutes(gateway))
   return router

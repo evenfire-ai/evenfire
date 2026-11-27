@@ -265,6 +265,7 @@ type Config = {
   adminWorkflowGrantReadPerMin: number
   adminWorkflowGrantWritePerMin: number
   adminWorkflowTriggerPerMin: number
+  workflowTriggerPerMin: number
   adminOutputsReadPerMin: number
   llmProviderAttemptAuthorizePerMin: number
   llmProviderAttemptAuthorizeAnonymousIpPerMin: number
@@ -1170,6 +1171,7 @@ export const config: Config = {
     'CONTROL_API_ADMIN_WORKFLOW_TRIGGER_PER_MIN',
     50
   ),
+  workflowTriggerPerMin: positiveIntegerFromEnv('CONTROL_API_WORKFLOW_TRIGGER_PER_MIN', 10),
   adminOutputsReadPerMin: positiveIntegerFromEnv('CONTROL_API_ADMIN_OUTPUTS_READ_PER_MIN', 150),
   llmProviderAttemptAuthorizePerMin: positiveIntegerFromEnv(
     'CONTROL_API_LLM_PROVIDER_ATTEMPT_AUTHORIZE_PER_MIN',

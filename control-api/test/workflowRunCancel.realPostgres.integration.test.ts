@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import express, { type NextFunction, type Request, type Response } from 'express'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { Client, Pool, type PoolClient, type QueryResult } from 'pg'
 import request from 'supertest'
 import { createDbRunProcessor } from '../../workflow-recipes/src/reconciler/dbRunProcessor.js'
@@ -9,7 +11,9 @@ import { initDb, pool } from '../src/db.js'
 import { K8sGateway } from '../src/k8s.js'
 import type { ExternalAuthedRequest } from '../src/middleware/externalSessionAuth.js'
 import type { TeamRole } from '../src/profileTypes.js'
+import { createWorkflowsAdminRouter } from '../src/routes/admin/workflows/index.js'
 import { createExternalWorkflowsRouter } from '../src/routes/external/workflows/index.js'
+import { createMcpHostWorkflowRoutes } from '../src/routes/mcp-host/workflows/index.js'
 import { authorizeActionV2 } from '../src/services/access/actionAuthorizer.js'
 import { prepareActionOperationTarget } from '../src/services/access/actionMessageId.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
@@ -34,10 +38,16 @@ import {
   requireWorkflowActionAuthority,
 } from '../src/services/workflows/workflowAuthorityBindingService.js'
 import { getWorkflowPrincipalId } from '../src/services/workflows/workflowCallerService.js'
-import { LOCK_RUN_FOR_CANCEL } from '../src/services/workflows/workflowRunCancelService.js'
+import {
+  CANCEL_RUN_WITHOUT_CHILD,
+  LOCK_RUN_FOR_CANCEL,
+  REQUEST_CANCEL_OF_RUN_WITH_CHILD,
+} from '../src/services/workflows/workflowRunCancelService.js'
 import { listCanonicalRuns } from '../src/services/workflows/workflowRunReadService.js'
 import { resumeWorkflowRun } from '../src/services/workflows/workflowRunResumeService.js'
 import { triggerWorkflow } from '../src/services/workflows/workflowTriggerService.js'
+import { signAdminToken } from '../src/utils/auth/adminAuthToken.js'
+import { issueMcpHostControlJwt } from '../src/utils/auth/mcpHostJwtToken.js'
 import {
   issueUserDelegationV2,
   verifyUserDelegationV2,
@@ -185,6 +195,10 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
   const D = user('admin-other-scope')
   /** Member of T and approval target. */
   const P = user('approval-target')
+  /** Control UI operator (a `control_admin_users` row) and its signed session. */
+  const operatorId = randomUUID()
+  const operatorCanceledBy = `operator:${operatorId}`
+  let operatorToken: string
 
   /** One S12 recipe per row, so each list read sees that row's run only. */
   const s12Recipes = [
@@ -330,9 +344,23 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
       else process.env.KUBECONFIG = priorKubeconfig
     }
 
+    const operatorRow = await databasePool.query<{ session_version: number }>(
+      `INSERT INTO control_admin_users (id, username, password_hash, role, status)
+       VALUES ($1, $2, 'fixture-password-hash', 'admin', 'active')
+       RETURNING session_version`,
+      [operatorId, `cancel-operator-${operatorId}`]
+    )
+    operatorToken = signAdminToken(
+      operatorId,
+      'admin',
+      Number(operatorRow.rows[0]!.session_version)
+    )
+
     app = express()
     app.use(express.json())
     app.use(createExternalWorkflowsRouter(gateway))
+    app.use(createWorkflowsAdminRouter(gateway))
+    app.use('/mcp-host', createMcpHostWorkflowRoutes(gateway))
     app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
       capturedErrors.push(error)
       res.status(500).json({ error: 'test_error_handler' })
@@ -478,6 +506,20 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     if (token) req.set('x-user-session-token', token)
     for (const [name, value] of Object.entries(headers)) req.set(name, value)
     return req
+  }
+
+  /** The operator cancel (admin route) with the operator's session cookie. */
+  function operatorCancel(runId: string, recipe: string, token: string | null = operatorToken) {
+    const req = request(app).post(`/admin/workflows/${ns}/${recipe}/runs/${runId}/cancel`)
+    if (token) req.set('Cookie', `control_ui_admin_session=${token}`)
+    return req
+  }
+
+  /** The external run list (V1 session: no delegation is read). */
+  function externalRuns(token: string, recipe: string) {
+    return request(app)
+      .get(`/external/workflows/${ns}/${recipe}/runs`)
+      .set('x-user-session-token', token)
   }
 
   // ── notifications ───────────────────────────────────────────────────────
@@ -1031,6 +1073,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
         ns,
         entry.recipe,
         50,
+        'tenant',
         await callerFor(tokens[entry.caller])
       )
       const listedRun = listed.find(run => run.id === runId) as
@@ -1098,7 +1141,13 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
       ]
       for (const { row, run, recipe } of unreachable) {
         for (const caller of ['A', 'L', 'M', 'P'] as const) {
-          const listed = await listCanonicalRuns(ns, recipe, 50, await callerFor(tokens[caller]))
+          const listed = await listCanonicalRuns(
+            ns,
+            recipe,
+            50,
+            'tenant',
+            await callerFor(tokens[caller])
+          )
           expect({ row, caller, listed: listed.some(entry => entry.id === run) }).toEqual({
             row,
             caller,
@@ -1201,7 +1250,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
       approvalRequestId: approval.id,
     })
     const listedFlags = async () => {
-      const listed = await listCanonicalRuns(ns, recipe, 50, await callerFor(token))
+      const listed = await listCanonicalRuns(ns, recipe, 50, 'tenant', await callerFor(token))
       const flag = (runId: string) => {
         const run = listed.find(entry => entry.id === runId) as
           | { viewerCanCancel?: boolean }
@@ -1541,6 +1590,72 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
 
   // ── S22 · resume ────────────────────────────────────────────────────────
 
+  /** The run's phase and how many continuation bindings it holds. */
+  async function continuationOf(runId: string) {
+    const result = await databasePool.query<{ phase: string; continuation_count: number }>(
+      `SELECT phase,
+              (SELECT COUNT(*)::int
+                 FROM workflow_authority_bindings
+                WHERE binding_kind = 'run_management'
+                  AND entity_type = 'workflow_run'
+                  AND entity_id = run_id::text) AS continuation_count
+         FROM workflow_runs
+        WHERE run_id = $1`,
+      [runId]
+    )
+    expect(result.rows).toHaveLength(1)
+    return result.rows[0]!
+  }
+
+  /**
+   * Runs `work` with every `databasePool` client recording the run's
+   * continuation binding inserts (the resume passes `databasePool` as its
+   * transaction pool).
+   */
+  async function recordingBindingInserts<T>(runId: string, work: () => Promise<T>) {
+    const inserts: unknown[][] = []
+    const connect = databasePool.connect.bind(databasePool) as (
+      ...args: unknown[]
+    ) => Promise<PoolClient> | undefined
+    const spy = vi.spyOn(databasePool, 'connect').mockImplementation(((...args: unknown[]) => {
+      // `Pool.query` checks out its client through the callback form; those
+      // statements run outside any transaction and are not wrapped.
+      if (typeof args[0] === 'function') return connect(...args)
+      return wrapped()
+    }) as unknown as typeof databasePool.connect)
+    async function wrapped() {
+      const client = (await connect())!
+      return new Proxy(client, {
+        get(target, prop) {
+          if (prop === 'query') {
+            return (...args: unknown[]) => {
+              const values = Array.isArray(args[1]) ? (args[1] as unknown[]) : undefined
+              if (
+                /^\s*INSERT INTO workflow_authority_bindings\b/.test(queryText(args[0])) &&
+                values?.[0] === 'run_management' &&
+                values?.[2] === runId
+              ) {
+                inserts.push(values)
+              }
+              return (target.query as (...a: unknown[]) => unknown)(...args)
+            }
+          }
+          const value = Reflect.get(target, prop, target)
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
+    }
+    try {
+      const outcome = await work().then(
+        value => ({ value, error: undefined as unknown }),
+        (error: unknown) => ({ value: undefined, error })
+      )
+      return { ...outcome, inserts }
+    } finally {
+      spy.mockRestore()
+    }
+  }
+
   it('cancel then resume, and resume then cancel', async () => {
     for (const withChild of [false, true]) {
       // Cancel first.
@@ -1551,7 +1666,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
       const afterCancel = await readRun(first.runId)
       expect(afterCancel.cancel_requested_at).toBeInstanceOf(Date)
       expect(afterCancel.phase).toBe(withChild ? 'AuthorizationPaused' : 'Canceled')
-      await expect(
+      const refused = await recordingBindingInserts(first.runId, () =>
         resumeWorkflowRun({
           runId: first.runId,
           recipeNamespace: ns,
@@ -1559,7 +1674,20 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
           authority: firstAuthority,
           db: databasePool,
         })
-      ).rejects.toMatchObject({ status: 409, code: 'workflow_run_not_paused' })
+      )
+      expect(refused.error).toMatchObject({ status: 409, code: 'workflow_run_not_paused' })
+      // Witness: with a child the paused run reaches the binding insert inside
+      // the resume transaction; without one the run is already Canceled and the
+      // resume stops at the phase check.
+      expect({ withChild, inserts: refused.inserts.length }).toEqual({
+        withChild,
+        inserts: withChild ? 1 : 0,
+      })
+      // The refused resume leaves no continuation binding: its insert rolled back.
+      expect(await continuationOf(first.runId)).toEqual({
+        phase: withChild ? 'AuthorizationPaused' : 'Canceled',
+        continuation_count: 0,
+      })
       expect(await readRun(first.runId)).toMatchObject({
         phase: withChild ? 'AuthorizationPaused' : 'Canceled',
         canceled_by: L.id,
@@ -1577,6 +1705,8 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
         db: databasePool,
       })
       expect(resumed.phase).toBe(withChild ? 'Running' : 'Pending')
+      // The accepted resume commits its continuation binding.
+      expect((await continuationOf(second.runId)).continuation_count).toBe(1)
       expect((await cancel(second.token, second.runId, cancelRecipe)).status).toBe(200)
       const afterResume = await readRun(second.runId)
       expect(afterResume.cancel_requested_at).toBeInstanceOf(Date)
@@ -1867,5 +1997,439 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     expect(step.rows).toEqual([{ phase: 'Failed', error: stepError }])
     expect(onRunTerminal).toHaveBeenCalledOnce()
     expect(onRunTerminal).toHaveBeenCalledWith(target.runId, 'Canceled')
+  }, 60_000)
+
+  // ── Operator cancel (admin route, OD-4) ─────────────────────────────────
+
+  it('operator cancel is scoped to the recipe in the path', async () => {
+    const recipe = `op-s4-${suffix}`
+    const otherRecipe = `op-s4-other-${suffix}`
+    const runId = await insertRun({ recipe, phase: 'Pending', actorType: 'scheduled' })
+    const before = await readRun(runId)
+
+    for (const [label, id, pathRecipe] of [
+      ['run of another recipe', runId, otherRecipe],
+      ['unknown run', randomUUID(), recipe],
+      ['non-canonical (uppercase) id', runId.toUpperCase(), recipe],
+    ] as const) {
+      const response = await operatorCancel(id, pathRecipe)
+      expect({ label, status: response.status, body: response.body }).toEqual({
+        label,
+        status: 404,
+        body: { error: 'workflow_run_not_found' },
+      })
+      expect(await readRun(runId)).toEqual(before)
+    }
+
+    // Liveness: the right path cancels the same run.
+    const response = await operatorCancel(runId, recipe)
+    expect(response.status).toBe(200)
+    expect(response.body).toMatchObject({ id: runId, phase: 'Canceled' })
+    expect(await readRun(runId)).toMatchObject({
+      phase: 'Canceled',
+      canceled_by: operatorCanceledBy,
+    })
+  }, 60_000)
+
+  it('operator cancel by terminal phase', async () => {
+    const recipe = `op-s5-${suffix}`
+    const canceled = await insertRun({ recipe, phase: 'Canceled', actorType: 'scheduled' })
+    const canceledBefore = await readRun(canceled)
+    const again = await operatorCancel(canceled, recipe)
+    expect(again.status).toBe(200)
+    expect(again.body).toMatchObject({ id: canceled, phase: 'Canceled' })
+    expect(await readRun(canceled)).toEqual(canceledBefore)
+
+    for (const phase of ['Succeeded', 'Failed'] as const) {
+      const finished = await insertRun({ recipe, phase, actorType: 'scheduled' })
+      const before = await readRun(finished)
+      const response = await operatorCancel(finished, recipe)
+      expect({ phase, status: response.status, body: response.body }).toEqual({
+        phase,
+        status: 409,
+        body: { error: 'workflow_run_not_cancellable' },
+      })
+      expect(await readRun(finished)).toEqual(before)
+    }
+
+    // A running row without a child exists only as a legacy row.
+    const legacy = await insertRun({ recipe, phase: 'Running', actorType: 'scheduled' })
+    const legacyBefore = await readRun(legacy)
+    const legacyResponse = await operatorCancel(legacy, recipe)
+    expect(legacyResponse.status).toBe(409)
+    expect(legacyResponse.body).toEqual({ error: 'workflow_run_not_cancellable' })
+    expect(await readRun(legacy)).toEqual(legacyBefore)
+  }, 60_000)
+
+  it('operator cancels a run without a child', async () => {
+    const recipe = `op-s6-${suffix}`
+    for (const phase of ['Pending', 'AuthorizationPaused'] as const) {
+      // Another user's run with no team: no external caller but its launcher
+      // may cancel it.
+      const runId = await launcherRun(phase, recipe)
+      const { result: response, payloads } = await notificationsDuring(() =>
+        operatorCancel(runId, recipe).then(r => r)
+      )
+      expect({ phase, status: response.status }).toEqual({ phase, status: 200 })
+      expect(response.body).toMatchObject({
+        id: runId,
+        source: 'live',
+        phase: 'Canceled',
+        canceledBy: operatorCanceledBy,
+      })
+      expect(response.body.cancelRequestedAt).toEqual(expect.any(String))
+      const row = await readRun(runId)
+      expect(row).toMatchObject({
+        phase: 'Canceled',
+        canceled_by: operatorCanceledBy,
+        child_recipe_name: null,
+      })
+      expect(row.completed_at).toBeInstanceOf(Date)
+      expect(row.cancel_requested_at).toBeInstanceOf(Date)
+      expect({ phase, payloads }).toEqual({ phase, payloads: [runId] })
+    }
+  }, 60_000)
+
+  it('operator cancel of a run with a child stores the request', async () => {
+    const recipe = `op-s7-${suffix}`
+    // R11 + R19: a running run with a child and a pending step approval.
+    const target = await runReadyForApprovals(recipe)
+    const proof = await runningStep(target.runId, 'step-op')
+    const pending = await requestStepApproval({ ...target, recipe, stepId: 'step-op', proof })
+    if (!('status' in pending)) throw new Error('expected an approval')
+    expect(await approvalOf(pending.id)).toMatchObject({
+      status: 'pending',
+      bound_workflow_run_id: target.runId,
+    })
+    // R12: a paused scheduled run with a child.
+    const paused = await insertRun({
+      recipe,
+      phase: 'AuthorizationPaused',
+      actorType: 'scheduled',
+      child: 'child-op-paused',
+    })
+
+    for (const [label, runId, phase] of [
+      ['Running with child', target.runId, 'Running'],
+      ['AuthorizationPaused with child', paused, 'AuthorizationPaused'],
+    ] as const) {
+      const { result: response, payloads } = await notificationsDuring(() =>
+        operatorCancel(runId, recipe).then(r => r)
+      )
+      expect({ label, status: response.status }).toEqual({ label, status: 200 })
+      expect(response.body).toMatchObject({ id: runId, phase, canceledBy: operatorCanceledBy })
+      const row = await readRun(runId)
+      expect(row).toMatchObject({ phase, canceled_by: operatorCanceledBy, completed_at: null })
+      expect(row.cancel_requested_at).toBeInstanceOf(Date)
+      // The phase did not change, so the explicit notification is the only one.
+      expect({ label, payloads }).toEqual({ label, payloads: [runId] })
+    }
+    expect(await approvalOf(pending.id)).toEqual({
+      status: 'cancelled',
+      cancelled_by: operatorCanceledBy,
+      bound_workflow_run_id: target.runId,
+    })
+  }, 60_000)
+
+  it('the first canceller stays recorded across principals', async () => {
+    const recipe = `op-s8-${suffix}`
+    const token = await v1Token(L, null, 'member')
+
+    // Launcher first, operator second.
+    const launcherFirst = await launcherRun('Running', recipe, 'child-op-s8a')
+    expect((await cancel(token, launcherFirst, recipe)).status).toBe(200)
+    const afterLauncher = await readRun(launcherFirst)
+    expect(afterLauncher.canceled_by).toBe(L.id)
+    const { result: second, payloads } = await notificationsDuring(() =>
+      operatorCancel(launcherFirst, recipe).then(r => r)
+    )
+    expect(second.status).toBe(200)
+    expect(second.body).toMatchObject({ id: launcherFirst, canceledBy: L.id })
+    expect(await readRun(launcherFirst)).toEqual(afterLauncher)
+    expect(payloads).toEqual([launcherFirst])
+
+    // Operator first, launcher second.
+    const operatorFirst = await launcherRun('Running', recipe, 'child-op-s8b')
+    expect((await operatorCancel(operatorFirst, recipe)).status).toBe(200)
+    const afterOperator = await readRun(operatorFirst)
+    expect(afterOperator.canceled_by).toBe(operatorCanceledBy)
+    const launcherSecond = await cancel(token, operatorFirst, recipe)
+    expect(launcherSecond.status).toBe(200)
+    expect(await readRun(operatorFirst)).toEqual(afterOperator)
+  }, 60_000)
+
+  it('operator cancels runs no external caller may cancel', async () => {
+    const recipe = `op-s9-${suffix}`
+    await databasePool.query(
+      `INSERT INTO team_workflow_triggers(team_id, recipe_namespace, recipe_name)
+       VALUES ($1, $2, $3)`,
+      [teamT, ns, recipe]
+    )
+    const adminToken = await v1Token(A, teamT, 'admin')
+    const memberToken = await v1Token(M, teamT, 'member')
+    const cron = await insertRun({ recipe, phase: 'Pending', actorType: 'scheduled' })
+    const teammate = await insertRun({
+      recipe,
+      phase: 'Pending',
+      actorType: 'user',
+      actorId: principalOf(M),
+      teamId: teamT,
+    })
+
+    for (const [label, runId] of [
+      ['cron run with no team', cron],
+      ["a teammate's manual run", teammate],
+    ] as const) {
+      // Witness: the team admin's session reads the recipe's runs.
+      const listed = await externalRuns(adminToken, recipe)
+      expect({ label, status: listed.status }).toEqual({ label, status: 200 })
+      const before = await readRun(runId)
+      const external = await cancel(adminToken, runId, recipe)
+      expect({ label, status: external.status, body: external.body }).toEqual({
+        label,
+        status: 404,
+        body: { error: 'workflow_run_not_found' },
+      })
+      expect(await readRun(runId)).toEqual(before)
+
+      const operator = await operatorCancel(runId, recipe)
+      expect({ label, status: operator.status }).toEqual({ label, status: 200 })
+      expect(await readRun(runId)).toMatchObject({
+        phase: 'Canceled',
+        canceled_by: operatorCanceledBy,
+      })
+    }
+
+    // The launcher of the teammate run reads it: the request is shown, the
+    // cancel is no longer offered, and the operator's subject is not shown.
+    const memberList = await externalRuns(memberToken, recipe)
+    expect(memberList.status).toBe(200)
+    const memberRun = (memberList.body.items as Array<Record<string, unknown>>).find(
+      run => run.id === teammate
+    )
+    expect(memberRun).toMatchObject({
+      id: teammate,
+      phase: 'Canceled',
+      canceledBy: 'operator',
+      viewerCanCancel: false,
+    })
+    expect(memberRun?.cancelRequestedAt).toEqual(expect.any(String))
+  }, 60_000)
+
+  it('non-admin readers see operator, admin readers see the operator id', async () => {
+    const recipe = `op-s23-${suffix}`
+    await databasePool.query(
+      `INSERT INTO user_workflow_triggers(user_id, recipe_namespace, recipe_name)
+       VALUES ($1, $2, $3)`,
+      [L.id, ns, recipe]
+    )
+    kubernetesApi.put('workflowrecipes', ns, {
+      apiVersion: 'clerum.io/v1alpha1',
+      kind: 'WorkflowRecipe',
+      metadata: {
+        name: recipe,
+        namespace: ns,
+        uid: randomUUID(),
+        resourceVersion: '1',
+        generation: 1,
+      },
+      spec: {
+        enabled: true,
+        contextRef: contextName,
+        model: { provider: 'openai', name: 'cancel-test' },
+        triggers: { onDemand: { requiresApproval: false } },
+      },
+    })
+    const token = await v1Token(L, null, 'member')
+
+    // A run the launcher cancelled itself, then a newer run the operator cancelled.
+    const userCanceled = await launcherRun('Pending', recipe)
+    expect((await cancel(token, userCanceled, recipe)).status).toBe(200)
+    expect((await readRun(userCanceled)).canceled_by).toBe(L.id)
+    const operatorCanceled = await launcherRun('Pending', recipe)
+    expect((await operatorCancel(operatorCanceled, recipe)).status).toBe(200)
+    // The stored column keeps the operator's subject.
+    expect((await readRun(operatorCanceled)).canceled_by).toBe(operatorCanceledBy)
+
+    // Liveness witness: the admin list reads the operator's subject for this run.
+    const adminList = await request(app)
+      .get(`/admin/workflows/${ns}/${recipe}/runs`)
+      .set('Cookie', `control_ui_admin_session=${operatorToken}`)
+    expect(adminList.status).toBe(200)
+    const adminItems = adminList.body.items as Array<Record<string, unknown>>
+    expect(adminItems.find(run => run.id === operatorCanceled)).toMatchObject({
+      canceledBy: operatorCanceledBy,
+    })
+    expect(adminItems.find(run => run.id === userCanceled)).toMatchObject({ canceledBy: L.id })
+
+    // External list: operator for the operator cancel, the user id for the user's.
+    const externalList = await externalRuns(token, recipe)
+    expect(externalList.status).toBe(200)
+    const externalItems = externalList.body.items as Array<Record<string, unknown>>
+    expect(externalItems.find(run => run.id === operatorCanceled)).toMatchObject({
+      canceledBy: 'operator',
+    })
+    expect(externalItems.find(run => run.id === userCanceled)).toMatchObject({
+      canceledBy: L.id,
+    })
+
+    // External read (health): the newest run is the operator-cancelled one.
+    const externalHealth = await request(app)
+      .get(`/external/workflows/${ns}/${recipe}/health`)
+      .set('x-user-session-token', token)
+    expect(externalHealth.status).toBe(200)
+    expect(externalHealth.body.lastRun).toMatchObject({
+      id: operatorCanceled,
+      canceledBy: 'operator',
+    })
+
+    // External cancel, repeated by the launcher on the operator-cancelled run.
+    const repeat = await cancel(token, operatorCanceled, recipe)
+    expect(repeat.status).toBe(200)
+    expect(repeat.body.run).toMatchObject({ id: operatorCanceled, canceledBy: 'operator' })
+    expect((await readRun(operatorCanceled)).canceled_by).toBe(operatorCanceledBy)
+
+    // mcp-host read of the recipe it runs as.
+    const hostToken = issueMcpHostControlJwt(ns, recipe, undefined, {
+      scopes: ['workflow:read'],
+    }).token
+    const hostRead = await request(app)
+      .get(`/mcp-host/workflows/${ns}/${recipe}`)
+      .set('Authorization', `Bearer ${hostToken}`)
+    expect(hostRead.status).toBe(200)
+    expect(hostRead.body.latestRun).toMatchObject({
+      id: operatorCanceled,
+      canceledBy: 'operator',
+    })
+
+    // Admin SSE: a run update for the operator-cancelled run carries the subject.
+    const sseEvent = await readAdminRunStreamEvent(recipe, operatorCanceled)
+    expect(sseEvent).toMatchObject({ id: operatorCanceled, canceledBy: operatorCanceledBy })
+  }, 60_000)
+
+  /**
+   * Opens the admin run stream filtered to one recipe, sends a run update for
+   * `runId` once the stream is open, and returns the first `run` event's data.
+   */
+  async function readAdminRunStreamEvent(
+    recipe: string,
+    runId: string
+  ): Promise<Record<string, unknown>> {
+    const streamApp = express()
+    streamApp.use(
+      createWorkflowsAdminRouter(gateway, {
+        runsStreamAutoCloseMs: 30_000,
+        runsStreamKeepAliveMs: 30_000,
+      })
+    )
+    const server = streamApp.listen(0)
+    if (!server.listening) {
+      await new Promise<void>(resolve => server.once('listening', () => resolve()))
+    }
+    const { address, port } = server.address() as AddressInfo
+    let streamRequest: http.ClientRequest | null = null
+    try {
+      return await new Promise<Record<string, unknown>>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error('no run event on the admin stream')),
+          15_000
+        )
+        streamRequest = http.get(
+          {
+            host: address,
+            port,
+            path: `/admin/workflows/runs/stream?namespace=${ns}&name=${recipe}`,
+            headers: { Cookie: `control_ui_admin_session=${operatorToken}` },
+          },
+          response => {
+            if (response.statusCode !== 200) {
+              clearTimeout(timer)
+              reject(new Error(`admin stream answered ${response.statusCode}`))
+              return
+            }
+            response.setEncoding('utf8')
+            let buffer = ''
+            let notified = false
+            response.on('data', (chunk: string) => {
+              buffer += chunk
+              if (!notified && buffer.includes('event: open')) {
+                notified = true
+                databasePool
+                  .query(`SELECT pg_notify('workflow_run_update', $1)`, [runId])
+                  .catch(error => {
+                    clearTimeout(timer)
+                    reject(error)
+                  })
+              }
+              const match = /event: run\ndata: (.*)\n\n/.exec(buffer)
+              if (match) {
+                clearTimeout(timer)
+                resolve(JSON.parse(match[1]!) as Record<string, unknown>)
+              }
+            })
+          }
+        )
+        streamRequest.on('error', error => {
+          clearTimeout(timer)
+          reject(error)
+        })
+      })
+    } finally {
+      ;(streamRequest as http.ClientRequest | null)?.destroy()
+      await new Promise<void>(resolve => {
+        server.closeAllConnections()
+        server.close(() => resolve())
+      })
+    }
+  }
+
+  it('a failed approval update rolls the operator cancel back', async () => {
+    const recipe = `op-s10-${suffix}`
+    const run = await runReadyForApprovals(recipe)
+    const proof = await runningStep(run.runId, 'step-op-s10')
+    const approval = await requestStepApproval({ ...run, recipe, stepId: 'step-op-s10', proof })
+    if (!('status' in approval)) throw new Error('expected an approval')
+    const runBefore = await readRun(run.runId)
+    const approvalBefore = await approvalOf(approval.id)
+
+    const statements: string[] = []
+    const fault: QueryHook = {
+      before: (text, values) => {
+        if (values?.[0] !== run.runId) return
+        statements.push(text)
+        if (/^\s*UPDATE workflow_approval_requests/.test(text)) {
+          throw new Error('op-s10 injected approvals fault')
+        }
+      },
+    }
+    hooks.add(fault)
+    capturedErrors.length = 0
+    let response: request.Response
+    try {
+      response = await operatorCancel(run.runId, recipe)
+    } finally {
+      hooks.delete(fault)
+    }
+    expect(response.status).toBe(500)
+    expect(capturedErrors).toHaveLength(1)
+    expect(String((capturedErrors[0] as Error).message)).toContain(
+      'op-s10 injected approvals fault'
+    )
+    // Witness: the run update ran in the same transaction before the rejected statement.
+    const runUpdate = statements.indexOf(REQUEST_CANCEL_OF_RUN_WITH_CHILD)
+    const rejected = statements.findIndex(text =>
+      /^\s*UPDATE workflow_approval_requests/.test(text)
+    )
+    expect(runUpdate).toBeGreaterThanOrEqual(0)
+    expect(rejected).toBeGreaterThan(runUpdate)
+    expect(statements).not.toContain(CANCEL_RUN_WITHOUT_CHILD)
+
+    expect(await readRun(run.runId)).toEqual(runBefore)
+    expect(runBefore).toMatchObject({
+      phase: 'Running',
+      cancel_requested_at: null,
+      canceled_by: null,
+    })
+    expect(await approvalOf(approval.id)).toEqual(approvalBefore)
   }, 60_000)
 })

@@ -6,8 +6,9 @@ export const WORKFLOW_RUN_CANCEL_REQUEST_PAIR_CHECK = 'workflow_runs_cancel_requ
 
 /**
  * Workflow run cancellation columns. `cancel_requested_at` records when a cancel
- * was accepted and `canceled_by` the user id of the caller who asked for it; the
- * two are set together or not at all. The archive copies both into
+ * was accepted and `canceled_by` who asked for it: the user id of a user-session
+ * caller, or `operator:<admin user id>` for a Control UI operator; the two are
+ * set together or not at all. The archive copies both into
  * `workflow_runs_audit`. Existing rows get NULL in both columns, which satisfies
  * the pair check, and a second run adds nothing: the columns use
  * `IF NOT EXISTS` and the check is created only when it is missing.

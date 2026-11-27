@@ -445,14 +445,20 @@ describeRealPostgres('PR334 S2 workflow run visibility and V1 approval replay', 
       false
     )
 
-    const visibilityRuns = await reader.listCanonicalRuns(NS, recipes[0]!.name, 10, caller)
-    expect(visibilityRuns.map(run => run.id)).toEqual([ownerRunId])
-    expect((await reader.getLatestRun(NS, recipes[0]!.name, caller))?.id).toBe(ownerRunId)
-    expect((await reader.getWorkflowHealth(NS, recipes[0]!.name, caller)).lastRun?.id).toBe(
-      ownerRunId
+    const visibilityRuns = await reader.listCanonicalRuns(
+      NS,
+      recipes[0]!.name,
+      10,
+      'tenant',
+      caller
     )
+    expect(visibilityRuns.map(run => run.id)).toEqual([ownerRunId])
+    expect((await reader.getLatestRun(NS, recipes[0]!.name, 'tenant', caller))?.id).toBe(ownerRunId)
+    expect(
+      (await reader.getWorkflowHealth(NS, recipes[0]!.name, 'tenant', caller)).lastRun?.id
+    ).toBe(ownerRunId)
 
-    const teamlessRuns = await reader.listCanonicalRuns(NS, recipes[1]!.name, 10, caller)
+    const teamlessRuns = await reader.listCanonicalRuns(NS, recipes[1]!.name, 10, 'tenant', caller)
     expect(teamlessRuns.map(run => run.id)).toEqual([teamlessRunId])
 
     const artifactContext = await artifacts.resolveWorkflowArtifactContext({
@@ -506,13 +512,15 @@ describeRealPostgres('PR334 S2 workflow run visibility and V1 approval replay', 
       claims: v1Claims(OWNER_ID, TEAM_ID),
       session: {} as never,
     }
-    const runs = await reader.listCanonicalRuns(NS, recipes[2]!.name, 10, caller)
+    const runs = await reader.listCanonicalRuns(NS, recipes[2]!.name, 10, 'tenant', caller)
     expect(runs.map(run => run.id)).toEqual([archiveRunId])
     expect(runs[0]?.source).toBe('audit')
-    expect((await reader.getLatestRun(NS, recipes[2]!.name, caller))?.id).toBe(archiveRunId)
-    expect((await reader.getWorkflowHealth(NS, recipes[2]!.name, caller)).lastRun?.id).toBe(
+    expect((await reader.getLatestRun(NS, recipes[2]!.name, 'tenant', caller))?.id).toBe(
       archiveRunId
     )
+    expect(
+      (await reader.getWorkflowHealth(NS, recipes[2]!.name, 'tenant', caller)).lastRun?.id
+    ).toBe(archiveRunId)
   })
 
   it.each([
@@ -720,10 +728,10 @@ describeRealPostgres('PR334 S2 workflow run visibility and V1 approval replay', 
       ).rows[0]
       expect(liveRow, 'seeded team-scheduled live run').toBeDefined()
       return {
-        unscopedList: (await reader.listCanonicalRuns(NS, recipeName, 10))
+        unscopedList: (await reader.listCanonicalRuns(NS, recipeName, 10, 'admin'))
           .map(run => `${run.source}:${run.id}`)
           .sort(),
-        list: (await reader.listCanonicalRuns(NS, recipeName, 10, caller))
+        list: (await reader.listCanonicalRuns(NS, recipeName, 10, 'tenant', caller))
           .map(run => `${run.source}:${run.id}`)
           .sort(),
         single: await reader.canCallerReadWorkflowRunWithApprovalTarget(caller, liveRow),

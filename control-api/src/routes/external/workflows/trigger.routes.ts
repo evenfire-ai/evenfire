@@ -97,7 +97,7 @@ export function createExternalWorkflowTriggerRoutes(gateway: K8sGateway): Router
           created ? 'WorkflowRun created (DB)' : 'WorkflowRun idempotency hit (DB)'
         )
 
-        res.status(created ? 201 : 200).json(mapDbRun(row))
+        res.status(created ? 201 : 200).json(mapDbRun(row, 'tenant'))
       } catch (err) {
         if (err instanceof WorkflowAuthorityError) {
           res.status(err.status).json({ error: err.code })

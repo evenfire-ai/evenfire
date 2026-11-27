@@ -214,7 +214,7 @@ describeRealPostgres('workflow run failure reasons on PostgreSQL 16', () => {
         candidate => candidate.run_id === runId
       )
       expect(exactRun).toBeDefined()
-      expect(mapDbRun(exactRun!).message).toBe(expectedReason)
+      expect(mapDbRun(exactRun!, 'tenant').message).toBe(expectedReason)
     }
   )
 
@@ -299,6 +299,6 @@ describeRealPostgres('workflow run failure reasons on PostgreSQL 16', () => {
     expect(retried.kind).toBe('run')
     if (retried.kind !== 'run') throw new Error('expected existing run')
     expect(retried.row.failure_reason).toBe('workflow_authority_denied')
-    expect(mapDbRun(retried.row).message).toBe('workflow_authority_denied')
+    expect(mapDbRun(retried.row, 'tenant').message).toBe('workflow_authority_denied')
   })
 })

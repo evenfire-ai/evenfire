@@ -133,7 +133,7 @@ export function createExternalWorkflowReadRoutes(gateway: K8sGateway): Router {
           unknown
         >
         const status = asRecord(resource.status) ?? {}
-        const { activeRuns, lastRun } = await getWorkflowHealth(ns, name, caller)
+        const { activeRuns, lastRun } = await getWorkflowHealth(ns, name, 'tenant', caller)
         if (authority) {
           auditAuthorizedWorkflowRead(authority, {
             entityType: 'workflow_recipe',
