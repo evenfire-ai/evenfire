@@ -398,6 +398,27 @@ Later deploys have no window, because both services then handle cancellation. De
 minikube scripts have none either: they stop both services before the migration and start
 workflow-recipes last.
 
+**Before the first deploy of this release: runs older than the duration limit.** From this
+release every run has a duration limit of at most 24 hours (86400 s). A run that stores no limit,
+or a longer one, is treated as having 24 hours. Earlier releases did not end a run that stores no
+limit, so such a run can be more than 24 hours old today. List them, read-only, before the first
+deploy of this release:
+
+```sql
+SELECT run_id, recipe_namespace, recipe_name, actor_id, phase, started_at, max_duration_seconds
+  FROM workflow_runs
+ WHERE phase IN ('Running', 'AuthorizationPaused')
+   AND (max_duration_seconds IS NULL OR max_duration_seconds > 86400)
+   AND started_at < now() - interval '24 hours'
+ ORDER BY started_at;
+```
+
+After the deploy, the duration sweep of workflow-recipes marks each listed run `Failed` the first
+time it reaches it (`Canceled` if the run has a cancel request). This cannot be undone: a `Failed`
+run cannot be resumed, and rolling the release back does not restore the row. A paused run in the
+list loses what it was waiting for (an approval or a resume), and its user has to start it again.
+Run the query before the first deploy, not after it, and tell the users of the listed runs.
+
 **Before the deploy (optional).** Check how many runs are in progress:
 
 ```sql
@@ -419,8 +440,8 @@ SELECT run_id, recipe_namespace, recipe_name, actor_id, phase, failure_reason,
  ORDER BY completed_at;
 ```
 
-Run both queries read-only (`PGOPTIONS='-c default_transaction_read_only=on'`). Do not rewrite
-the phase of the listed rows: it records what the run did.
+Run all three queries read-only (`PGOPTIONS='-c default_transaction_read_only=on'`). Do not
+rewrite the phase of the listed rows: it records what the run did.
 
 **What to tell the users of those runs.** Your cancel arrived while the platform was being
 upgraded and did not stop the run. The run finished on its own, and its status shows how it
