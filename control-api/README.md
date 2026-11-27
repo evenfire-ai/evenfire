@@ -313,11 +313,27 @@ Settings:
   identity-provider admin can set, such as an app role, a group, or
   `app_metadata`. Do not use a profile claim the person can edit, such as
   `name`, `nickname`, `preferred_username`, or `given_name`.
-- `CONTROL_API_OIDC_ACCOUNT_CREATION=enabled`: a first sign-in that finds no
-  account creates one. Set it only when the issuer signs in only your
-  company's people. Without it, a non-Entra issuer signs in only existing
-  accounts. It is refused for Entra ID, which always creates accounts for the
-  pinned tenant.
+- `CONTROL_API_OIDC_ACCOUNT_CREATION`: what a first sign-in that finds no
+  account does. Unset, a non-Entra issuer signs in only existing accounts.
+  The setting is refused for Entra ID, which always creates accounts for the
+  pinned tenant. Two values turn creation on for other issuers. With either,
+  an account is created only when the ID token has an `email` claim and
+  `email_verified` is `true`; a first sign-in without them is refused.
+  - `enabled` creates an account for each person whose ID token holds the
+    required claim, and needs `CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE`. Without
+    a value it is refused. Use a group or app role your administrators
+    assign, not a profile claim people can edit.
+  - `any_issuer_account` creates an account for every person the issuer signs
+    in with a verified email, with no claim check, and is refused when a
+    required claim value is set. Use it only when the issuer cannot sign in
+    anyone outside your company: the application requires assignment, and
+    self-service sign-up and social or external logins are off at the
+    issuer. Sign in with Apple, Entra External ID user flows with sign-up on,
+    and Auth0 tenants with sign-up on sign in people who registered
+    themselves. With this value each of them gets an active account, and
+    joins `CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID` if it is set. Google's
+    `accounts.google.com` needs the `hd` required claim, so only `enabled`
+    can turn creation on there.
 - `CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID`: a team UUID that each account the
   sign-in creates joins as a `member`.
 - Entra ID is an issuer on `login.microsoftonline.com`,
@@ -336,13 +352,22 @@ A configuration that breaks these rules does not stop control-api. Every OIDC
 route answers 503 `oidc_configuration_unavailable`, and each request logs
 `oidc_configuration_unavailable` with the names of the settings at fault,
 never their values. Profile UI then shows only the password form, and
-password sign-in keeps working. An unknown `CONTROL_API_OIDC_*` name fails the
-same way, even with no registration set. That includes the removed
-`CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS` and `CONTROL_API_OIDC_REQUIRED_ROLE`,
-which the required claim and account creation settings replace. While
-`CONTROL_API_OIDC_MEMBER_SIGN_IN` is set, a configuration that fails to load
-still counts as member sign-in on when a member is removed: the member is kept
-as a retired row rather than deleted.
+password sign-in keeps working. `CONTROL_API_OIDC_ACCOUNT_CREATION` in the
+list means a value other than exactly `enabled` or `any_issuer_account`, any
+value on Entra ID, `enabled` with no required claim value, or
+`any_issuer_account` beside one. Set a claim value, or use
+`any_issuer_account` if every person the issuer signs in should get an
+account. On `accounts.google.com`, `any_issuer_account` is always refused:
+use `enabled` with the `hd` claim there. An empty
+`CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE` is refused, and the list names it.
+It still counts as a value, so `any_issuer_account` beside it is refused as
+well. An unknown `CONTROL_API_OIDC_*` name fails the same way, even with no
+registration set. That includes the removed
+`CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS` and
+`CONTROL_API_OIDC_REQUIRED_ROLE`, which the required claim and account
+creation settings replace. While `CONTROL_API_OIDC_MEMBER_SIGN_IN` is set, a
+configuration that fails to load still counts as member sign-in on when a
+member is removed: the member is kept as a retired row rather than deleted.
 
 Provider checklist:
 

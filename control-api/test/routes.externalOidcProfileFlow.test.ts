@@ -662,14 +662,15 @@ describe('Control API OIDC member sign-in completion', () => {
     })
 
     /**
-     * Each environment loaded before its setting was removed, so the refusal
-     * comes from the removed name alone. Account creation then required a
-     * domain list, so the role row leaves account creation unset rather than
-     * name two removed settings.
+     * Each environment loads once its removed setting is taken out, so the
+     * refusal comes from the removed name alone. The domain-list row keeps
+     * account creation on, which needs a required claim value; the role row
+     * leaves account creation unset.
      */
     const REMOVED_SETTING_ENV: Record<string, Record<string, string>> = {
       CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS: {
         CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
+        CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE: 'Evenfire.Member',
         CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS: 'company.example.test',
       },
       CONTROL_API_OIDC_REQUIRED_ROLE: {
