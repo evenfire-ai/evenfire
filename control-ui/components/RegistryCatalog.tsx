@@ -10,6 +10,7 @@ import {
   TableViewport,
   TruncatedText,
 } from '@clerum/frontend-components'
+import { ConnectorIdentity } from '@components/ConnectorIdentity'
 import { FilterSelect } from '@components/FilterSelect'
 import { MarketplaceTabs } from '@components/MarketplaceTabs'
 import { type RowActionMenuItem, RowActionsMenu } from '@components/RowActionsMenu'
@@ -20,6 +21,7 @@ import type { TableHeaderColumn } from '@components/TableHeaderRow/types'
 import { TablePanelHeader } from '@components/TablePanelHeader'
 import { useToast } from '@components/Toast'
 import { CONTROL_ROUTES } from '@constants/routes'
+import { getConnectorPresentation } from '@lib/connectorPresentation'
 import { type RegistryEntry, deleteRegistryEntry, getRegistryCatalog } from '../lib/api'
 import { useRegistryCapability } from '../lib/hooks/useRegistryCapability'
 
@@ -107,9 +109,12 @@ export default function RegistryCatalog() {
     setRemoveError('')
     try {
       await deleteRegistryEntry(target.name, target.version)
-      showToast(`Removed ${target.name} v${target.version} from the Marketplace.`, {
-        tone: 'success',
-      })
+      showToast(
+        `Removed ${getConnectorPresentation(target.name).name} v${target.version} from the Marketplace.`,
+        {
+          tone: 'success',
+        }
+      )
       setRemoveTarget(null)
       await loadData()
     } catch (removeFailure) {
@@ -133,6 +138,7 @@ export default function RegistryCatalog() {
       const query = search.toLowerCase()
       return (
         entry.name.toLowerCase().includes(query) ||
+        getConnectorPresentation(entry.name).name.toLowerCase().includes(query) ||
         entry.description.toLowerCase().includes(query) ||
         entry.tags.some(tag => tag.toLowerCase().includes(query))
       )
@@ -144,7 +150,11 @@ export default function RegistryCatalog() {
           ? left.description.localeCompare(right.description, undefined, { sensitivity: 'base' })
           : sortKey === 'quality'
             ? left.quality_tier.localeCompare(right.quality_tier)
-            : left.name.localeCompare(right.name, undefined, { sensitivity: 'base' })
+            : getConnectorPresentation(left.name).name.localeCompare(
+                getConnectorPresentation(right.name).name,
+                undefined,
+                { sensitivity: 'base' }
+              )
       if (comparison !== 0) return comparison * direction
       return `${left.name}@${left.version}`.localeCompare(`${right.name}@${right.version}`)
     })
@@ -291,7 +301,7 @@ export default function RegistryCatalog() {
                       onNavigate={() => router.push(detailRoute)}
                     >
                       <td>
-                        <span className="cu-registry-name">{entry.name}</span>
+                        <ConnectorIdentity name={entry.name} />
                         {!isCurator && isOwnedEntry(entry) ? (
                           <div className="cu-registry-owned">Owned by your organization</div>
                         ) : null}
@@ -312,7 +322,7 @@ export default function RegistryCatalog() {
                         onKeyDown={event => event.stopPropagation()}
                       >
                         <RowActionsMenu
-                          ariaLabel={`Actions for ${entry.name} v${entry.version}`}
+                          ariaLabel={`Actions for ${getConnectorPresentation(entry.name).name} v${entry.version}`}
                           actions={
                             [
                               {
@@ -405,8 +415,8 @@ export default function RegistryCatalog() {
           >
             <h3 id="registry-remove-modal-title">Remove from Marketplace</h3>
             <p>
-              Remove <strong>{removeTarget.name}</strong> v{removeTarget.version} from the
-              Marketplace. Already-installed copies stay running.
+              Remove <strong>{getConnectorPresentation(removeTarget.name).name}</strong> v
+              {removeTarget.version} from the Marketplace. Already-installed copies stay running.
             </p>
             {removeError ? (
               <div className="cu-banner cu-banner--error" role="alert">
