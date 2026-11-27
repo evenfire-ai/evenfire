@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { type CronJobRef, withJobCleanup } from './cronCleanup.js'
 
-const CLEANUP_PREFIX = 'Cron job cleanup failed; delete these jobs by hand:'
+const CLEANUP_PREFIX =
+  'Cron job cleanup failed; these jobs stay in memory until chatllm restarts ' +
+  '(kubectl -n mcp-host rollout restart deploy/chatllm):'
 
 /** A deleteJob stub that records every call and fails for the listed job ids. */
 function recordingDelete(failFor: string[] = []) {

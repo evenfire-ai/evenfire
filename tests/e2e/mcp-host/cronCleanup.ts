@@ -2,9 +2,15 @@
 export type CronJobRef = readonly [jobId: string, userId: string]
 
 /**
- * Run `body` with a list it fills with every job as soon as the job exists,
- * then delete every listed job, trying each one even when an earlier delete
- * fails.
+ * Run `body` with a list the test fills with each job once the job's Created
+ * line has been seen, then delete every listed job, trying each one even when
+ * an earlier delete fails.
+ *
+ * The cleanup is best effort. A job whose create did not show its Created line
+ * in time is never listed, and a test timeout abandons the body and this
+ * cleanup together; in both cases the job stays in the scheduler. Cron jobs
+ * live only in the chatllm pod's memory, so restarting deploy/chatllm removes
+ * them.
  *
  * A cleanup failure never hides a body failure: when both fail, the thrown
  * AggregateError carries the body error first and as its cause, so the test
@@ -35,7 +41,10 @@ export async function withJobCleanup<T>(
   }
   const cleanupError =
     failures.length > 0
-      ? new Error(`Cron job cleanup failed; delete these jobs by hand:\n${failures.join('\n')}`)
+      ? new Error(
+          'Cron job cleanup failed; these jobs stay in memory until chatllm restarts ' +
+            `(kubectl -n mcp-host rollout restart deploy/chatllm):\n${failures.join('\n')}`
+        )
       : undefined
 
   if (bodyFailed) {
