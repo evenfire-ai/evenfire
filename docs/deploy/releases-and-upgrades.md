@@ -377,8 +377,12 @@ the runner exits.
 
 #### Workflow run cancellation
 
-This release adds run cancellation: the user who launched a run, or a live admin of the run's
-team while the team holds the recipe, can cancel it from Desktop or the External REST API. control-api stores the request
+This release adds run cancellation. The user who launched a run can cancel it. A team admin can
+cancel the team's scheduled and autonomous runs, and user runs that record no launcher, while
+signed in to that team and while the team holds a grant on the recipe; a team admin cannot cancel a
+teammate's manual run. A platform admin can cancel any run through
+`POST /api/v1/admin/workflows/:ns/:name/runs/:runId/cancel`. Cancel is available from Desktop, the
+Control UI and the External REST API. control-api stores the request
 (`workflow_runs.cancel_requested_at`, migration `0160_workflow_run_cancel_request`) and workflow-recipes delivers it to the
 run's coordinator. A running run stops at the first step boundary after its coordinator receives
 the signal (normally within 5 s). A step that starts before then still runs, and steps that already
