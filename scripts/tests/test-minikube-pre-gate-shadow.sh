@@ -1497,13 +1497,20 @@ assert_empty_incremental_docker_env_fails_closed() {
 # A full setup leaves INCREMENTAL_TARGETS empty, and pre-gate-sync.sh runs with
 # set -u. On bash 3.2 (macOS /bin/bash) "${arr[@]}" on an empty array is an
 # unbound variable there, so the sync dies before writing its marker. This case
-# loads the file with set -u on, which run_incremental turns off. Its witness is
+# loads the file with set -eu on, which run_incremental turns off. Its witness is
 # a run of this file under /bin/bash 3.2; bash 4.4 and later accept the old form.
+#
+# Each witness has to prove its function ran. The three functions are declared
+# before any call, because an undefined incremental_has_target would also print
+# has_target=no. The one-target control proves the predicate can answer yes.
+# set -e stops the subshell before restart=done when the restart call fails.
+# The status is read with a plain assignment: on the left of `||`, bash 4.4 and
+# later ignore errexit inside the substitution, and the subshell's set -e with it.
 assert_an_empty_target_list_survives_set_u() {
-  local out rc=0
+  local out rc
   out="$(
     (
-      set -u
+      set -eu
       PROJECT_DIR="$REPO_ROOT"
       PROFILE="clerum-test"
       KC="false"
@@ -1511,17 +1518,27 @@ assert_an_empty_target_list_survives_set_u() {
       rollout_if_present() { :; }
       # shellcheck source=/dev/null
       . "$REPO_ROOT/scripts/minikube/pre-gate-incremental.sh"
+      for fn in incremental_has_target incremental_target_summary incremental_restart_targets; do
+        declare -F "$fn" >/dev/null || { echo "undefined=$fn"; exit 3; }
+      done
+      INCREMENTAL_TARGETS=("control-api|control-plane|control-api")
+      if incremental_has_target control-api; then echo "one_target=yes"; else echo "one_target=no"; fi
+      echo "one_summary=$(incremental_target_summary)"
       INCREMENTAL_TARGETS=()
       if incremental_has_target control-api; then echo "has_target=yes"; else echo "has_target=no"; fi
       echo "summary=$(incremental_target_summary)"
       incremental_restart_targets
       echo "restart=done"
     ) 2>&1
-  )" || rc=$?
+  )"
+  rc=$?
   if [ "$rc" -eq 0 ] \
+     && grep -Fxq 'one_target=yes' <<<"$out" \
+     && grep -Fxq 'one_summary=control-api' <<<"$out" \
      && grep -Fxq 'has_target=no' <<<"$out" \
      && grep -Fxq 'summary=none' <<<"$out" \
      && grep -Fxq 'restart=done' <<<"$out" \
+     && ! grep -Fq 'undefined=' <<<"$out" \
      && ! grep -Fq 'unbound variable' <<<"$out"; then
     pass "an empty target list survives set -u (bash ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]})"
   else
