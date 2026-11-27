@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -u
 FAIL=0
+PASS_COUNT=0
 
 # A ghcr cluster runs RELEASE images. Before this harness existed, the pre-gate
 # had no idea: it built clerum/<svc>:test, restarted the Deployment, and the pod
@@ -24,7 +25,7 @@ GHCR_COMPONENT="$REPO_ROOT/deploy/components/ghcr-images/kustomization.yaml"
 TEST_REAL_GIT="$(command -v git)"
 export TEST_REAL_GIT
 
-pass() { echo "PASS: $1"; }
+pass() { echo "PASS: $1"; PASS_COUNT=$((PASS_COUNT + 1)); }
 fail() { echo "FAIL: $1"; FAIL=1; }
 
 # Cleanup is part of fixture isolation and must affect the suite verdict.
@@ -1597,10 +1598,16 @@ assert_every_incremental_array_expansion_is_guarded() {
   fi
 }
 
+# Every assert_ case this file defines, one name per line.
+defined_cases() {
+  grep -oE '^assert_[a-z_]+\(\) \{' "$REPO_ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh" \
+    | sed -E 's/\(\) \{$//' | sort -u
+}
+
 assert_every_defined_case_is_invoked() {
   local self defined invoked missing
   self="$REPO_ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh"
-  defined="$(grep -oE '^assert_[a-z_]+\(\) \{' "$self" | sed -E 's/\(\) \{$//' | sort -u)"
+  defined="$(defined_cases)"
   invoked="$(grep -oE '^assert_[a-z_]+$' "$self" | sort -u)"
   missing="$(comm -23 <(printf '%s\n' "$defined") <(printf '%s\n' "$invoked"))"
   if [ -z "$missing" ]; then
@@ -1656,4 +1663,11 @@ assert_an_empty_target_list_survives_set_u
 assert_every_incremental_array_expansion_is_guarded
 assert_every_defined_case_is_invoked
 
+# Suite verdict. FAIL=0 alone is not a pass: a run that executed none of the
+# cases, or fewer than this file defines, must fail too.
+DEFINED_CASE_COUNT="$(defined_cases | grep -c .)"
+if [ "$PASS_COUNT" -eq 0 ] || [ "$PASS_COUNT" -lt "$DEFINED_CASE_COUNT" ]; then
+  fail "${PASS_COUNT} of ${DEFINED_CASE_COUNT} defined cases passed"
+fi
+echo "${PASS_COUNT}/${DEFINED_CASE_COUNT} cases passed"
 exit $FAIL
