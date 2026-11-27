@@ -141,6 +141,22 @@ Index: [CRDs](crds/README.md).
 - Desktop or channel-reader running and able to reach the runtime?
 - See [Configure approvals](how-to/configure-approvals.md)
 
+### Installing a catalog connector fails with `host_not_allowed`
+
+```text
+422 - {"errors":[{"field":"spec.image","message":"Image \"registry.evenfire.ai/evenfire/mcp-notion:1.0.0\" is not permitted by the plugin image allowlist (host_not_allowed)."}]}
+```
+
+The connector image allowlist is enforced and `registry.evenfire.ai/` is not
+on it. Evenfire catalog connectors are served from
+`registry.evenfire.ai/<org>/<name>`, and the base lists do not include that
+host. Add `registry.evenfire.ai/` to both `CONTROL_API_ALLOWED_IMAGE_PREFIXES`
+(control-api) and `CONTEXT_MAPPER_ALLOWED_IMAGE_PREFIXES` (host-context-controller),
+then restart control-api so it reads the new value. If you fix only
+control-api, the install gets past the `422` but HCC then marks the server
+`Ready=False` with `ImageNotAllowed`. See
+[Production notes](deploy/production.md#write-your-overlay).
+
 ### NetworkPolicy blocks everything
 
 That is the baseline (default deny). Connectivity is added per Context ↔
