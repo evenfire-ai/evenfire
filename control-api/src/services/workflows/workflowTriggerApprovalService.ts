@@ -178,6 +178,8 @@ export async function createWorkflowTriggerApprovalRequest(params: {
                 wr.created_at,
                 wr.updated_at,
                 wr.failure_reason,
+                wr.cancel_requested_at,
+                wr.canceled_by,
                 binding.binding_hash AS "authorityBindingHash",
                 binding.delegation_jti AS "authorityDelegationJti"
            FROM workflow_approval_requests war

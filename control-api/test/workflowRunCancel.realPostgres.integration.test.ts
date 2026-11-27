@@ -522,6 +522,15 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
       .set('x-user-session-token', token)
   }
 
+  /** The external trigger with an idempotency key (V1 session: no delegation is read). */
+  function externalTrigger(token: string, recipe: string, idempotencyKey: string) {
+    return request(app)
+      .post(`/external/workflows/${ns}/${recipe}/trigger`)
+      .set('x-user-session-token', token)
+      .set('idempotency-key', idempotencyKey)
+      .send({})
+  }
+
   // ── notifications ───────────────────────────────────────────────────────
 
   async function barrier(): Promise<void> {
@@ -874,6 +883,70 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     }
   }, 60_000)
 
+  it('an approval trigger replay returns the run with its cancel request', async () => {
+    const token = await v1Token(L, null, 'member')
+
+    for (const canceller of ['launcher', 'operator'] as const) {
+      const key = `replay-${canceller}-${randomUUID()}`
+      const requested = await externalTrigger(token, approvalRecipe, key)
+      expect(requested.status).toBe(202)
+      const approvalRequestId = requested.body.approvalRequestId as string
+
+      // Replay before the decision: the approval answer, no run yet.
+      const pending = await externalTrigger(token, approvalRecipe, key)
+      expect({ status: pending.status, body: pending.body }).toEqual({
+        status: 200,
+        body: {
+          approvalRequired: true,
+          approvalRequestId,
+          status: 'pending',
+          expiresAt: expect.any(String),
+        },
+      })
+
+      const decided = await recordDecision(approvalRequestId, 'approve', { userId: L.id })
+      if (!decided.ok || !decided.workflowRun) {
+        throw new Error(`approve decision did not create a run: ${JSON.stringify(decided)}`)
+      }
+      const runId = decided.workflowRun.row.run_id as string
+
+      // Replay of a run without a cancel request: both fields are null.
+      const notRequested = await externalTrigger(token, approvalRecipe, key)
+      expect(notRequested.status).toBe(200)
+      expect(notRequested.body).toMatchObject({
+        id: runId,
+        approvalRequestId,
+        phase: 'Pending',
+        cancelRequestedAt: null,
+        canceledBy: null,
+      })
+
+      const canceled =
+        canceller === 'launcher'
+          ? await cancel(token, runId, approvalRecipe)
+          : await operatorCancel(runId, approvalRecipe)
+      expect(canceled.status).toBe(200)
+      const stored = await readRun(runId)
+      expect(stored).toMatchObject({
+        phase: 'Canceled',
+        canceled_by: canceller === 'launcher' ? L.id : operatorCanceledBy,
+      })
+      expect(stored.cancel_requested_at).toBeInstanceOf(Date)
+
+      // The replay of the same run (200, not 201) carries the stored request;
+      // the tenant view shows an operator cancel as `operator`.
+      const replay = await externalTrigger(token, approvalRecipe, key)
+      expect(replay.status).toBe(200)
+      expect(replay.body).toMatchObject({
+        id: runId,
+        approvalRequestId,
+        phase: 'Canceled',
+        cancelRequestedAt: (stored.cancel_requested_at as Date).toISOString(),
+        canceledBy: canceller === 'launcher' ? L.id : 'operator',
+      })
+    }
+  }, 60_000)
+
   it('no session, a revoked session and an expired session get 401 and write nothing', async () => {
     const runId = await launcherRun('Pending', cancelRecipe)
     const before = await readRun(runId)
@@ -1108,11 +1181,10 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
       expect((await readRun(runId)).cancel_requested_at).toBeInstanceOf(Date)
     }
 
-    // R24g (cron run with no team) and R24l (admin-UI run): 404 for every
-    // external caller, so no permitted caller exists. Witness substitution
-    // approved by the coordinator (C1-C5-r5.md:380, :384): the row is
-    // unchanged, the cancel's locked read returned the run, and the same caller
-    // cancels a sibling run it may cancel.
+    // A cron run with no team and an admin-UI run: 404 for every external
+    // caller, so no permitted caller exists. The witness is therefore indirect:
+    // the row is unchanged, the cancel's locked read returned the run, and the
+    // same caller cancels a sibling run it may cancel.
     const lockReads: Array<{ runId: unknown; rowCount: number | null }> = []
     const lockRecorder: QueryHook = {
       after: (text, values, result) => {
@@ -1506,7 +1578,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
         [pids[0]]
       )
       return (waiting.rowCount ?? 0) > 0
-    }, 'the cancel to wait on the run row lock')
+    }, 'the cancel to wait on a row lock')
   }
 
   it('cancel serialises with the pending claim', async () => {
@@ -1586,6 +1658,143 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     expect(lockedReads).toHaveLength(1)
     expect(createChildRecipe).not.toHaveBeenCalled()
     expect(await readRun(canceledRun)).toMatchObject({ phase: 'Canceled', child_recipe_name: null })
+  }, 60_000)
+
+  // ── the admin cancel's share lock on membership and grant ───────────────
+
+  /**
+   * A live admin of T with its own membership row and a recipe whose only
+   * grant is T's, so a case can demote the admin or remove the grant without
+   * touching rows that other cases read.
+   */
+  async function dedicatedTeamAdmin(label: string) {
+    const admin = user(label)
+    await databasePool.query(`INSERT INTO users(id, email, name) VALUES ($1, $2, $3)`, [
+      admin.id,
+      admin.email,
+      `Cancel ${label}`,
+    ])
+    await databasePool.query(
+      `INSERT INTO team_members(team_id, user_id, role, status) VALUES ($1, $2, 'admin', 'active')`,
+      [teamT, admin.id]
+    )
+    const recipe = `share-${label}-${suffix}`
+    await databasePool.query(
+      `INSERT INTO team_workflow_triggers(team_id, recipe_namespace, recipe_name)
+       VALUES ($1, $2, $3)`,
+      [teamT, ns, recipe]
+    )
+    return { recipe, token: await v1Token(admin, teamT, 'admin') }
+  }
+
+  /**
+   * Holds `write` open in a transaction, starts the admin's cancel of a
+   * scheduled team run, and commits the write once the cancel waits on a row
+   * lock the write holds. Returns the cancel's answer and the run row after it.
+   */
+  async function adminCancelAcrossCommittedWrite(input: {
+    recipe: string
+    token: string
+    write: { text: string; values: unknown[] }
+  }) {
+    const runId = await insertRun({
+      recipe: input.recipe,
+      phase: 'Pending',
+      actorType: 'scheduled',
+      teamId: teamT,
+    })
+    const writer = await databasePool.connect()
+    const { pids, hook } = recordCancelPids()
+    let writeOpen = false
+    let pendingCancel: Promise<request.Response> | undefined
+    try {
+      await writer.query('BEGIN')
+      writeOpen = true
+      const written = await writer.query(input.write.text, input.write.values)
+      expect(written.rowCount).toBe(1)
+
+      pendingCancel = cancel(input.token, runId, input.recipe).then(r => r)
+      // Witness: the cancel waits on a lock before it answers.
+      const first = await Promise.race([
+        waitForCancelLockWait(pids).then(() => 'cancel waits on a lock' as const),
+        pendingCancel.then(() => 'cancel answered first' as const),
+      ])
+      expect(first).toBe('cancel waits on a lock')
+      // ... and the lock it waits on is the one the uncommitted write holds.
+      const blockers = await databasePool.query<{ blockers: number[] }>(
+        `SELECT pg_blocking_pids($1) AS blockers`,
+        [pids[0]]
+      )
+      expect(blockers.rows[0]!.blockers).toEqual([
+        (writer as unknown as { processID: number }).processID,
+      ])
+
+      await writer.query('COMMIT')
+      writeOpen = false
+      return { response: await pendingCancel, run: await readRun(runId) }
+    } finally {
+      if (writeOpen) await writer.query('ROLLBACK')
+      writer.release()
+      hooks.delete(hook)
+      // A failed assertion above leaves the request in flight; it is settled
+      // here so it does not outlive the case. The assertion's error is the one
+      // this case reports.
+      if (pendingCancel) await Promise.allSettled([pendingCancel])
+    }
+  }
+
+  it('a demotion committed while the admin cancel waits on the membership row refuses the cancel', async () => {
+    const { recipe, token } = await dedicatedTeamAdmin('share-member')
+    // Liveness: before the demotion the same admin cancels a sibling run.
+    const sibling = await insertRun({
+      recipe,
+      phase: 'Pending',
+      actorType: 'scheduled',
+      teamId: teamT,
+    })
+    expect((await cancel(token, sibling, recipe)).status).toBe(200)
+    const adminId = (await readRun(sibling)).canceled_by as string
+
+    const { response, run } = await adminCancelAcrossCommittedWrite({
+      recipe,
+      token,
+      write: {
+        text: `UPDATE team_members SET role = 'member' WHERE team_id = $1 AND user_id = $2`,
+        values: [teamT, adminId],
+      },
+    })
+    expect({ status: response.status, body: response.body }).toEqual({
+      status: 404,
+      body: { error: 'workflow_run_not_found' },
+    })
+    expect(run).toMatchObject({ phase: 'Pending', cancel_requested_at: null, canceled_by: null })
+  }, 60_000)
+
+  it('a grant removal committed while the admin cancel waits on the grant row refuses the cancel', async () => {
+    const { recipe, token } = await dedicatedTeamAdmin('share-grant')
+    // Liveness: before the removal the same admin cancels a sibling run.
+    const sibling = await insertRun({
+      recipe,
+      phase: 'Pending',
+      actorType: 'scheduled',
+      teamId: teamT,
+    })
+    expect((await cancel(token, sibling, recipe)).status).toBe(200)
+
+    const { response, run } = await adminCancelAcrossCommittedWrite({
+      recipe,
+      token,
+      write: {
+        text: `DELETE FROM team_workflow_triggers
+                WHERE team_id = $1 AND recipe_namespace = $2 AND recipe_name = $3`,
+        values: [teamT, ns, recipe],
+      },
+    })
+    expect({ status: response.status, body: response.body }).toEqual({
+      status: 404,
+      body: { error: 'workflow_run_not_found' },
+    })
+    expect(run).toMatchObject({ phase: 'Pending', cancel_requested_at: null, canceled_by: null })
   }, 60_000)
 
   // ── S22 · resume ────────────────────────────────────────────────────────
