@@ -223,10 +223,11 @@ export async function admitToolCall(
 }
 
 /**
- * Applies the Host's `file_read` rules to the files a native tool call reads
- * (`Tool.fileReads`), so reading a file through another tool is never looser
- * than `file_read` itself. Only a strictly stricter result replaces the call's
- * own decision; the deny and ask branches then act on it as usual.
+ * Applies the Host's `file_read` rules (rules only; hooks are not called) to
+ * the files a native tool call declares with `Tool.fileReads`. Today only
+ * `json_transform {file}` declares reads; a tool that reads files without
+ * declaring them is not covered. Only a strictly stricter result replaces the
+ * call's own decision; the deny and ask branches then act on it as usual.
  */
 function withDerivedFileReads(
   config: LoopConfig,
