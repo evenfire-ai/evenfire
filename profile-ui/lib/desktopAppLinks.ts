@@ -2,6 +2,7 @@ import {
   GFS_RESOURCE_DEEP_LINK_HOST,
   SANDBOX_UI_DEEP_LINK_HOST,
   SANDBOX_UI_DEEP_LINK_PROTOCOL,
+  buildDesktopEnvironmentDeepLink,
   buildGfsResourceDeepLink,
   buildSandboxUiDeepLink,
   normalizeGfsResourceUri,
@@ -19,11 +20,10 @@ export function buildDesktopEnvironmentLink(
   environment: DesktopEnvironmentResponse | null | undefined
 ): string | null {
   if (!isDesktopEnvironmentHandoffEnabled() || !environment?.externalRestApiBaseUrl) return null
-  const params = new URLSearchParams({
+  return buildDesktopEnvironmentDeepLink({
     externalRestApiBaseUrl: environment.externalRestApiBaseUrl,
     tenantName: environment.appName || 'Evenfire',
   })
-  return `evenfire://desktop-environment?${params.toString()}`
 }
 
 export function navigateToDesktopApp(

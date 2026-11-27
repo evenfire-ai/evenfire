@@ -4,6 +4,8 @@ export declare const SANDBOX_UI_DEEP_LINK_PROTOCOL: 'evenfire:'
 export declare const SANDBOX_UI_WEB_LINK_PATH: '/open/apps'
 export declare const GFS_RESOURCE_DEEP_LINK_HOST: 'files'
 export declare const GFS_RESOURCE_WEB_LINK_PATH: '/open/files'
+export declare const DESKTOP_ENVIRONMENT_DEEP_LINK_HOST: 'desktop-environment'
+export declare const DESKTOP_SETUP_DEEP_LINK_HOST: 'desktop-setup'
 
 export type SandboxUiDeepLinkTarget = {
   appRef: string
@@ -50,3 +52,27 @@ export function buildGfsResourceWebLink(profileUiBaseUrl: string, uri: string): 
 export function parseGfsResourceDeepLink(rawUrl: string): GfsResourceDeepLinkTarget | null
 /** Accepts canonical GFS URIs, evenfire://files links, and Profile /open/files URLs. */
 export function parseGfsResourceLink(rawLink: string): GfsResourceDeepLinkTarget | null
+
+export type DesktopEnvironmentDeepLinkParts = {
+  externalRestApiBaseUrl: string
+  tenantName: string
+}
+
+export type DesktopEnvironmentDeepLinkTarget = {
+  externalRestApiBaseUrl: string
+  /** Read from `tenantName`, falling back to the legacy `appName` alias. */
+  appName: string
+}
+
+export type DesktopSetupDeepLinkTarget = {
+  email: string
+  authorizationToken: string
+}
+
+export function buildDesktopEnvironmentDeepLink(parts: DesktopEnvironmentDeepLinkParts): string
+export function parseDesktopEnvironmentDeepLink(
+  rawUrl: string
+): DesktopEnvironmentDeepLinkTarget | null
+/** Throws `URIError` when a field contains a lone surrogate. */
+export function buildDesktopSetupDeepLink(target: DesktopSetupDeepLinkTarget): string
+export function parseDesktopSetupDeepLink(rawUrl: string): DesktopSetupDeepLinkTarget | null

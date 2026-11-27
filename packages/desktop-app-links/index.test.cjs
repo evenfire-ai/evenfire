@@ -335,3 +335,190 @@ test('web handoffs require a root-mounted HTTP(S) Profile UI', () => {
     )
   }
 })
+
+// Generated from the producers and parser these functions replaced; regenerate with
+// `node packages/desktop-app-links/generate-desktop-handoff-golden.cjs` from the repo root.
+const handoffGolden = require('./desktop-handoff-links.golden.json')
+
+// Reference copies of the replaced formulas. The corpus test below pins each one to the golden
+// generated from the original code, so the property tests compare against verified behaviour.
+function previousEnvironmentFormula(externalRestApiBaseUrl, tenantName) {
+  const params = new URLSearchParams({ externalRestApiBaseUrl, tenantName })
+  return `evenfire://desktop-environment?${params.toString()}`
+}
+
+function previousSetupFormula(email, authorizationToken) {
+  return `evenfire://desktop-setup?email=${encodeURIComponent(email)}&authorizationToken=${encodeURIComponent(authorizationToken)}`
+}
+
+function outcome(run) {
+  try {
+    return { value: run() }
+  } catch (error) {
+    return { throws: error.constructor.name }
+  }
+}
+
+const HANDOFF_SENSITIVE_CHARS = [
+  ' ',
+  '+',
+  '&',
+  '=',
+  '%',
+  '!',
+  "'",
+  '(',
+  ')',
+  '*',
+  '~',
+  '#',
+  '\t',
+  '\n',
+  '\u0000',
+  'é',
+  '😀',
+]
+const handoffStringArbitrary = fc.oneof(
+  fc.string({ unit: 'grapheme' }),
+  fc.string({ unit: fc.constantFrom(...HANDOFF_SENSITIVE_CHARS) }),
+  fc.string({
+    unit: fc.oneof(
+      fc.constantFrom(...HANDOFF_SENSITIVE_CHARS),
+      fc.string({ unit: 'grapheme', minLength: 1, maxLength: 1 })
+    ),
+  })
+)
+
+test('desktop handoff hosts are exported for producers and the desktop router', () => {
+  assert.equal(links.DESKTOP_ENVIRONMENT_DEEP_LINK_HOST, 'desktop-environment')
+  assert.equal(links.DESKTOP_SETUP_DEEP_LINK_HOST, 'desktop-setup')
+})
+
+test('desktop-environment builder emits the previous profile-ui link byte for byte', () => {
+  assert.ok(handoffGolden.environmentBuilder.length > 0)
+  for (const { externalRestApiBaseUrl, tenantName, link } of handoffGolden.environmentBuilder) {
+    const label = JSON.stringify({ externalRestApiBaseUrl, tenantName })
+    assert.equal(previousEnvironmentFormula(externalRestApiBaseUrl, tenantName), link, label)
+    assert.equal(
+      links.buildDesktopEnvironmentDeepLink({ externalRestApiBaseUrl, tenantName }),
+      link,
+      label
+    )
+  }
+})
+
+test('desktop-environment builder ignores caller key order and extra keys', () => {
+  const parts = {
+    tenantName: 'Acme Corp',
+    extra: 'leak',
+    externalRestApiBaseUrl: 'https://api.example.com',
+  }
+  assert.equal(
+    links.buildDesktopEnvironmentDeepLink(parts),
+    previousEnvironmentFormula('https://api.example.com', 'Acme Corp')
+  )
+})
+
+test('desktop-setup builder emits the previous profile-ui link byte for byte', () => {
+  assert.ok(handoffGolden.setupBuilder.some(entry => 'throws' in entry))
+  for (const entry of handoffGolden.setupBuilder) {
+    const { email, authorizationToken } = entry
+    const expected = 'throws' in entry ? { throws: entry.throws } : { value: entry.value }
+    const label = JSON.stringify({ email, authorizationToken })
+    assert.deepEqual(
+      outcome(() => previousSetupFormula(email, authorizationToken)),
+      expected,
+      label
+    )
+    assert.deepEqual(
+      outcome(() => links.buildDesktopSetupDeepLink({ email, authorizationToken })),
+      expected,
+      label
+    )
+  }
+})
+
+test('desktop handoff builders match the previous formulas for arbitrary unicode input', () => {
+  fc.assert(
+    fc.property(handoffStringArbitrary, handoffStringArbitrary, (first, second) => {
+      assert.equal(
+        links.buildDesktopEnvironmentDeepLink({
+          externalRestApiBaseUrl: first,
+          tenantName: second,
+        }),
+        previousEnvironmentFormula(first, second)
+      )
+      assert.equal(
+        links.buildDesktopSetupDeepLink({ email: first, authorizationToken: second }),
+        previousSetupFormula(first, second)
+      )
+    }),
+    { numRuns: 2000 }
+  )
+  fc.assert(
+    fc.property(
+      fc.string({ unit: 'binary' }),
+      fc.string({ unit: 'binary' }),
+      (email, authorizationToken) => {
+        assert.deepEqual(
+          outcome(() => links.buildDesktopSetupDeepLink({ email, authorizationToken })),
+          outcome(() => previousSetupFormula(email, authorizationToken))
+        )
+      }
+    ),
+    { numRuns: 2000 }
+  )
+})
+
+test('desktop handoff links round-trip well-formed non-empty fields', () => {
+  const field = handoffStringArbitrary.filter(value => value.length > 0 && value.isWellFormed())
+  fc.assert(
+    fc.property(field, field, (first, second) => {
+      assert.deepEqual(
+        links.parseDesktopEnvironmentDeepLink(
+          links.buildDesktopEnvironmentDeepLink({
+            externalRestApiBaseUrl: first,
+            tenantName: second,
+          })
+        ),
+        { externalRestApiBaseUrl: first, appName: second }
+      )
+      assert.deepEqual(
+        links.parseDesktopSetupDeepLink(
+          links.buildDesktopSetupDeepLink({ email: first, authorizationToken: second })
+        ),
+        { email: first, authorizationToken: second }
+      )
+    }),
+    { numRuns: 2000 }
+  )
+})
+
+test('desktop-setup builder throws URIError for a lone surrogate like the previous builder', () => {
+  assert.throws(
+    () => links.buildDesktopSetupDeepLink({ email: '\uD800', authorizationToken: 'token-1' }),
+    URIError
+  )
+  assert.throws(
+    () =>
+      links.buildDesktopSetupDeepLink({ email: 'user@example.com', authorizationToken: '\uDC00' }),
+    URIError
+  )
+})
+
+test('desktop handoff parsers accept exactly what the previous desktop router delivered', () => {
+  const urls = handoffGolden.routerParse.map(entry => entry.url)
+  for (const required of [
+    'evenfire://DESKTOP-SETUP?email=user%40example.test&authorizationToken=token-1',
+    'evenfire://desktop-setup:80?email=user%40example.test&authorizationToken=token-1',
+    'evenfire://u:p@desktop-environment?externalRestApiBaseUrl=https%3A%2F%2Fapi.example.test',
+    'evenfire://desktop-environment?externalRestApiBaseUrl=x&tenantName=A&appName=B',
+    'evenfire://desktop-environment?externalRestApiBaseUrl=&externalRestApiBaseUrl=x',
+  ]) {
+    assert.ok(urls.includes(required), `golden is missing ${required}`)
+  }
+  for (const { url, environment, setup } of handoffGolden.routerParse) {
+    assert.deepEqual(links.parseDesktopEnvironmentDeepLink(url), environment, url)
+    assert.deepEqual(links.parseDesktopSetupDeepLink(url), setup, url)
+  }
+})

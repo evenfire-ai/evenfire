@@ -44,16 +44,13 @@ function appRoutePatterns(): RegExp[] {
 test('PROFILE_ROUTES resolve to App Router pages or route handlers', () => {
   const appRoutes = appRoutePatterns()
   const routePaths = [
-    ...new Set([...collectRoutePaths(PROFILE_ROUTES), GFS_RESOURCE_WEB_LINK_PATH]),
+    ...new Set([
+      ...collectRoutePaths(PROFILE_ROUTES),
+      GFS_RESOURCE_WEB_LINK_PATH,
+      `${SANDBOX_UI_WEB_LINK_PATH}/sample/sample`,
+    ]),
   ]
   const unresolved = routePaths.filter(route => !appRoutes.some(pattern => pattern.test(route)))
 
   assert.deepEqual(unresolved, [])
-})
-
-test('desktop app route stays aligned with the shared handoff contract', () => {
-  assert.equal(
-    PROFILE_ROUTES.openDesktopApp('sandbox-recipes', 'task-board'),
-    `${SANDBOX_UI_WEB_LINK_PATH}/sandbox-recipes/task-board`
-  )
 })

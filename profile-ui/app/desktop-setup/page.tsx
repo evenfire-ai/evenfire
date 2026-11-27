@@ -2,6 +2,7 @@
 
 import { Suspense, useMemo, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
+import { buildDesktopSetupDeepLink } from '@clerum/desktop-app-links'
 import { Button } from '@components/Button'
 import { FormField } from '@components/FormField'
 import { TextInput } from '@components/TextInput'
@@ -29,7 +30,10 @@ function DesktopSetupContent() {
       const result = await createDesktopAuthorization(password)
       setAuthorizationToken(result.authorizationToken)
       setStatus('Authorization token created. Continue setup in the desktop app.')
-      const deepLink = `evenfire://desktop-setup?email=${encodeURIComponent(email)}&authorizationToken=${encodeURIComponent(result.authorizationToken)}`
+      const deepLink = buildDesktopSetupDeepLink({
+        email,
+        authorizationToken: result.authorizationToken,
+      })
       window.location.href = deepLink
     } catch (nextError) {
       setError(
