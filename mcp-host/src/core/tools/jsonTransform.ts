@@ -15,6 +15,22 @@ type Operation = (typeof OPERATIONS)[number]
 /** A JSON file larger than this is refused before it is read. */
 export const JSON_TRANSFORM_MAX_FILE_BYTES = 5 * 1024 * 1024
 
+/**
+ * The largest indented result returned, in UTF-8 bytes: `file_read`'s own read
+ * limit. Indentation grows with depth, so a 5 MiB file could otherwise become a
+ * result of hundreds of MiB, built synchronously.
+ */
+export const JSON_TRANSFORM_MAX_RESULT_BYTES = 10 * 1024 * 1024
+
+/**
+ * The deepest result indented. Parsing is iterative, but `JSON.stringify`
+ * recurses, so a deeper value would end in a stack overflow.
+ */
+export const JSON_TRANSFORM_MAX_RESULT_DEPTH = 256
+
+const RESULT_TOO_LARGE = 'the result is larger than 10 MiB.'
+const RESULT_TOO_DEEP = 'the result is nested more than 256 levels deep.'
+
 const ONE_OF_INPUT_AND_FILE = 'Provide exactly one of input and file.'
 
 class TransformError extends Error {}
@@ -133,7 +149,7 @@ export class JsonTransformTool implements Tool {
         dotPath === undefined
           ? applyAtRoot(operation, parsed)
           : applyAtPath(operation, getByPath(parsed, dotPath), dotPath)
-      return done(typeof result === 'string' ? result : JSON.stringify(result, null, 2), false)
+      return done(typeof result === 'string' ? result : indentedJson(result), false)
     } catch (err) {
       return done(`Transform error: ${(err as Error).message}`, true)
     }
@@ -206,7 +222,10 @@ export class JsonTransformTool implements Tool {
   }
 }
 
-/** Without a path: exactly the operations as they were before `path` applied to all of them. */
+/**
+ * Without a path: the operations as they were before `path` applied to all of
+ * them, except that an indented result over the size or depth bound is refused.
+ */
 function applyAtRoot(operation: Operation, parsed: any): unknown {
   switch (operation) {
     case 'parse':
@@ -219,7 +238,7 @@ function applyAtRoot(operation: Operation, parsed: any): unknown {
     case 'length':
       return Array.isArray(parsed) ? parsed.length : Object.keys(parsed).length
     case 'stringify':
-      return JSON.stringify(parsed, null, 2)
+      return indentedJson(parsed)
   }
 }
 
@@ -230,7 +249,7 @@ function applyAtPath(operation: Operation, target: unknown, dotPath: string): un
     case 'get':
       return target === undefined ? null : target
     case 'stringify':
-      return JSON.stringify(target === undefined ? null : target, null, 2)
+      return indentedJson(target === undefined ? null : target)
     case 'keys':
     case 'values':
     case 'length': {
@@ -257,4 +276,43 @@ function getByPath(value: unknown, dotPath: string): unknown {
     current = (current as Record<string, unknown>)[key]
   }
   return current
+}
+
+/**
+ * `JSON.stringify(value, null, 2)` when the indented text fits in
+ * JSON_TRANSFORM_MAX_RESULT_BYTES and JSON_TRANSFORM_MAX_RESULT_DEPTH.
+ * The indentation is measured before any text is built, and the walk stops as
+ * soon as it passes the bound, so an oversized result costs no more than the
+ * bound to refuse.
+ */
+function indentedJson(value: unknown): string {
+  const whitespace = indentationBytes(value, 0, JSON_TRANSFORM_MAX_RESULT_BYTES)
+  const compact = JSON.stringify(value) ?? ''
+  if (whitespace + Buffer.byteLength(compact) > JSON_TRANSFORM_MAX_RESULT_BYTES) {
+    throw new TransformError(RESULT_TOO_LARGE)
+  }
+  return JSON.stringify(value, null, 2)
+}
+
+/**
+ * The bytes `JSON.stringify(value, null, 2)` adds to `JSON.stringify(value)`.
+ * A non-empty container at depth d adds, per element, a newline and an indent
+ * of 2(d+1) spaces (and, in an object, a space after the colon), and before its
+ * closing bracket a newline and an indent of 2d spaces. Values come from
+ * `JSON.parse`, so every member is serialized and none is skipped.
+ */
+function indentationBytes(value: unknown, depth: number, budget: number): number {
+  if (value === null || typeof value !== 'object') return 0
+  if (depth >= JSON_TRANSFORM_MAX_RESULT_DEPTH) throw new TransformError(RESULT_TOO_DEEP)
+  const isArray = Array.isArray(value)
+  const children: unknown[] = isArray ? (value as unknown[]) : Object.values(value)
+  if (children.length === 0) return 0
+  const perChild = 1 + 2 * (depth + 1) + (isArray ? 0 : 1)
+  let total = children.length * perChild + 1 + 2 * depth
+  if (total > budget) throw new TransformError(RESULT_TOO_LARGE)
+  for (const child of children) {
+    total += indentationBytes(child, depth + 1, budget - total)
+    if (total > budget) throw new TransformError(RESULT_TOO_LARGE)
+  }
+  return total
 }
