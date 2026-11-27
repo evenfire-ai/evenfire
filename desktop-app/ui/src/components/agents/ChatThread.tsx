@@ -477,7 +477,9 @@ export function ChatThread({
         chatId,
         title: chatTitle,
         returnFocusTo: sessionOptionsTriggerRef.current,
-        fallbackFocusWithin: dedicatedSessionsRef.current,
+        fallbackFocusWithin:
+          chatThreadRef.current?.closest<HTMLElement>('.agent-workspace-shell') ??
+          chatThreadRef.current?.parentElement,
       })
     },
     [deleteConfirmation.request, selectedAgent]

@@ -131,7 +131,7 @@ export function SidebarNav({
       chatId: session.id,
       title: session.title,
       returnFocusTo: sessionOptionsTriggerRef.current,
-      fallbackFocusWithin: sessionsRef.current,
+      fallbackFocusWithin: sidebarRef.current?.querySelector<HTMLElement>('.sidebar-menu-surface'),
     })
   }
 
