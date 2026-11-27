@@ -137,4 +137,30 @@ describe('token-leak redaction', () => {
       expect(line).not.toContain('invitationToken')
     }
   })
+
+  it("removes the invitation link token from a logged request's body, two levels down", () => {
+    expect(TOKEN_LEAK_REDACT_PATHS).toContain('req.body.invitationToken')
+    expect(REQUIRED_REDACT_PATHS).toContain('req.body.invitationToken')
+    const lines: string[] = []
+    const sink = new Writable({
+      write(chunk, _encoding, done) {
+        lines.push(String(chunk))
+        done()
+      },
+    })
+    const logger = pino({ redact: { paths: [...TOKEN_LEAK_REDACT_PATHS], remove: true } }, sink)
+    const invitationToken = 'fixture-invitation-flow-token.Zq8~'
+
+    logger.info(
+      { req: { method: 'POST', body: { invitationToken, browserBinding: 'fixture-binding' } } },
+      'request'
+    )
+
+    // Witness: the record was written, with the request's other fields intact.
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain('"method":"POST"')
+    expect(lines[0]).toContain('"browserBinding":"fixture-binding"')
+    expect(lines[0]).not.toContain(invitationToken)
+    expect(lines[0]).not.toContain('invitationToken')
+  })
 })
