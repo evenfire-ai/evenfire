@@ -66,6 +66,7 @@ import {
   waitForAgentState,
   waitForIdle,
 } from '../helpers.js'
+import { type CronJobRef, withJobCleanup } from './cronCleanup.js'
 import { type CronLogEntry, type CronLogEvent, parseCronLogLines } from './cronLog.js'
 import { issueRealRpcToken } from './runtimeAuth.js'
 
@@ -831,21 +832,12 @@ async function runJobAction(
 }
 
 /**
- * Delete every job, trying each one even when an earlier delete fails, then
- * fail with every delete error.
+ * Run a test body that registers each job it creates, then ask the agent to
+ * delete every registered job. See ./cronCleanup.ts for how a cleanup failure
+ * is reported next to a body failure.
  */
-async function deleteJobs(jobs: Array<[jobId: string, userId: string]>, since: number) {
-  const failures: string[] = []
-  for (const [jobId, userId] of jobs) {
-    try {
-      await runJobAction('delete', jobId, userId, since)
-    } catch (err) {
-      failures.push(`${jobId}: ${(err as Error).message}`)
-    }
-  }
-  if (failures.length > 0) {
-    throw new Error(`Cron job cleanup failed; delete these jobs by hand:\n${failures.join('\n')}`)
-  }
+function withCronJobs<T>(since: number, body: (jobs: CronJobRef[]) => Promise<T>): Promise<T> {
+  return withJobCleanup(body, (jobId, userId) => runJobAction('delete', jobId, userId, since))
 }
 
 function podSecondOfMinute(): number {
@@ -867,9 +859,11 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 3: Scheduler timing', () => {
     const since = Date.now() - MINUTE_MS
     const userId = phase3UserId()
     const name = `cadence-e2e-${Date.now()}`
-    const jobId = await createEveryMinuteJob(name, userId, since)
 
-    try {
+    await withCronJobs(since, async jobs => {
+      const jobId = await createEveryMinuteJob(name, userId, since)
+      jobs.push([jobId, userId])
+
       const first = await waitForCronLog(
         since,
         `the first fire of ${name}`,
@@ -897,9 +891,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 3: Scheduler timing', () => {
           `every fire on a minute boundary: ${isoTimes(fires)}`
         )
         .toBe(true)
-    } finally {
-      await deleteJobs([[jobId, userId]], since)
-    }
+    })
   }, 600_000)
 
   it('CR-13: disabling after repeated enables stops every run, and re-enabling waits for the next cron time', async () => {
@@ -910,7 +902,9 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 3: Scheduler timing', () => {
     const target = await createEveryMinuteJob(`toggle-target-${runId}`, targetUser, since)
     const control = await createEveryMinuteJob(`toggle-control-${runId}`, controlUser, since)
 
-    try {
+    await withCronJobs(since, async jobs => {
+      jobs.push([target, targetUser], [control, controlUser])
+
       await waitForCronLog(
         since,
         'the first fire of the target job',
@@ -970,15 +964,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 3: Scheduler timing', () => {
         `fired at ${new Date(firstFire.at).toISOString()}`
       expect.soft(firstFire.at - enabledAt, fireReport).toBeGreaterThanOrEqual(3_000)
       expect.soft(msFromMinuteBoundary(firstFire.at), fireReport).toBeLessThan(3_000)
-    } finally {
-      await deleteJobs(
-        [
-          [target, targetUser],
-          [control, controlUser],
-        ],
-        since
-      )
-    }
+    })
   }, 900_000)
 })
 

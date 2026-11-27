@@ -25,6 +25,9 @@ DEFAULT_NODE_UNIT_VITEST_SUITES=(
   # Cron log parser for the cron scheduler timing suite: parses captured
   # log lines, so it needs no cluster.
   mcp-host/cronLog.test.ts
+  # Cleanup helper of the same suite: runs against recorded stubs, so it
+  # needs no cluster.
+  mcp-host/cronCleanup.test.ts
 )
 DEFAULT_CLUSTER_VITEST_SUITES=(
   gfsUploadProductMutation.test.ts
