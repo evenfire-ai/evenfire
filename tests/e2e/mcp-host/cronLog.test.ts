@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { parseCronLogLines } from './cronLog.js'
 
-// Both fixtures are real output: CronScheduler.createJob, enableJob,
-// disableJob, enableJob, triggerJob and deleteJob, run once with the scheduler
+// Both fixtures are excerpts of real output: CronScheduler.createJob,
+// enableJob, disableJob, enableJob, triggerJob and deleteJob, run once with the scheduler
 // of this branch (structured logger) and once with the scheduler of
 // b2ad4cc52 (console adapter), with the logger of mcp-host/src/logger.ts.
 const STRUCTURED = [

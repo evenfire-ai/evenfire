@@ -763,6 +763,10 @@ const phase3UserId = () => `cron-timing-${PHASE3_RUN_ID}-${++phase3UserCounter}`
  * Send a chat request that should run cron_manage, approving the tool call if
  * asked. Returns the agent's last reply, so a missing Cron line can be
  * reported with what the agent said instead.
+ *
+ * Unlike sendWithApproval, it neither waits for global idle nor polls
+ * getTaskResult: each caller waits for the Cron log line its action must
+ * produce, which is the witness that the tool ran.
  */
 async function sendCronRequest(content: string, userId: string): Promise<string> {
   let res = await sendMessage(`${content} ${CRON_TOOL_INSTRUCTION}`, { userId })
