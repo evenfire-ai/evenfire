@@ -314,11 +314,15 @@ Read the notes for every release you skip over, not only the target release.
    `0152_gfs_upload_authority_bindings` must be applied first; do not bump
    `CONTEXT_MAPPER_GFSC_IMAGE` on its own ahead of control-api. v0.12.1 does
    not include that change. workflow-recipes images of the same release need
-   `0151_workflow_authority_bindings` and `0155_workflow_run_failure_reason` to
-   start a run: roll workflow-recipes after the control-api migration Job. If
-   it rolls first, runs already in progress continue, and new runs stay
-   `Pending` and are retried on each run poll until the migrations are
-   applied.
+   `0151_workflow_authority_bindings`, `0155_workflow_run_failure_reason` and
+   `0160_workflow_run_cancel_request`: roll workflow-recipes after the
+   control-api migration Job. If it rolls before `0151` or `0155`, new runs
+   stay `Pending` and are retried on each run poll until the migrations are
+   applied. If it rolls before `0160`, it cannot record the end of any run:
+   every terminal write, the duration sweep and cancel delivery fail with
+   `column "cancel_requested_at" does not exist`, and runs that finish in that
+   window stay `Running` in the database until a later event for their recipe,
+   a workflow-recipes restart, or the duration sweep after the migration.
 4. **Follow any feature-specific runbook** below.
 
 ### Feature-specific notes
@@ -387,6 +391,13 @@ Control UI and the External REST API. control-api stores the request
 run's coordinator. A running run stops at the first step boundary after its coordinator receives
 the signal (normally within 5 s). A step that starts before then still runs, and steps that already
 ran are not undone. Only workflow-recipes images of this release deliver cancel requests.
+
+Roll external-rest-api before control-api, as for the
+[user access foundation upgrade](user-access-foundation-upgrade.md) (edge before control-api). The
+new external-rest-api works against an older control-api: an older control-api does not mark runs
+as cancellable, so Desktop shows no Cancel. In the opposite order a new control-api marks runs as
+cancellable, so Desktop shows Cancel, but the older external-rest-api has no cancel route and
+answers `404 Not Found`.
 
 **Runs keep running after the user's sessions are revoked.** A run that has started is authorized
 from the user's live account state (active user and a live access path to the recipe: the user's
