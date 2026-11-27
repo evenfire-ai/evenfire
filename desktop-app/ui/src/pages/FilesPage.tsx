@@ -788,7 +788,7 @@ export function FilesPage({
     currentPermissionPresentationAvailable &&
     hasBit(affordances ?? cachedCurrentAffordances, 'delete')
   // The Manage modal lists ACL rows, and view-ACL = manage-ACL server-side —
-  // a caller without the bit gets the API's 403, so the entry must not show.
+  // a caller without the bit gets the API's 403, so the entry stays disabled.
   const canManageCurrent =
     currentPermissionPresentationAvailable &&
     hasBit(affordances ?? cachedCurrentAffordances, 'manage_acl')

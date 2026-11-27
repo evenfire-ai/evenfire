@@ -554,7 +554,7 @@ describe('FilePreviewPage move permission contract', () => {
     {
       target: 'resource',
       status: 403,
-      hidden: [
+      unavailable: [
         ['Rename', "Rename isn't available"],
         ['Delete', "Delete isn't available"],
       ] as const,
@@ -562,7 +562,7 @@ describe('FilePreviewPage move permission contract', () => {
     {
       target: 'resource',
       status: 404,
-      hidden: [
+      unavailable: [
         ['Rename', "Rename isn't available"],
         ['Delete', "Delete isn't available"],
       ] as const,
@@ -570,16 +570,16 @@ describe('FilePreviewPage move permission contract', () => {
     {
       target: 'source parent',
       status: 403,
-      hidden: [['Move to', "Move isn't available"]] as const,
+      unavailable: [['Move to', "Move isn't available"]] as const,
     },
     {
       target: 'source parent',
       status: 404,
-      hidden: [['Move to', "Move isn't available"]] as const,
+      unavailable: [['Move to', "Move isn't available"]] as const,
     },
   ])(
     'disables cached $target actions after an explicit HTTP $status denial',
-    async ({ target, status, hidden }) => {
+    async ({ target, status, unavailable }) => {
       vi.useFakeTimers({ toFake: ['Date'] })
       let resourceReads = 0
       let sourceReads = 0
@@ -621,7 +621,7 @@ describe('FilePreviewPage move permission contract', () => {
 
         await waitFor(() => {
           const refreshedMenu = screen.getByRole('menu', { name: 'Actions for diagram.png' })
-          for (const [action, reason] of hidden) {
+          for (const [action, reason] of unavailable) {
             expectUnavailable(within(refreshedMenu).getByRole('menuitem', { name: action }), reason)
           }
           if (target === 'resource') {

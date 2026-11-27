@@ -1627,7 +1627,7 @@ describe('App sidebar GFS resource menu', () => {
           return
         }
         // The tree waits for both reads; a failed row read fails the menu,
-        // a failed parent read withholds only Move.
+        // a failed parent read greys out only Move.
         m.menu!.bits =
           reads.row === 'error' ? 'error' : reads.parent === 'error' ? 'okWithoutParent' : 'ok'
         cover(`settle:${m.menu!.bits}`)

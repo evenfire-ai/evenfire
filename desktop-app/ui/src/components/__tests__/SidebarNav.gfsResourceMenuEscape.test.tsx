@@ -193,7 +193,7 @@ describe('anchored GfsResourceMenu inside the compact sidebar drawer', () => {
     expect(drawerOpen()).toBe(false)
   })
 
-  it('keeps Escape for the open menu when a click on an inert spot drops focus to body', () => {
+  it('keeps Escape for the open menu when focus drops from a greyed-out item to body', () => {
     renderDrawerWithTree()
     openMenu()
     const rename = screen.getByRole('menuitem', { name: 'Rename' })

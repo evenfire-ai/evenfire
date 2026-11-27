@@ -225,7 +225,7 @@ describe('FileExplorerTree row resource menu', () => {
     expect(bits.affordances).toHaveBeenCalledTimes(3)
   })
 
-  it('withholds only Move when the parent read fails, keeping the row bits', async () => {
+  it('greys out only Move when the parent read fails, keeping the row bits', async () => {
     const rateLimited = await affordancesFailureMessage(429, {
       code: 'rate_limited',
       message: 'slow down',

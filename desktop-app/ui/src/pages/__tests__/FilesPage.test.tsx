@@ -2322,7 +2322,7 @@ describe('FilesPage', () => {
       items: [child],
     }
 
-    // Read-only row: the ⋯ menu must not offer Manage — the ACL modal would
+    // Read-only row: the ⋯ menu must not enable Manage — the ACL modal would
     // only 403 on open (view-ACL = manage-ACL server-side).
     hookMock.useGfsBrowserController.mockReturnValue({
       ...controller,

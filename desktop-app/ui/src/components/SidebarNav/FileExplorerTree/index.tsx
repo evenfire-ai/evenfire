@@ -1172,7 +1172,7 @@ export function FileExplorerTree({
         : null
       void Promise.all([rowRead, parentRead]).then(([rowAffordances, parentAffordances]) => {
         if (rowMenuTokenRef.current !== token) return
-        // The parent's bits only decide Move: a failed parent read withholds
+        // The parent's bits only decide Move: a failed parent read greys out
         // Move and leaves every other action on its row's bits. Unlike the
         // Files page, a 429 does not keep earlier parent bits; this read has
         // none of its own to keep.

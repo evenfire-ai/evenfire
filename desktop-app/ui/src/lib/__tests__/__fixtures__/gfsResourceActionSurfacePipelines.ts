@@ -62,7 +62,8 @@ export function liveFilesRow(state: FilesRowState): SurfaceRun {
       handlers,
     })
   )
-  // Files rows open a trigger menu with settled bits: no permission status.
+  // Files rows pass no permission status: their availability alone gates the
+  // menu, and bits that are still pending read as not held.
   return { actions: gated(actions, undefined), handlers }
 }
 
