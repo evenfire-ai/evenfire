@@ -4505,14 +4505,24 @@ body.sidebar-resizing {
   gap: var(--space-1);
 }
 
-.agent-workspace-agent-breadcrumb-actions {
+.agent-workspace-conversation-actions {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
   min-width: 0;
 }
 
-.agent-workspace-agent-route-menu {
+/* A long title truncates so the actions menu stays reachable inside the
+ * breadcrumb; the full title remains in the crumb's `title` attribute. */
+.agent-workspace-conversation-title {
+  min-width: 0;
+  max-width: 32ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-workspace-conversation-menu {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -4520,25 +4530,25 @@ body.sidebar-resizing {
   z-index: calc(var(--layer-dropdown) + 90);
 }
 
-.agent-workspace-agent-route-trigger.ui-icon-button {
+.agent-workspace-conversation-menu-trigger.ui-icon-button {
   width: 28px;
   height: 28px;
   min-height: 28px;
   color: var(--text-dim);
 }
 
-.agent-workspace-agent-route-trigger.ui-icon-button:hover:enabled,
-.agent-workspace-agent-route-trigger.ui-icon-button:focus-visible {
+.agent-workspace-conversation-menu-trigger.ui-icon-button:hover:enabled,
+.agent-workspace-conversation-menu-trigger.ui-icon-button:focus-visible {
   color: var(--text);
 }
 
-.agent-workspace-agent-route-trigger.ui-icon-button svg {
+.agent-workspace-conversation-menu-trigger.ui-icon-button svg {
   width: 16px;
   height: 16px;
   fill: currentColor;
 }
 
-.agent-workspace-agent-route-menu-panel {
+.agent-workspace-conversation-menu-panel {
   position: absolute;
   left: 0;
   top: calc(100% + var(--space-1));
@@ -4554,7 +4564,7 @@ body.sidebar-resizing {
   z-index: calc(var(--layer-dropdown) + 100);
 }
 
-.agent-workspace-agent-route-menu-item {
+.agent-workspace-conversation-menu-item {
   min-height: 30px;
 }
 
@@ -6821,6 +6831,24 @@ body.sidebar-resizing {
 
 .confirm-dialog-confirm--danger {
   background: var(--danger);
+}
+
+/* SingleValueEditDialog: the confirm-dialog frame around one labelled field. */
+.single-value-edit-dialog-field {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+
+.single-value-edit-dialog-field > label {
+  color: var(--text);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.single-value-edit-dialog-feedback {
+  margin-top: var(--space-2);
 }
 
 .desktop-update-dialog-backdrop {
@@ -9253,7 +9281,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   padding: var(--space-1) var(--space-1-5);
 }
 
-.agent-workspace-agent-route-menu-panel,
+.agent-workspace-conversation-menu-panel,
 .resource-breadcrumb-menu {
   -webkit-backdrop-filter: none;
   backdrop-filter: none;

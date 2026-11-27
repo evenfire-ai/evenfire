@@ -65,6 +65,7 @@ import { createChatLinkActivation } from '@lib/chatLinkActivation'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
 import { releaseComposerDraftForWorkspaceTab } from '@lib/composerDraftStore'
+import { findConversationEntry, openConversationTitle } from '@lib/conversationEntry'
 import type { Launch, LaunchId, LaunchOutcome } from '@lib/embedOwnership.types'
 import { createEmbedOwnershipMachine } from '@lib/embedOwnershipMachine'
 import type { EmbedRefreshErrorEvent } from '@lib/embedOwnershipMachine.types'
@@ -1188,15 +1189,15 @@ export function App() {
     if (vm.navItem !== DESKTOP_ROUTES.chat || !vm.selectedAgent || !vm.activeChatId) {
       return null
     }
-    const conversation =
-      vm.chatList.find(chat => chat.id === vm.activeChatId) ??
-      vm.latestChatSessions.find(
-        chat => chat.agentRef === vm.selectedAgent && chat.id === vm.activeChatId
-      )
     return {
       agentName: vm.selectedAgent,
       chatId: vm.activeChatId,
-      title: conversation?.title.trim() || 'Conversation',
+      title: openConversationTitle(
+        vm.chatList,
+        vm.latestChatSessions,
+        vm.selectedAgent,
+        vm.activeChatId
+      ),
       teamId: vm.currentTeamId || undefined,
     }
   }, [
@@ -3510,16 +3511,15 @@ export function App() {
   // paths and never drives a chat switch itself.
   React.useEffect(() => {
     if ((vm.navItem !== DESKTOP_ROUTES.chat && !chatDrawerVisible) || !vm.selectedAgent) return
-    const conversation = vm.activeChatId
-      ? (vm.chatList.find(chat => chat.id === vm.activeChatId) ??
-        vm.latestChatSessions.find(
-          chat => chat.agentRef === vm.selectedAgent && chat.id === vm.activeChatId
-        ))
-      : undefined
     const active = {
       agentRef: vm.selectedAgent as string,
       chatId: vm.activeChatId ?? null,
-      title: conversation?.title,
+      title: findConversationEntry(
+        vm.chatList,
+        vm.latestChatSessions,
+        vm.selectedAgent,
+        vm.activeChatId
+      )?.title,
     }
     const id = nextChatTabId()
     setWorkspaceTabs(state => {

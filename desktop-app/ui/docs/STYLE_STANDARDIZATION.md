@@ -152,27 +152,28 @@ Imports come from `@components/Common`. Treat `src/components/Common/index.ts`
 as the supported shared boundary: pages must use exported Common primitives
 instead of inventing local equivalents. The current exported set is:
 
-| Primitive          | Key API                                                          |
-| ------------------ | ---------------------------------------------------------------- |
-| `Badge`            | `tone: 'neutral' \| 'accent' \| 'success'`                       |
-| `Button`           | `variant`, `color`, `size`, `block`, `loading`, `align`          |
-| `DataTable`        | native table props, `compact`, `fullBleed`, `frameless`          |
-| `DataTableFilter`  | `options`, `value`, `onChange`, `variant`                        |
-| `DetailRow`        | `label`, `value`                                                 |
-| `DropdownSelect`   | `options`, `value`, `onChange`, `placeholder`                    |
-| `EmptyState`       | `title`, `body`                                                  |
-| `Field`            | `label`, `hint`, `htmlFor`, `labelClassName`, `wrapperClassName` |
-| `IconButton`       | icon button props                                                |
-| `MenuItem`         | menu item props                                                  |
-| `NavItem`          | navigation item props                                            |
-| `Pill`             | pill props                                                       |
-| `ReferenceTag`     | `kind`, `children`, optional button props                        |
-| `SelectInput`      | `dense` + native `<select>` props (children = `<option>`s)       |
-| `SelectableOption` | selectable option props                                          |
-| `StatusBanner`     | `text` or `children`, `tone`, `leadingIcon?`, `compact`          |
-| `TabButton`        | tab button props                                                 |
-| `TextInput`        | `dense` + native `<input>` props                                 |
-| `ToastStack`       | `items: ToastMessage[]`                                          |
+| Primitive               | Key API                                                             |
+| ----------------------- | ------------------------------------------------------------------- |
+| `Badge`                 | `tone: 'neutral' \| 'accent' \| 'success'`                          |
+| `Button`                | `variant`, `color`, `size`, `block`, `loading`, `align`             |
+| `DataTable`             | native table props, `compact`, `fullBleed`, `frameless`             |
+| `DataTableFilter`       | `options`, `value`, `onChange`, `variant`                           |
+| `DetailRow`             | `label`, `value`                                                    |
+| `DropdownSelect`        | `options`, `value`, `onChange`, `placeholder`                       |
+| `EmptyState`            | `title`, `body`                                                     |
+| `Field`                 | `label`, `hint`, `htmlFor`, `labelClassName`, `wrapperClassName`    |
+| `IconButton`            | icon button props                                                   |
+| `MenuItem`              | menu item props                                                     |
+| `NavItem`               | navigation item props                                               |
+| `Pill`                  | pill props                                                          |
+| `ReferenceTag`          | `kind`, `children`, optional button props                           |
+| `SelectInput`           | `dense` + native `<select>` props (children = `<option>`s)          |
+| `SelectableOption`      | selectable option props                                             |
+| `SingleValueEditDialog` | `title`, `label`, `initialValue`, `validate`, `onSubmit`, `onClose` |
+| `StatusBanner`          | `text` or `children`, `tone`, `leadingIcon?`, `compact`             |
+| `TabButton`             | tab button props                                                    |
+| `TextInput`             | `dense` + native `<input>` props                                    |
+| `ToastStack`            | `items: ToastMessage[]`                                             |
 
 Do not recreate equivalents inline. If a real new common control is needed, add it under `src/components/Common/<Component>/index.tsx` with colocated `types.ts`, then re-export it from `src/components/Common/index.ts` — not as a one-off in a page file.
 
