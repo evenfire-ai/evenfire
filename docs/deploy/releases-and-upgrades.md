@@ -380,8 +380,9 @@ the runner exits.
 This release adds run cancellation: the user who launched a run, or a live admin of the run's
 team while the team holds the recipe, can cancel it from Desktop or the External REST API. control-api stores the request
 (`workflow_runs.cancel_requested_at`, migration `0160_workflow_run_cancel_request`) and workflow-recipes delivers it to the
-run's coordinator, which stops before its next step. Only workflow-recipes images of this
-release deliver cancel requests.
+run's coordinator. A running run stops at the first step boundary after its coordinator receives
+the signal (normally within 5 s). A step that starts before then still runs, and steps that already
+ran are not undone. Only workflow-recipes images of this release deliver cancel requests.
 
 **The upgrade window.** The deploy rolls control-api before workflow-recipes. For one to two
 minutes the new control-api accepts cancel requests while the old workflow-recipes pod still runs
@@ -392,7 +393,8 @@ and does not deliver them. A run canceled in that window keeps running:
   missing. That `Failed` is the run's own failure (`failure_reason` says which); it is not the
   cancel. The run keeps that phase: the new workflow-recipes does not change it to `Canceled`.
 - Otherwise the new workflow-recipes delivers the request on its next run poll (every 30 s by
-  default) and the run stops before its next step.
+  default), and the run then stops at the first step boundary after its coordinator receives the
+  signal.
 
 Later deploys have no window, because both services then handle cancellation. Deploys with the
 minikube scripts have none either: they stop both services before the migration and start
