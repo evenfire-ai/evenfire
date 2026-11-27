@@ -342,6 +342,14 @@ export function createSandboxUiMainFake() {
       send('sandboxUi:acknowledgeDeepLink', { id, authority }) as Promise<boolean>,
     acknowledgeHeldResourceDeepLink: (id: number, authority: DeepLinkAcknowledgmentAuthority) =>
       send('gfs:acknowledgeDeepLink', { id, authority }) as Promise<boolean>,
+    /**
+     * Runs main's real handler of `channel` now, off the wire: for a suite
+     * whose own transport decides when the answer reaches the renderer, but
+     * needs main to act at the moment the renderer called.
+     */
+    invokeNow(channel: string, payload: unknown): Promise<unknown> {
+      return main.invoke(channel, payload)
+    },
     listPendingGfsDeepLinks(): Promise<{ links: GfsResourceDeepLinkEnvelope[] }> {
       return main.invoke('gfs:listPendingDeepLinks', {}) as Promise<{
         links: GfsResourceDeepLinkEnvelope[]
