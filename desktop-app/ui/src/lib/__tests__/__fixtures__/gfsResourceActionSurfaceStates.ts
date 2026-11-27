@@ -153,8 +153,9 @@ export type PreviewShape = {
   /** Denied, unavailable or revoked. */
   accessBlocked: boolean
   /**
-   * Shape, not a bit: until the session's authority resolves, the file's own
-   * actions do not apply yet and the builder withholds them.
+   * Shape, not a bit: while the session's authority is pending, whatever the
+   * URI resolved to, the file's own actions do not apply and the builder
+   * withholds them.
    */
   authorityPending: boolean
   /**
