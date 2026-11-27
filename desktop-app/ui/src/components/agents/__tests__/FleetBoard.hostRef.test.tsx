@@ -105,6 +105,31 @@ describe('fleetRowHostRefs on rendered FleetBoard rows', () => {
     ])
   })
 
+  it('keeps the final rendered names unique when a catalog refresh introduces generated-name collisions', () => {
+    state.refs = ['support', 'support-staging', 'support-production']
+    state.display = {
+      support: 'Main',
+      'support-staging': 'Staging',
+      'support-production': 'Customer Support (support-staging)',
+    }
+    const view = render(<FleetBoard />)
+    state.display = {
+      ...state.display,
+      support: 'Customer Support',
+      'support-staging': 'Customer Support',
+    }
+    view.rerender(<FleetBoard />)
+    const rows = Array.from(view.container.querySelectorAll('.agents-table-row-clickable'))
+    expect(new Set(rows.map(row => row.querySelector('strong')!.textContent)).size).toBe(3)
+    expect(new Set(rows.map(row => row.getAttribute('aria-label'))).size).toBe(3)
+    rows.forEach(row => fireEvent.click(row))
+    expect(state.open.mock.calls.map(([ref]) => ref)).toEqual([
+      'support',
+      'support-production',
+      'support-staging',
+    ])
+  })
+
   it('selects exact references when one is a substring and neither display name contains it', () => {
     state.refs = ['support', 'support-prod']
     state.display = { support: 'Customer service', 'support-prod': 'Production service' }

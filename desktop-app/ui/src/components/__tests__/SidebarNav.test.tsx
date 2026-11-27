@@ -421,9 +421,9 @@ describe('SidebarNav logo', () => {
     sidebarNavChatState.agentDisplayByName = { support: 'Support', 'support-prod': 'Support' }
     const view = render(<SidebarNav {...baseProps()} />)
     for (const name of [
-      'Task · Support (support) · chat-1',
-      'Task · Support (support-prod)',
-      'Task · Support (support) · chat-3',
+      'Task (Support (support) · chat-1)',
+      'Task (Support (support-prod) · chat-2)',
+      'Task (Support (support) · chat-3)',
     ]) {
       fireEvent.click(screen.getByRole('button', { name: `Open ${name}` }))
     }
@@ -436,7 +436,7 @@ describe('SidebarNav logo', () => {
     ])
     sidebarNavChatState.agentDisplayByName = { support: 'Renamed', 'support-prod': 'Production' }
     view.rerender(<SidebarNav {...baseProps()} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Open Task · Renamed · chat-3' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open Task (Renamed · chat-3)' }))
     expect(sidebarNavChatState.select).toHaveBeenLastCalledWith(
       'support',
       expect.objectContaining({ chatId: 'chat-3' })
@@ -449,6 +449,34 @@ describe('SidebarNav logo', () => {
       ['support', 'chat-1'],
       ['support-prod', 'chat-2'],
       ['support', 'chat-3'],
+    ])
+  })
+
+  it('keeps composed session names distinct from legitimate titles resembling generated labels', () => {
+    sidebarNavChatState.latestChatSessions = [
+      { agentRef: 'support', id: 'chat-1', title: 'Task' },
+      { agentRef: 'support', id: 'chat-2', title: 'Task' },
+      { agentRef: 'other', id: 'chat-3', title: 'Task (Support · chat-1)' },
+      { agentRef: 'other', id: 'chat-4', title: 'Task · Support · chat-1' },
+    ]
+    sidebarNavChatState.agentDisplayByName = { support: 'Support', other: 'Other' }
+    render(<SidebarNav {...baseProps()} />)
+    const rows = screen.getAllByTestId('latest-session-row')
+    const names = rows.map(row =>
+      row.querySelector('.nav-latest-session__main')!.getAttribute('aria-label')
+    )
+    expect(new Set(names).size).toBe(4)
+    expect(rows[0]!.querySelector('.nav-latest-session__agent')!.textContent).toBe(
+      'Support · chat-1; 2'
+    )
+    for (const name of names) fireEvent.click(screen.getByRole('button', { name: name! }))
+    expect(
+      sidebarNavChatState.select.mock.calls.map(([ref, options]) => [ref, options.chatId])
+    ).toEqual([
+      ['support', 'chat-1'],
+      ['support', 'chat-2'],
+      ['other', 'chat-3'],
+      ['other', 'chat-4'],
     ])
   })
 

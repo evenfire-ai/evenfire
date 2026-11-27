@@ -15,7 +15,11 @@ import { DESKTOP_ROUTES, SIDEBAR_SESSION_PREVIEW_LIMIT } from '@constants/naviga
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { formatDesktopAppVersionTooltip, useDesktopAppInfo } from '@hooks/useDesktopAppInfo'
-import { agentDisplayLabels } from '@lib/agentDisplayLabels'
+import {
+  agentDisplayLabels,
+  sessionDisplayLabels,
+  sessionPresentationKey,
+} from '@lib/agentDisplayLabels'
 import type { NavItem } from '@/uiTypes'
 import { FileExplorerTree } from './FileExplorerTree'
 import {
@@ -268,6 +272,11 @@ export function SidebarNav({
     [agentDisplayByName, latestChatSessions]
   )
 
+  const sessionLabels = useMemo(
+    () => sessionDisplayLabels(latestChatSessions, sessionAgentLabels),
+    [latestChatSessions, sessionAgentLabels]
+  )
+
   const visibleLatestChatSessions = useMemo(
     () => latestChatSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT),
     [latestChatSessions]
@@ -509,22 +518,10 @@ export function SidebarNav({
                       <>
                         <div className="nav-latest-sessions__list">
                           {visibleLatestChatSessions.map(session => {
-                            const agentLabel = sessionAgentLabels[session.agentRef]
-                            const duplicateSession = latestChatSessions.some(
-                              other =>
-                                other.agentRef === session.agentRef &&
-                                other.id !== session.id &&
-                                other.title === session.title
-                            )
-                            const identityLabel = duplicateSession
-                              ? `${agentLabel} · ${session.id}`
-                              : agentLabel
-                            const sessionLabel =
-                              duplicateSession ||
-                              agentLabel !==
-                                (agentDisplayByName[session.agentRef] ?? session.agentRef)
-                                ? `${session.title} · ${identityLabel}`
-                                : session.title
+                            const presentation =
+                              sessionLabels[sessionPresentationKey(session.agentRef, session.id)]!
+                            const identityLabel = presentation.secondary
+                            const sessionLabel = presentation.label
                             const sessionKey = `${session.agentRef}${SESSION_KEY_SEPARATOR}${session.id}`
                             const isActive =
                               navItem === DESKTOP_ROUTES.chat &&
