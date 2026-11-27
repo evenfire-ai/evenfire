@@ -831,7 +831,7 @@ assert_a_tag_override_on_a_synced_profile_re_pulls_and_re_deploys() {
      && grep -Fqx 'plan repull=true deploy=true build=false' <<< "$out_new" \
      && grep -Fq "not ghcr:override-tag" <<< "$out_new" \
      && grep -Fqx 'plan repull=false deploy=false build=false' <<< "$out_same" \
-     && ! grep -Fq 'No usable cluster marker' <<< "$out_same" \
+     && ! grep -Fq 'No usable marker baseline' <<< "$out_same" \
      && grep -Fqx 'plan repull=true deploy=true build=false' <<< "$out_err" \
      && grep -Fq 'WARNING: unable to read' <<< "$out_err"; then
     pass "a tag override on a synced profile re-pulls and re-deploys; the same tag keeps the baseline"
@@ -870,6 +870,46 @@ assert_a_tag_override_on_an_unsynced_profile_re_deploys() {
     pass "a tag override on an unsynced profile re-deploys; setup's own tag only re-pulls"
   else
     fail "expected override -> repull+deploy and the recorded tag -> repull only; rc=$rc_new/$rc_same new=$out_new same=$out_same"
+  fi
+  cleanup_fixture "$d"
+}
+
+# A forced ghcr sync re-pulls every release image, which discards the shadows
+# earlier syncs built. Its delta must therefore start at the release commit: from
+# the marker's gitHead it is empty, and control-api, shadowed by the sync that
+# stamped the marker, would go back to release code under a marker naming HEAD.
+# Without --force-cluster-sync nothing is re-pulled and the marker baseline holds.
+assert_a_forced_ghcr_sync_shadows_every_change_since_the_release() {
+  local d base head out_forced out_plain rc_forced rc_plain
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  base="$(repo_head "$d")"
+  echo "// shadowed by an earlier sync" >> "$d/repo/control-api/src/index.ts"
+  git -C "$d/repo" -c user.email=t@t -c user.name=t commit -qam change
+  head="$(repo_head "$d")"
+  write_manifest "$d" '{"generated":"g7","imageSource":"ghcr","imageTag":"'"$PIN_TAG"'","images":{}}'
+  write_marker "$d" "$head" g7 ghcr "$PIN_TAG"
+  out_forced="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
+    TEST_IMAGE_REVISION="$base" FORCE_CLUSTER_SYNC=true \
+    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" IMAGES_GENERATED_AT=g7 \
+      run_incremental "$d" 'incremental_plan; echo "plan targets=$(incremental_target_summary) repull=${INCREMENTAL_REPULL_ALL}"'
+  )"
+  rc_forced=$?
+  out_plain="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
+    TEST_IMAGE_REVISION="$base" FORCE_CLUSTER_SYNC=false \
+    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" IMAGES_GENERATED_AT=g7 \
+      run_incremental "$d" 'incremental_plan; echo "plan targets=$(incremental_target_summary) repull=${INCREMENTAL_REPULL_ALL}"'
+  )"
+  rc_plain=$?
+  if [ "$rc_forced" -eq 0 ] && [ "$rc_plain" -eq 0 ] \
+     && grep -Fqx 'plan targets=control-api repull=true' <<< "$out_forced" \
+     && grep -Fq "release images' commit ${base:0:12}" <<< "$out_forced" \
+     && grep -Fqx 'plan targets=none repull=false' <<< "$out_plain"; then
+    pass "a forced ghcr sync shadows every change since the release commit it re-pulls"
+  else
+    fail "expected forced -> control-api from the release commit, plain -> none; rc=$rc_forced/$rc_plain forced=$out_forced plain=$out_plain"
   fi
   cleanup_fixture "$d"
 }
@@ -1390,6 +1430,7 @@ assert_a_re_acquisition_invalidates_the_marker_baseline_in_local_mode
 assert_an_untouched_image_set_keeps_the_marker_baseline
 assert_a_tag_override_on_a_synced_profile_re_pulls_and_re_deploys
 assert_a_tag_override_on_an_unsynced_profile_re_deploys
+assert_a_forced_ghcr_sync_shadows_every_change_since_the_release
 assert_the_pre_gate_adopts_the_recorded_cluster_mode_over_the_environment
 assert_a_recorded_local_build_renders_the_local_overlay
 assert_the_migration_job_renders_the_overlay_the_cluster_runs

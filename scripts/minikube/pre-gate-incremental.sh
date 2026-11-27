@@ -340,8 +340,8 @@ incremental_plan() {
     if [[ "${IMAGE_SOURCE}" == "ghcr" ]]; then
       # A forced sync in ghcr mode means "discard what the cluster holds and
       # start from the release set again", not "build 28 images". The delta is
-      # still derived below, so the changed images are shadowed back on top of
-      # the freshly pulled release images.
+      # still derived below, from the release images' commit, so the changed
+      # images are shadowed back on top of the freshly pulled release images.
       INCREMENTAL_REPULL_ALL=true
       INCREMENTAL_FULL_DEPLOYMENT=true
       log "Forced cluster sync in ghcr mode: re-pulling the release set, then shadowing the changed images"
@@ -374,7 +374,10 @@ incremental_plan() {
     fi
   fi
 
-  if [[ "${marker_read}" == "ok" ]]; then
+  # A re-pull discards every shadow earlier syncs built. The cluster then runs
+  # the release set, so the delta must start from that set's commit, not from
+  # the marker's gitHead.
+  if [[ "${marker_read}" == "ok" && "${INCREMENTAL_REPULL_ALL}" != "true" ]]; then
     marker_git_head="$(incremental_marker_baseline)"
   fi
   if [[ ! "${marker_git_head}" =~ ^[0-9a-f]{40}$ ]] || \
@@ -395,12 +398,12 @@ incremental_plan() {
     if [[ ! "${baseline}" =~ ^[0-9a-f]{40}$ ]]; then
       INCREMENTAL_FULL_IMAGE_BUILD=true
       INCREMENTAL_FULL_IMAGE_BUILD_REASON="no-baseline"
-      log "No usable cluster marker, and the release images at ${IMAGE_TAG} name no commit this clone has"
+      log "No usable marker baseline, and the release images at ${IMAGE_TAG} name no commit this clone has"
       return 0
     fi
     marker_git_head="${baseline}"
     INCREMENTAL_REPULL_ALL=true
-    log "No usable cluster marker; deriving the shadow set from the release images' commit ${baseline:0:12}"
+    log "No usable marker baseline; deriving the shadow set from the release images' commit ${baseline:0:12}"
   fi
 
   # Each read is checked before the plan iterates. Read as empty, an unreadable
