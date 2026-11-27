@@ -14,7 +14,7 @@ import {
 } from '../core/conversation/persistence/__tests__/testHelpers'
 import { SqliteColdStartLoader } from '../core/conversation/persistence/sqliteColdStartLoader'
 import { WorkflowBrokerRequestError } from '../core/tools/workflowBrokerClient'
-import { type ChatMessage, ConversationState, FinishReason } from '../core/types'
+import { type ChatMessage, FinishReason } from '../core/types'
 import { createDispatcher, dispatch } from '../db/worker/dispatcher'
 import type { RetainedChannelAttachmentRow } from '../db/worker/protocol'
 import {
@@ -1725,7 +1725,6 @@ describe('Channel attachment approval resume, revocation, CAS races, scoping & l
     if (!addr || typeof addr === 'string') throw new Error('Expected TCP port')
     const baseUrl = `http://127.0.0.1:${addr.port}`
 
-    const identity = makeIdentity('telegram', 'u-brt1', 'chat-brt1')
     const edgeHeaders = {
       'content-type': 'application/json',
       'x-clerum-edge-caller': 'channel-reader',

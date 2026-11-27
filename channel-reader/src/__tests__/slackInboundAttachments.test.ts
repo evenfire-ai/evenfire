@@ -420,8 +420,9 @@ describe('Slack inbound attachments (X7)', () => {
 
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = String(input)
+      const parsedUrl = new URL(url)
       const headers = (init?.headers ?? {}) as Record<string, string>
-      if (url.startsWith('https://evil.example')) {
+      if (parsedUrl.origin === 'https://evil.example') {
         externalRequestCount += 1
         if (headers.authorization || headers.Authorization) {
           externalAuthHeadersSeen += 1

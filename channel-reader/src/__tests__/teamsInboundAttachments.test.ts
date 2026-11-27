@@ -160,7 +160,8 @@ describe('Teams inbound attachments (X8)', () => {
     const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = String(input)
-      if (url.includes('login.microsoftonline.com')) {
+      const parsedUrl = new URL(url)
+      if (parsedUrl.origin === 'https://login.microsoftonline.com') {
         return new Response(JSON.stringify({ access_token: 'bot-jwt-token', expires_in: 3600 }), {
           status: 200,
         })
@@ -209,12 +210,16 @@ describe('Teams inbound attachments (X8)', () => {
     let outboundRequests = 0
     const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
       const url = String(input)
-      if (url.includes('login.microsoftonline.com')) {
+      const parsedUrl = new URL(url)
+      if (parsedUrl.origin === 'https://login.microsoftonline.com') {
         return new Response(JSON.stringify({ access_token: 'bot-jwt', expires_in: 3600 }), {
           status: 200,
         })
       }
-      if (url.startsWith('https://smba.trafficmanager.net/amer/v3/attachments/good')) {
+      if (
+        parsedUrl.origin === 'https://smba.trafficmanager.net' &&
+        parsedUrl.pathname.startsWith('/amer/v3/attachments/good')
+      ) {
         const headers = (init?.headers ?? {}) as Record<string, string>
         expect(headers.authorization).toBe('Bearer bot-jwt')
         return new Response('png-ok', { status: 200 })

@@ -1034,11 +1034,6 @@ describe('Channel attachment continuity, formats, titles, cold restart & limits 
 
   it('S52: cold-restart SessionProcessor.markSuspended queues attachment-only follow-up behind rehydrated approval without crashing startTurn', async () => {
     config.enableApproval = true
-    const sessionKey = resolveCanonicalSessionKey({
-      sender: 'tg-user-1',
-      channelType: 'telegram',
-      channelId: 'chat-52',
-    })
     const eventsOrder: string[] = []
     let approvalRequestId = ''
 

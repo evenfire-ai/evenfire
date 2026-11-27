@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import type * as http from 'node:http'
 import * as os from 'node:os'

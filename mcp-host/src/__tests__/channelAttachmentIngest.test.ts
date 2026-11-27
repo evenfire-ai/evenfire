@@ -3,6 +3,7 @@ import Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import type * as http from 'node:http'
+import { createRequire } from 'node:module'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { Readable } from 'node:stream'
@@ -17,7 +18,6 @@ import type {
 } from '../db/worker/protocol'
 import { ChannelAttachmentStore } from '../internalTools/channelAttachmentStore'
 import type { RuntimeLifecycleGate } from '../lifecycle/statelessHeartbeat'
-import { JPEG_2X2_BASE64, PNG_2X2_BASE64 } from '../llm/__tests__/codexImageFixtures'
 import { RPCServer } from '../server'
 import {
   ChannelAttachmentIngestTracker,
@@ -27,6 +27,13 @@ import {
 import type { ChannelAttachmentIngestMetadataV1, ChannelAttachmentReceiptV1 } from '../server/types'
 import { channelAttachmentStoreDir } from './channelAttachmentTestHelpers'
 import { withRpcProxyEdgeTestAuthentication } from './rpcProxyEdgeTestHeaders'
+
+const { jpegOfSize, realPng } = createRequire(__filename)(
+  '../../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
+) as {
+  jpegOfSize: (targetBytes: number, width?: number, height?: number) => Buffer
+  realPng: (width: number, height: number, seed: number) => Buffer
+}
 
 function encodeMeta(meta: ChannelAttachmentIngestMetadataV1): string {
   return Buffer.from(JSON.stringify(meta), 'utf8').toString('base64url')
@@ -311,7 +318,7 @@ describe('X4 — POST /v1/runtime/channel-attachments/ingest & handleMessageRout
     expect(fakePngReceipt.fileReference.reader).toBe('none')
 
     // S49: null filename (JPEG photo), path/control chars, "..", and 300-char filename.
-    const validJpeg = Buffer.from(JPEG_2X2_BASE64, 'base64')
+    const validJpeg = Buffer.from(jpegOfSize(64, 2, 2))
     const nullNameRes = await fetch(`${baseUrl}/v1/runtime/channel-attachments/ingest`, {
       method: 'POST',
       headers: channelReaderHeaders(makeMeta({ filename: null, declaredMediaType: 'image/jpeg' })),
@@ -421,7 +428,7 @@ describe('X4 — POST /v1/runtime/channel-attachments/ingest & handleMessageRout
       sessionStoreMode: 'sqlite',
     })
 
-    const pngBytes = Buffer.from(PNG_2X2_BASE64, 'base64')
+    const pngBytes = realPng(2, 2, 7)
     let releaseChunk!: () => void
     const hold = new Promise<void>(resolve => {
       releaseChunk = resolve
