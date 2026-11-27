@@ -144,6 +144,22 @@ const ROWS: Row[] = [
     pill: 'Canceling',
   },
   {
+    case: 'authorization paused, may cancel',
+    viewerCanCancel: true,
+    phase: 'AuthorizationPaused',
+    cancelRequestedAt: null,
+    button: true,
+    pill: 'AuthorizationPaused',
+  },
+  {
+    case: 'authorization paused, cancel requested',
+    viewerCanCancel: true,
+    phase: 'AuthorizationPaused',
+    cancelRequestedAt: REQUESTED_AT,
+    button: false,
+    pill: 'Canceling',
+  },
+  {
     case: 'succeeded, may cancel',
     viewerCanCancel: true,
     phase: 'Succeeded',
