@@ -49,6 +49,10 @@ describe('signInContextFromClaimRow', () => {
       'an invitation row without its email',
       { ctx_kind: 'invitation', ctx_invitation_id: INVITATION_ID, ctx_invited_email: null },
     ],
+    [
+      'an invitation row without its id',
+      { ctx_kind: 'invitation', ctx_invitation_id: null, ctx_invited_email: INVITED_EMAIL },
+    ],
   ])('refuses %s instead of reading it as a plain attempt', (_label, row) => {
     let thrown: unknown
     try {
