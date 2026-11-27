@@ -406,13 +406,47 @@ export function getVisibleWorkflowRuns(
   return [current, ...currentInstanceRuns.map(run => ({ ...run, isClickable: true }))]
 }
 
+// Phases in which the server accepts a cancel request (`workflowRunCancelService.ts`).
+const CANCELLABLE_RUN_PHASES = new Set(['Pending', 'Running', 'AuthorizationPaused'])
+
+export type WorkflowRunCancelState = 'cancellable' | 'canceling' | 'none'
+
+/**
+ * Whether the runs table offers `Cancel run` on a row, shows it as canceling, or
+ * neither. Only live rows (`source: 'live'`) in a non-terminal phase can be
+ * cancelled; archived rows and the synthetic current-execution row
+ * (`source: 'status'`) never can. `acceptedRunIds` holds the runs whose cancel
+ * request this page has observed (an accepted cancel, or a list row carrying
+ * `cancelRequestedAt`): the server never clears a request, so such a row stays
+ * canceling even when an older list response lands without the field.
+ */
+export function getRunCancelState(
+  run: WorkflowRunListItem,
+  acceptedRunIds: ReadonlySet<string>
+): WorkflowRunCancelState {
+  if (run.source !== 'live') return 'none'
+  if (!CANCELLABLE_RUN_PHASES.has(run.phase)) return 'none'
+  if (run.cancelRequestedAt || acceptedRunIds.has(run.id)) return 'canceling'
+  return 'cancellable'
+}
+
 export function shouldPollWorkflowRecipe(
   recipe: WorkflowRecipeResource | null,
   status: WorkflowRecipeStatus | null,
-  runs: WorkflowRunSummary[]
+  runs: WorkflowRunSummary[],
+  acceptedRunIds: ReadonlySet<string>
 ): boolean {
   if (isWorkflowExecutionLive(status)) return true
   if (runs.some(r => r.phase === 'Pending' || r.phase === 'Running')) return true
+  // A paused run with a cancel request reaches `Canceled` without a phase the
+  // clauses above poll for; keep refreshing while a visible run is canceling.
+  if (
+    getVisibleWorkflowRuns(recipe, status, runs).some(
+      r => getRunCancelState(r, acceptedRunIds) === 'canceling'
+    )
+  ) {
+    return true
+  }
 
   const phase = normalizePhase(status?.phase ?? recipe?.status?.phase)
   return !['active', 'failed', 'deprecated', 'rollback-failed'].includes(phase)
