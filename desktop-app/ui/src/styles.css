@@ -4522,6 +4522,28 @@ body.sidebar-resizing {
   white-space: nowrap;
 }
 
+/* Inline title editor (Rename): the crumb's own type, in a field as tall as the
+ * actions trigger so the header row does not jump. */
+.agent-workspace-conversation-rename-input {
+  width: 32ch;
+  min-width: 0;
+  min-height: 28px;
+  border: 1px solid rgba(var(--accent-rgb), 0.6);
+  border-radius: var(--radius-sm);
+  background: rgba(var(--panel-rgb), 0.92);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  line-height: 1.2;
+  padding: 0 var(--space-1-5);
+}
+
+.agent-workspace-conversation-rename-input:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.42);
+  outline-offset: 1px;
+}
+
 .agent-workspace-conversation-menu {
   position: relative;
   display: inline-flex;
@@ -6831,24 +6853,6 @@ body.sidebar-resizing {
 
 .confirm-dialog-confirm--danger {
   background: var(--danger);
-}
-
-/* SingleValueEditDialog: the confirm-dialog frame around one labelled field. */
-.single-value-edit-dialog-field {
-  min-width: 0;
-  display: grid;
-  gap: var(--space-1);
-  margin-top: var(--space-2);
-}
-
-.single-value-edit-dialog-field > label {
-  color: var(--text);
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-medium);
-}
-
-.single-value-edit-dialog-feedback {
-  margin-top: var(--space-2);
 }
 
 .desktop-update-dialog-backdrop {
@@ -9170,10 +9174,12 @@ button.page-breadcrumb-link {
   cursor: pointer;
 }
 
+/* A crumb is a text link: hovering underlines it and nothing else. The global
+ * `button:hover:enabled` accent background is kept out on purpose. */
 button.page-breadcrumb-link:hover:enabled {
   transform: none;
   filter: none;
-  color: var(--text);
+  background: transparent;
   text-decoration: underline;
 }
 

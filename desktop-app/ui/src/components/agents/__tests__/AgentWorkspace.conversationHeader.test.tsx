@@ -3,11 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { QueuedChatDelete } from '@contexts/AgentChatActionsContext'
 import type { ChatListContextValue } from '@contexts/ChatListContext'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { DESKTOP_ROUTES } from '@constants/navigation'
 import { AgentWorkspace } from '../AgentWorkspace'
 
 // The chat header inside an open conversation: the agent is what the user goes
 // back to, the current crumb names the conversation, and its menu acts on that
-// conversation (rename, delete) or opens the agent's details.
+// conversation (rename, delete) or opens the Agents section.
 
 const mcpMock = vi.hoisted(() => ({
   agentDisplayByName: {} as Record<string, string>,
@@ -16,6 +17,7 @@ const mcpMock = vi.hoisted(() => ({
 const navMock = vi.hoisted(() => ({
   selectedAgent: 'alpha' as string | null,
   handleOpenAgentWorkspace: vi.fn(),
+  handleNavSelect: vi.fn(),
   handleSelectChatAgent: vi.fn(),
 }))
 
@@ -71,6 +73,7 @@ vi.mock('@contexts/NavigationContext', () => ({
     selectedAgentRoute: 'members',
     handleBackToAgents: vi.fn(),
     handleOpenAgentWorkspace: navMock.handleOpenAgentWorkspace,
+    handleNavSelect: navMock.handleNavSelect,
     handleSelectChatAgent: navMock.handleSelectChatAgent,
   }),
 }))
@@ -137,18 +140,22 @@ const deletion: QueuedChatDelete = {
   hostAuthorityEpoch: 1,
 }
 
-const renderChat = () =>
-  render(<AgentWorkspace mode="chat" scrollContainerRef={{ current: null }} />)
+// A fresh element per call: re-rendering with the very same element is a no-op.
+const chatRoute = () => <AgentWorkspace mode="chat" scrollContainerRef={{ current: null }} />
+const renderChat = () => render(chatRoute())
 const breadcrumb = () => screen.getByRole('navigation', { name: 'Chat breadcrumb' })
 const actionsTrigger = (title: string) =>
   screen.getByRole('button', { name: `Conversation actions for ${title}` })
-const renameField = () =>
-  within(screen.getByRole('dialog', { name: 'Rename conversation' })).getByRole('textbox', {
-    name: 'Title',
-  }) as HTMLInputElement
+const renameInput = () =>
+  screen.getByRole('textbox', { name: 'Rename conversation' }) as HTMLInputElement
+const openMenu = (title: string) => fireEvent.click(actionsTrigger(title))
+const startRename = (title: string) => {
+  openMenu(title)
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+}
 // The chat header is translated while the thread scrolls, which makes it the
 // containing block of a `position: fixed` dialog: one rendered inside it could
-// never cover the app. The dialogs portal past it.
+// never cover the app. The confirmation portals past it.
 const escapesChatHeader = (dialog: HTMLElement) => dialog.closest('.agent-chat-nav-stack') === null
 
 describe('AgentWorkspace chat — conversation header', () => {
@@ -173,7 +180,7 @@ describe('AgentWorkspace chat — conversation header', () => {
     const trail = within(breadcrumb())
     expect(trail.getByRole('button', { name: 'Alpha Host' })).toBeTruthy()
     expect(trail.getByText('Pricing review')).toBeTruthy()
-    expect(trail.queryByRole('button', { name: 'Chat', exact: true })).toBeNull()
+    expect(trail.queryByRole('button', { name: 'Chat' })).toBeNull()
     // The title is the current page; the agent is a link back.
     expect(breadcrumb().querySelector('[aria-current="page"]')?.textContent).toBe('Pricing review')
     expect(trail.queryByRole('button', { name: 'Alpha Host' })?.hasAttribute('aria-current')).toBe(
@@ -209,14 +216,14 @@ describe('AgentWorkspace chat — conversation header', () => {
 
     // Another agent's session with the same id is not this conversation.
     chatMock.latestChatSessions = [{ ...listedEntry('chat-1', 'Pricing review'), agentRef: 'beta' }]
-    view.rerender(<AgentWorkspace mode="chat" scrollContainerRef={{ current: null }} />)
+    view.rerender(chatRoute())
     expect(within(breadcrumb()).getByText('Conversation')).toBeTruthy()
   })
 
   it('offers the conversation actions instead of the agent’s sections', () => {
     renderChat()
 
-    fireEvent.click(actionsTrigger('Pricing review'))
+    openMenu('Pricing review')
 
     const menu = within(screen.getByRole('menu'))
     expect(menu.getAllByRole('menuitem').map(item => item.textContent)).toStrictEqual([
@@ -229,58 +236,77 @@ describe('AgentWorkspace chat — conversation header', () => {
     }
   })
 
-  it('opens the agent’s details in the Agents section', () => {
+  it('sends Agent details to the Agents section, not into one agent', () => {
     renderChat()
-    fireEvent.click(actionsTrigger('Pricing review'))
+    openMenu('Pricing review')
 
     fireEvent.click(screen.getByRole('menuitem', { name: 'Agent details' }))
 
-    expect(navMock.handleOpenAgentWorkspace).toHaveBeenCalledTimes(1)
-    expect(navMock.handleOpenAgentWorkspace).toHaveBeenCalledWith('alpha')
+    expect(navMock.handleNavSelect).toHaveBeenCalledTimes(1)
+    expect(navMock.handleNavSelect).toHaveBeenCalledWith(DESKTOP_ROUTES.agents)
+    expect(navMock.handleOpenAgentWorkspace).not.toHaveBeenCalled()
     expect(screen.queryByRole('menu')).toBeNull()
   })
 
-  it('renames the open conversation from a dialog', async () => {
+  it('renames the title in place, the way the sidebar does', () => {
     renderChat()
-    fireEvent.click(actionsTrigger('Pricing review'))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    startRename('Pricing review')
 
-    const dialog = screen.getByRole('dialog', { name: 'Rename conversation' })
-    expect(renameField().value).toBe('Pricing review')
-    expect(escapesChatHeader(dialog)).toBe(true)
-    const save = within(dialog).getByRole('button', { name: 'Rename' }) as HTMLButtonElement
-    expect(save.disabled).toBe(true)
+    // The title becomes the editor: same place, current title selected.
+    const input = renameInput()
+    expect(input.value).toBe('Pricing review')
+    expect(document.activeElement).toBe(input)
+    expect(input.selectionEnd).toBe('Pricing review'.length)
+    expect(within(breadcrumb()).queryByText('Pricing review')).toBeNull()
+    expect(screen.queryByRole('dialog')).toBeNull()
 
-    fireEvent.change(renameField(), { target: { value: 'Roadmap' } })
-    fireEvent.click(save)
+    fireEvent.change(input, { target: { value: 'Roadmap' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
 
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     expect(actionsMock.handleRenameChatForAgent).toHaveBeenCalledWith('alpha', 'chat-1', 'Roadmap')
+    expect(screen.queryByRole('textbox', { name: 'Rename conversation' })).toBeNull()
   })
 
-  it('keeps the rename dialog open with the reason when the rename fails', async () => {
-    actionsMock.handleRenameChatForAgent.mockRejectedValueOnce(
-      new Error('Could not rename the conversation.')
-    )
+  it('saves an in-place rename when the editor loses focus', () => {
     renderChat()
-    fireEvent.click(actionsTrigger('Pricing review'))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
-    fireEvent.change(renameField(), { target: { value: 'Roadmap' } })
-    const dialog = screen.getByRole('dialog', { name: 'Rename conversation' })
+    startRename('Pricing review')
+    fireEvent.change(renameInput(), { target: { value: '  Roadmap  ' } })
 
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Rename' }))
+    fireEvent.blur(renameInput())
 
-    await waitFor(() =>
-      expect(within(dialog).getByRole('alert').textContent).toContain(
-        'Could not rename the conversation.'
-      )
-    )
-    expect(renameField().value).toBe('Roadmap')
+    expect(actionsMock.handleRenameChatForAgent).toHaveBeenCalledWith('alpha', 'chat-1', 'Roadmap')
+    expect(screen.queryByRole('textbox', { name: 'Rename conversation' })).toBeNull()
+  })
+
+  it('cancels an in-place rename from Escape without saving', () => {
+    renderChat()
+    startRename('Pricing review')
+    fireEvent.change(renameInput(), { target: { value: 'Roadmap' } })
+
+    fireEvent.keyDown(renameInput(), { key: 'Escape' })
+
+    expect(screen.queryByRole('textbox', { name: 'Rename conversation' })).toBeNull()
+    expect(within(breadcrumb()).getByText('Pricing review')).toBeTruthy()
+    expect(actionsMock.handleRenameChatForAgent).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['unchanged', 'Pricing review'],
+    ['blank', '   '],
+  ])('does not rename when the edited title is %s', (_case, value) => {
+    renderChat()
+    startRename('Pricing review')
+    fireEvent.change(renameInput(), { target: { value } })
+
+    fireEvent.keyDown(renameInput(), { key: 'Enter' })
+
+    expect(actionsMock.handleRenameChatForAgent).not.toHaveBeenCalled()
+    expect(within(breadcrumb()).getByText('Pricing review')).toBeTruthy()
   })
 
   it('asks before deleting, and cancels without deleting', async () => {
     renderChat()
-    fireEvent.click(actionsTrigger('Pricing review'))
+    openMenu('Pricing review')
 
     fireEvent.click(screen.getByRole('menuitem', { name: 'Delete conversation' }))
 
@@ -296,7 +322,7 @@ describe('AgentWorkspace chat — conversation header', () => {
 
   it('deletes the open conversation with the captured fence once confirmed', async () => {
     renderChat()
-    fireEvent.click(actionsTrigger('Pricing review'))
+    openMenu('Pricing review')
     fireEvent.click(screen.getByRole('menuitem', { name: 'Delete conversation' }))
 
     fireEvent.click(
@@ -314,7 +340,7 @@ describe('AgentWorkspace chat — conversation header', () => {
   it('asks nothing when the delete fence cannot be captured', async () => {
     actionsMock.captureChatDeleteFence.mockRejectedValueOnce(new Error('access changed'))
     renderChat()
-    fireEvent.click(actionsTrigger('Pricing review'))
+    openMenu('Pricing review')
     fireEvent.click(screen.getByRole('menuitem', { name: 'Delete conversation' }))
 
     await waitFor(() => expect(actionsMock.captureChatDeleteFence).toHaveBeenCalledTimes(1))
@@ -334,18 +360,18 @@ describe('AgentWorkspace chat — conversation header', () => {
     expect(document.activeElement).toBe(trigger)
   })
 
-  it('drops an open dialog when the conversation changes', () => {
+  it('drops an open editor and confirmation when the conversation changes', async () => {
     const view = renderChat()
-    fireEvent.click(actionsTrigger('Pricing review'))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
-    expect(screen.getByRole('dialog', { name: 'Rename conversation' })).toBeTruthy()
+    startRename('Pricing review')
+    fireEvent.change(renameInput(), { target: { value: 'Roadmap' } })
 
     chatMock.activeChatId = 'chat-2'
-    chatMock.chatList = [listedEntry('chat-2', 'Roadmap')]
-    view.rerender(<AgentWorkspace mode="chat" scrollContainerRef={{ current: null }} />)
+    chatMock.chatList = [listedEntry('chat-2', 'Launch plan')]
+    view.rerender(chatRoute())
 
-    expect(screen.queryByRole('dialog')).toBeNull()
-    expect(within(breadcrumb()).getByText('Roadmap')).toBeTruthy()
+    expect(screen.queryByRole('textbox', { name: 'Rename conversation' })).toBeNull()
+    expect(actionsMock.handleRenameChatForAgent).not.toHaveBeenCalled()
+    expect(within(breadcrumb()).getByText('Launch plan')).toBeTruthy()
   })
 
   it('keeps the plain Chat root on the new-chat landing', () => {
@@ -355,7 +381,7 @@ describe('AgentWorkspace chat — conversation header', () => {
     renderChat()
 
     const trail = within(breadcrumb())
-    expect(trail.getByRole('button', { name: 'Chat', exact: true })).toBeTruthy()
+    expect(trail.getByRole('button', { name: 'Chat' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: /Conversation actions for/ })).toBeNull()
   })
 })
