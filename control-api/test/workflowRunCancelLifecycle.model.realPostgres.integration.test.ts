@@ -26,6 +26,7 @@ import { getWorkflowPrincipalId } from '../src/services/workflows/workflowCaller
 import {
   WorkflowRunCancelError,
   cancelWorkflowRun,
+  cancelWorkflowRunAsOperator,
 } from '../src/services/workflows/workflowRunCancelService.js'
 import { RESUME_PAUSED_RUN } from '../src/services/workflows/workflowRunResumeService.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
@@ -37,7 +38,8 @@ import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 // from it), on real PostgreSQL with the control-api schema; the real signal
 // store and REST signal endpoint; the runtime's real StepCoordinator and
 // SignalPoller; control-api's run producer (createRun), the X7 cancel service
-// (which runs the X7 statements, approval cancel included) and the X8 resume
+// through both of its entries, the user-session cancel and the operator cancel
+// (each runs the X7 statements, approval cancel included), and the X8 resume
 // statement, all imported, none retyped.
 //
 // Mocks only at the boundaries: the K8s child creator and existence check,
@@ -99,17 +101,15 @@ const STORED_DEFAULT_SECONDS = 86_400
 const RUN_POLL_MS = 1_000
 /** Runtime signal poll interval; one SignalPoll advances the fake clock by it. */
 const SIGNAL_POLL_MS = 3_600_000
-// The spec's budget. WORKFLOW_CANCEL_MODEL_RUNS=2000 is the deep run: on the
-// default seed it reaches every state of `reached`, including the LOGGED_ONLY
-// ones.
+// The spec's budget: on the default seed it reaches every state of `reached`.
+// WORKFLOW_CANCEL_MODEL_RUNS raises it for a deeper exploration.
 const NUM_RUNS = Number(process.env.WORKFLOW_CANCEL_MODEL_RUNS ?? 200)
 const MAX_COMMANDS = 30
 /** Runs one command sequence may trigger. */
 const MAX_RUNS = 3
 // A fixed default seed keeps CI deterministic: the scheduler makes a seed
-// replay exactly, and the run asserts that every state of `reached` outside
-// LOGGED_ONLY was visited on it. Set WORKFLOW_CANCEL_MODEL_SEED to explore
-// other seeds.
+// replay exactly, and the run asserts that every state of `reached` was
+// visited on it. Set WORKFLOW_CANCEL_MODEL_SEED to explore other seeds.
 const DEFAULT_SEED = 210
 const SEED = process.env.WORKFLOW_CANCEL_MODEL_SEED
   ? Number(process.env.WORKFLOW_CANCEL_MODEL_SEED)
@@ -118,7 +118,9 @@ const REPLAY_PATH = process.env.WORKFLOW_CANCEL_MODEL_PATH
 
 type Phase = WorkflowRunPhase
 type Actor = 'user' | 'scheduled'
-type CallerName = 'launcher' | 'admin' | 'admin2' | 'member'
+type UserCallerName = 'launcher' | 'admin' | 'admin2' | 'member'
+/** The operator is a Control UI admin, not an application user. */
+type CallerName = UserCallerName | 'operator'
 type Outcome = 'completed' | 'failed' | 'cancelled'
 const TERMINAL: ReadonlySet<Phase> = new Set(['Succeeded', 'Failed', 'Canceled'])
 
@@ -168,8 +170,8 @@ interface World {
 }
 
 /**
- * States the runs reach, so the invariants are not vacuous. Each one outside
- * LOGGED_ONLY must be reached on the run's seed.
+ * States the runs reach, so the invariants are not vacuous. Each one must be
+ * reached on the run's seed.
  */
 const reached = {
   requestWithChild: 0,
@@ -188,17 +190,8 @@ const reached = {
   claimBlockedByLiveName: 0,
   sharedChildName: 0,
   foreignSignalDropped: 0,
+  canceledByOperator: 0,
 }
-
-/**
- * States the 200-sequence budget does not reach on the default seed. They are
- * logged in the S30 summary line, not asserted; the deep run reaches them.
- */
-const LOGGED_ONLY: ReadonlySet<keyof typeof reached> = new Set([
-  'pausedWithCancel',
-  'resumeRefusedAfterRequest',
-  'foreignSignalDropped',
-])
 
 /** Production's error for a create of a child name another run's child holds. */
 const CHILD_IDENTITY_MISMATCH = 'already exists but does not match the expected workflow run child'
@@ -403,12 +396,16 @@ describeRealPostgres('workflow run cancel lifecycle model (S30)', () => {
   const database = `workflow_cancel_model_${randomBytes(6).toString('hex')}`
   const recipe = `model-${randomBytes(4).toString('hex')}`
   const team = randomUUID()
-  const users: Record<CallerName, { id: string; email: string }> = {
+  const users: Record<UserCallerName, { id: string; email: string }> = {
     launcher: { id: randomUUID(), email: `launcher-${randomUUID()}@example.test` },
     admin: { id: randomUUID(), email: `admin-${randomUUID()}@example.test` },
     admin2: { id: randomUUID(), email: `admin2-${randomUUID()}@example.test` },
     member: { id: randomUUID(), email: `member-${randomUUID()}@example.test` },
   }
+  /** The Control UI admin who cancels as the operator; no row is read for it. */
+  const operatorId = randomUUID()
+  /** The model's own spelling of an operator's canceller, not production's helper. */
+  const operatorCanceller = `operator:${operatorId}`
   let adminPool: Pool
   let databasePool: Pool
   let current: Real | null = null
@@ -606,7 +603,7 @@ describeRealPostgres('workflow run cancel lifecycle model (S30)', () => {
 
   // ── control-api side ──────────────────────────────────────────────────
 
-  function callerFor(name: CallerName): CancelCaller {
+  function callerFor(name: UserCallerName): CancelCaller {
     const user = users[name]
     return {
       kind: 'user-session',
@@ -622,10 +619,17 @@ describeRealPostgres('workflow run cancel lifecycle model (S30)', () => {
     } as unknown as CancelCaller
   }
 
-  /** canCancel: the launcher of a user run; a live team admin of a scheduled run. */
+  /**
+   * canCancel: the launcher of a user run; a live team admin of a scheduled
+   * run. The operator may cancel any run of the recipe (owner decision).
+   */
   function mayCancel(actor: Actor, caller: CallerName): boolean {
+    if (caller === 'operator') return true
     return actor === 'user' ? caller === 'launcher' : caller === 'admin' || caller === 'admin2'
   }
+
+  /** A caller other than the operator who may cancel a run of `actor`. */
+  const cancellerOf = (actor: Actor): UserCallerName => (actor === 'user' ? 'launcher' : 'admin')
 
   function authorityFor(actor: Actor): WorkflowAuthorityBinding {
     const issuedAt = Math.floor(Date.now() / 1000)
@@ -847,6 +851,14 @@ describeRealPostgres('workflow run cancel lifecycle model (S30)', () => {
       // SAF-c: the request and its canceller are set together (and the model
       // never rewrites canceledBy once set, so the row comparison above pins it).
       expect(row.requested).toBe(row.canceled_by !== null)
+      // The canceller is an operator exactly when the operator's cancel was the
+      // one that stored the request.
+      const operatorCancelled = row.canceled_by?.startsWith('operator:') ?? false
+      expect({ run: m.runId, operatorCancelled }).toEqual({
+        run: m.runId,
+        operatorCancelled: m.canceledBy === operatorCanceller,
+      })
+      if (operatorCancelled) reached.canceledByOperator += 1
       // SAF-d: a run with a request that ended is Canceled or Succeeded.
       if (row.requested && TERMINAL.has(row.phase)) {
         expect(['Canceled', 'Succeeded']).toContain(row.phase)
@@ -1007,13 +1019,13 @@ describeRealPostgres('workflow run cancel lifecycle model (S30)', () => {
   const cancel = (caller: CallerName, pick: number) =>
     onRun(`Cancel(${caller})`, pick, always, async (m, _w, real) => {
       let status = 200
-      await cancelWorkflowRun({
-        runId: m.runId,
-        recipeNamespace: NS,
-        recipeName: recipe,
-        caller: callerFor(caller),
-        db: databasePool,
-      }).catch((error: unknown) => {
+      const target = { runId: m.runId, recipeNamespace: NS, recipeName: recipe, db: databasePool }
+      const request =
+        caller === 'operator'
+          ? cancelWorkflowRunAsOperator({ ...target, operatorId })
+          : cancelWorkflowRun({ ...target, caller: callerFor(caller) })
+      // Only the service's refusal becomes a status; any other error fails the run.
+      await request.catch((error: unknown) => {
         if (!(error instanceof WorkflowRunCancelError)) throw error
         status = error.status
       })
@@ -1029,7 +1041,7 @@ describeRealPostgres('workflow run cancel lifecycle model (S30)', () => {
       }
       if (m.phase === 'Canceled' || m.cancelRequested) return
       m.cancelRequested = true
-      m.canceledBy = users[caller].id
+      m.canceledBy = caller === 'operator' ? operatorCanceller : users[caller].id
       if (!m.hasChild) {
         // L2: a 200 cancel of a run without a child ends it.
         m.phase = 'Canceled'
@@ -1374,6 +1386,94 @@ describeRealPostgres('workflow run cancel lifecycle model (S30)', () => {
     for (const r of w.runs) r.signalQueued = false
   })
 
+  // ── scenario commands: fixed lists of the commands above ──────────────
+
+  /**
+   * Runs existing commands in order, each behind its own check and followed by
+   * its at-rest check (`ModelCommand.run`), as `drainCancel` composes them.
+   */
+  async function runSteps(w: World, real: Real, steps: ModelCommand[]): Promise<void> {
+    for (const step of steps) {
+      if (step.check(w)) await step.run(w, real)
+    }
+  }
+
+  /**
+   * A bound run is claimed, paused by a denied boundary answer, then gets a
+   * cancel request; the resume that follows is refused (SAF-d on a run with a
+   * request). The scenario triggers its own run, so what it reaches does not
+   * depend on the commands before it.
+   */
+  const pausedThenCancel = (actor: Actor, byOperator: boolean) => {
+    const caller: CallerName = byOperator ? 'operator' : cancellerOf(actor)
+    return new ModelCommand(
+      `PausedThenCancel(${actor}, ${caller})`,
+      w => w.runs.length < MAX_RUNS,
+      async (w, real) => {
+        await runSteps(w, real, [
+          triggerCommand({ actor, bound: true, maxDuration: null, collide: false }),
+        ])
+        const p = w.runs.length - 1
+        await runSteps(w, real, [
+          authorityAnswer('allowed'),
+          processPending(p),
+          authorityAnswer('denied'),
+          boundaryReport(p),
+          cancel(caller, p),
+          resume(p),
+        ])
+      }
+    )
+  }
+
+  /**
+   * The first run's cancel is queued under its child name and its pod ends
+   * without polling; a run that collides with it is then claimed, and the new
+   * pod's first poll drains that cancel and drops it (X18). Collisions are
+   * always with the first run, so the scenario starts a sequence.
+   */
+  const foreignCancel = (byOperator: boolean) => {
+    const caller: CallerName = byOperator ? 'operator' : cancellerOf('user')
+    const unbound = { actor: 'user', bound: false, maxDuration: null } as const
+    return new ModelCommand(
+      `ForeignCancel(${caller})`,
+      w => w.runs.length === 0,
+      async (w, real) => {
+        await runSteps(w, real, [
+          triggerCommand({ ...unbound, collide: false }),
+          processPending(0),
+          cancel(caller, 0),
+          deliverRun(0),
+          stepFailed(0),
+          reportCompleted(0),
+          triggerCommand({ ...unbound, collide: true }),
+          processPending(1),
+        ])
+      }
+    )
+  }
+
+  /**
+   * A claimed run gets a cancel request, its last reconcile ages past the
+   * orphan window (but not the duration cap) and its child is reported
+   * missing: the reclaim, not the stuck sweep, ends it Canceled. The scenario
+   * triggers its own run.
+   */
+  const reclaimCancel = (actor: Actor, byOperator: boolean) => {
+    const caller: CallerName = byOperator ? 'operator' : cancellerOf(actor)
+    return new ModelCommand(
+      `ReclaimCancel(${actor}, ${caller})`,
+      w => w.runs.length < MAX_RUNS,
+      async (w, real) => {
+        await runSteps(w, real, [
+          triggerCommand({ actor, bound: false, maxDuration: null, collide: false }),
+        ])
+        const p = w.runs.length - 1
+        await runSteps(w, real, [processPending(p), cancel(caller, p), reclaimTick(90, false, p)])
+      }
+    )
+  }
+
   const pick = fc.nat({ max: MAX_RUNS - 1 })
   const triggerArbitrary = fc
     .record({
@@ -1391,20 +1491,32 @@ describeRealPostgres('workflow run cancel lifecycle model (S30)', () => {
     .tuple(fc.constantFrom(0, 90, 4_000), fc.boolean(), pick)
     .map(([advance, present, p]) => reclaimTick(advance, present, p))
   const cancelCommand = fc
-    // Callers who may cancel are listed twice, so requests are frequent.
+    // Callers who may cancel some runs are listed twice, so requests are
+    // frequent; the operator, who may cancel every run, once.
     .tuple(
-      fc.constantFrom<CallerName>('launcher', 'launcher', 'admin', 'admin', 'admin2', 'member'),
+      fc.constantFrom<CallerName>(
+        'launcher',
+        'launcher',
+        'admin',
+        'admin',
+        'admin2',
+        'member',
+        'operator'
+      ),
       pick
     )
     .map(([caller, p]) => cancel(caller, p))
   const authorityCommand = fc
     .constantFrom<'allowed' | 'denied'>('allowed', 'denied')
     .map(authorityAnswer)
+  const scenarioActor = fc.constantFrom<Actor>('user', 'scheduled')
   // Weights: commands listed twice need to fire in order on one run to reach
-  // a rare state (a paused run with a request needs a claim, a denied answer,
-  // a boundary report and an allowed cancel; a swept or reclaimed cancel
-  // needs a claim, a cancel and a clock move), and three runs in four are
-  // bound. Trigger is listed twice so most sequences hold several runs.
+  // a rare state (a swept or reclaimed cancel needs a claim, a cancel and a
+  // clock move), and three runs in four are bound. Trigger is listed twice so
+  // most sequences hold several runs. The states uniform choice does not reach
+  // on the budget (a paused run with a request, the resume refused after it,
+  // a foreign cancel dropped, a cancel ended by the reclaim) come from the
+  // scenario commands.
   const commandArbitraries = [
     triggerArbitrary,
     triggerArbitrary,
@@ -1432,6 +1544,13 @@ describeRealPostgres('workflow run cancel lifecycle model (S30)', () => {
     authorityCommand,
     fc.constant(restartProcessor),
     pick.map(loseSignalResponse),
+    fc
+      .tuple(scenarioActor, fc.boolean())
+      .map(([actor, byOperator]) => pausedThenCancel(actor, byOperator)),
+    fc.boolean().map(foreignCancel),
+    fc
+      .tuple(scenarioActor, fc.boolean())
+      .map(([actor, byOperator]) => reclaimCancel(actor, byOperator)),
   ]
 
   /**
@@ -1548,11 +1667,10 @@ describeRealPostgres('workflow run cancel lifecycle model (S30)', () => {
         expect(longestGenerated).toBe(MAX_COMMANDS)
         expect(longest).toBeGreaterThanOrEqual(MAX_COMMANDS / 2)
         expect(mostRuns).toBe(MAX_RUNS)
-        const asserted = Object.entries(reached).filter(
-          ([state]) => !LOGGED_ONLY.has(state as keyof typeof reached)
-        )
-        expect(asserted.length).toBe(Object.keys(reached).length - LOGGED_ONLY.size)
-        for (const [state, count] of asserted) {
+        const states = Object.entries(reached)
+        // The loop below covers every state, the operator's included.
+        expect(states.map(([state]) => state)).toContain('canceledByOperator')
+        for (const [state, count] of states) {
           expect({ state, reached: count > 0 }).toEqual({ state, reached: true })
         }
       }
