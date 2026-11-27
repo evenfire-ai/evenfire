@@ -118,6 +118,15 @@ function recipeRowIn(page: Page, recipeName: string): Locator {
   return page.getByRole('row').filter({ has: page.getByText(recipeName, { exact: true }) })
 }
 
+// The row's Cancel opens a confirmation at page level; the cancel is sent from its
+// "Cancel run" button.
+async function clickCancelAndConfirm(page: Page, row: Locator): Promise<void> {
+  await row.getByRole('button', { name: 'Cancel run' }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible({ timeout: 10_000 })
+  await dialog.getByRole('button', { name: 'Cancel run' }).click()
+}
+
 async function findRun(
   sessionToken: string,
   recipeName: string,
@@ -254,8 +263,8 @@ test('PW1: cancel a running run from the Workflows table', async () => {
         return created
       })
 
-    await test.step('click Cancel: the cell reads Canceling', async () => {
-      await row.getByRole('button', { name: 'Cancel run' }).click()
+    await test.step('click Cancel and confirm: the cell reads Canceling', async () => {
+      await clickCancelAndConfirm(page, row)
       await expect(row.getByTestId('workflow-latest-run-phase')).toHaveText('Canceling', {
         timeout: 30_000,
       })
@@ -396,7 +405,7 @@ test('PW3: a team admin cancels the team scheduled run, not a teammate run', asy
     })
 
     await test.step('cancel it: Canceling, then Canceled, recorded as the admin', async () => {
-      await scheduledRow.getByRole('button', { name: 'Cancel run' }).click()
+      await clickCancelAndConfirm(page, scheduledRow)
       const pill = scheduledRow.getByTestId('workflow-latest-run-phase')
       await expect(pill).toHaveText('Canceling', { timeout: 30_000 })
       await expect(pill).toHaveText('Canceled', { timeout: CANCEL_SETTLE_TIMEOUT_MS })
