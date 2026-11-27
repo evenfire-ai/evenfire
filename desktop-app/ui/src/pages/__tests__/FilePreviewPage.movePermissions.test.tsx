@@ -215,6 +215,123 @@ describe('FilePreviewPage move permission contract', () => {
     ).toEqual(['Copy link'])
   })
 
+  it("hides a cached file's own actions while a remount re-proves authority", async () => {
+    // The pending window has to open while the preview resource is still
+    // cached as a file: a mount that starts pending never resolves it, so the
+    // menu would hide these actions whatever `canResolve` the menu receives.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const realController = await vi.importActual<
+      typeof import('@hooks/domain/useGfsBrowserController')
+    >('@hooks/domain/useGfsBrowserController')
+    let latestAuthorityPending = false
+    let discoveryHeld = false
+    let settleDiscovery!: (page: Awaited<ReturnType<typeof listAccessiblePage>>) => void
+    const resources = await listAccessiblePage([
+      accessibleResource(resourceId, 'diagram.png', 'file', {
+        gfsUri: uri,
+        parentResourceId: parentId,
+        version: 7,
+        permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
+      }),
+    ])
+    const heldDiscovery = new Promise<typeof resources>(resolve => {
+      settleDiscovery = resolve
+    })
+    const listAccessible = vi.fn(async () => (discoveryHeld ? heldDiscovery : resources))
+    const { resolve } = installGfs({
+      source: async () => fullAccess,
+      resourceAffordances: async () => fullAccess,
+      listAccessible,
+    })
+    hookMock.useGfsBrowserController.mockImplementation(() => {
+      const controller = realController.useGfsBrowserController()
+      latestAuthorityPending = controller.authorityPending
+      return controller
+    })
+    const authValue = {
+      isAuthenticated: true,
+      sessionGeneration: 1,
+      me: {
+        id: 'preview-test-user',
+        email: 'preview@example.test',
+        name: 'Preview User',
+        picture: null,
+        teamId: 'main',
+        teamName: 'Main',
+        role: 'member',
+      },
+      runtimeConfigState: null,
+    } as unknown as AuthContextValue
+    // A finite gcTime would let the remount drop the cached resource and
+    // hide the actions for the wrong reason.
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+    })
+    const renderMount = (mount: number) => (
+      <AuthContext.Provider value={authValue}>
+        <QueryClientProvider client={queryClient}>
+          <FilePreviewPage
+            key={mount}
+            gfsUri={uri}
+            fileName="diagram.png"
+            fileKind="image"
+            mimeType="image/png"
+            byteLength={1}
+          />
+        </QueryClientProvider>
+      </AuthContext.Provider>
+    )
+    const gatedLabels = ['Rename', 'Move to', 'Download', 'Delete']
+    const menuItem = (menu: HTMLElement, label: string) =>
+      within(menu).queryByRole('menuitem', { name: label })
+    const view = render(renderMount(1))
+    try {
+      await screen.findByAltText('Preview of diagram.png')
+      await waitFor(() => expect(latestAuthorityPending).toBe(false))
+      await waitFor(async () => {
+        const menu = await openPreviewActions()
+        for (const label of gatedLabels) expect(isMenuItemEnabled(menuItem(menu, label))).toBe(true)
+        fireEvent.keyDown(menu, { key: 'Escape' })
+      })
+      const resolvesBeforeRemount = resolve.mock.calls.length
+
+      discoveryHeld = true
+      vi.setSystemTime(Date.now() + 1_000)
+      view.rerender(renderMount(2))
+      await waitFor(() => expect(latestAuthorityPending).toBe(true))
+      expect(
+        queryClient
+          .getQueryCache()
+          .findAll({ predicate: query => query.queryKey.includes('preview-resource') })
+          .map(query => (query.state.data as { kind?: string } | undefined)?.kind)
+      ).toEqual(['file'])
+
+      const pendingMenu = await openPreviewActions()
+      // A greyed-out Move is named "Move", so both names must be absent.
+      for (const label of [...gatedLabels, 'Move']) {
+        expect(menuItem(pendingMenu, label)).toBeNull()
+      }
+      fireEvent.click(within(pendingMenu).getByRole('menuitem', { name: 'Share' }))
+      expect(
+        within(screen.getByRole('menu', { name: 'Share options for diagram.png' }))
+          .getAllByRole('menuitem')
+          .map(item => item.textContent)
+      ).toEqual(['Copy link'])
+      expect(resolve.mock.calls.length).toBe(resolvesBeforeRemount)
+      fireEvent.keyDown(pendingMenu, { key: 'Escape' })
+
+      await act(async () => settleDiscovery(resources))
+      await waitFor(() => expect(latestAuthorityPending).toBe(false))
+      await waitFor(async () => {
+        const menu = await openPreviewActions()
+        for (const label of gatedLabels) expect(isMenuItemEnabled(menuItem(menu, label))).toBe(true)
+        fireEvent.keyDown(menu, { key: 'Escape' })
+      })
+    } finally {
+      queryClient.clear()
+    }
+  })
+
   it('keeps cached Preview actions visible during a background permission refetch', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     let resourceReads = 0
