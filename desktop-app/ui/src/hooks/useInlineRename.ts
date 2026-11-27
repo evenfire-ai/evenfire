@@ -19,6 +19,13 @@ export function useInlineRename({
   const [value, setValue] = useState('')
   const inputRef = useRef<HTMLInputElement | null>(null)
   const baselineRef = useRef('')
+  const attemptRef = useRef(0)
+  useEffect(
+    () => () => {
+      attemptRef.current += 1
+    },
+    []
+  )
   // A closed editor ignores a later blur, so Escape can never save.
   const closedRef = useRef(true)
   const focusOnOpenRef = useRef(true)
@@ -47,6 +54,7 @@ export function useInlineRename({
   }, [])
 
   const start = useCallback((key: string, currentValue: string) => {
+    attemptRef.current += 1
     closedRef.current = false
     focusOnOpenRef.current = true
     baselineRef.current = currentValue
@@ -55,6 +63,7 @@ export function useInlineRename({
   }, [])
 
   const cancel = useCallback(() => {
+    attemptRef.current += 1
     close()
   }, [close])
 
@@ -62,16 +71,18 @@ export function useInlineRename({
     if (closedRef.current) return
     const key = editingKey
     const nextTitle = value.trim()
+    const attempt = attemptRef.current
     close()
     if (!key || !nextTitle || nextTitle === baselineRef.current) return
     Promise.resolve(onRename(key, nextTitle)).catch(() => {
       // The rename did not happen. Give the typed title back without pulling
       // focus from wherever the user has moved on to; `onRejected` says why.
+      onRejected()
+      if (attemptRef.current !== attempt) return
       closedRef.current = false
       focusOnOpenRef.current = false
       setValue(nextTitle)
       setEditingKey(key)
-      onRejected()
     })
   }, [close, editingKey, onRename, onRejected, value])
 
