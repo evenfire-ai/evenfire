@@ -15942,8 +15942,8 @@ pre {
   border-radius: calc(var(--radius-sm) - 2px);
 }
 
-/* An action greyed out with a reason stays focusable, so it is aria-disabled
-   rather than :disabled; it borrows the disabled look and gets no hover. Only
+/* A greyed-out action stays focusable, so it is aria-disabled rather than
+   :disabled; it borrows the disabled look and gets no hover. Only
    its content is dimmed: dimming the button would also halve its keyboard
    focus ring and focus background. */
 .da-gfs-resource-menu__panel .ui-menu-item[aria-disabled='true'],
