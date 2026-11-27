@@ -21,11 +21,12 @@ A request owns its captured agent/chat identity and authority fence. Only the
 latest request may open a confirmation. Cancel invalidates pending captures.
 Confirmation reports a shell overlay and disables duplicate confirm/dismissal
 while the mutation is pending. The real deletion controller returns exactly one
-of three outcomes:
+of three storage/authority outcomes:
 
 - `deleted`: storage deletion committed, including deferred transcript cleanup;
   close only the matching request. Navigation failure does not make a committed
-  deletion retryable.
+  deletion retryable. Raw awaiters still receive the original successor-navigation
+  rejection; the confirmation closes without offering another deletion.
 - `retryable-failure`: storage failed while the original authority and captured
   binding/session generations remain valid; report the error and retain that
   same confirmation and fence for retry or cancel.

@@ -1625,28 +1625,23 @@ export function useChatListController({
       setChatList(prev => prev.filter(c => c.id !== chatId))
       const remaining = chatList.filter(c => c.id !== chatId)
 
-      try {
-        if (host.current?.getActiveChatId() === chatId) {
-          if (remaining.length > 0) {
-            const sorted = [...remaining].sort(byUpdatedDesc)
-            await host.current?.switchToChat(agentRef, sorted[0]!.id, {
-              onCurrentError: error => {
-                host.current?.pushToast(
-                  `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
-                  'error'
-                )
-              },
-            })
-          } else {
-            // The removed destination cannot remain the visible transcript when
-            // replacement creation fails. Clear only while it is still active.
-            host.current?.clearActiveChat()
-            await handleCreateChat()
-          }
+      if (host.current?.getActiveChatId() === chatId) {
+        if (remaining.length > 0) {
+          const sorted = [...remaining].sort(byUpdatedDesc)
+          await host.current?.switchToChat(agentRef, sorted[0]!.id, {
+            onCurrentError: error => {
+              host.current?.pushToast(
+                `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+                'error'
+              )
+            },
+          })
+        } else {
+          // The removed destination cannot remain the visible transcript when
+          // replacement creation fails. Clear only while it is still active.
+          host.current?.clearActiveChat()
+          await handleCreateChat()
         }
-      } catch {
-        // Storage committed. Navigation owns its feedback and cannot make the
-        // deleted conversation eligible for another destructive attempt.
       }
       return 'deleted'
     },
