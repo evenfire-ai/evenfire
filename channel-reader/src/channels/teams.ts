@@ -109,7 +109,7 @@ function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, '')
 }
 
-function rootTeamsConversationId(value: string): string {
+export function rootTeamsConversationId(value: string): string {
   return value.replace(/[;?&]messageid=[^;?&]+.*/i, '')
 }
 
@@ -605,7 +605,7 @@ export class TeamsAdapter implements ChannelAdapter {
       token: this.token,
       fileDownloadAuthStrategy: this.fileDownloadAuthStrategy,
     }
-    const maxBytes = options?.maxBytes ?? config.channelAttachmentMaxBytes ?? 20_971_520
+    const maxBytes = options?.maxBytes ?? config.channelAttachmentMaxBytes ?? 11_534_336
 
     if (
       typeof descriptor.reportedSizeBytes === 'number' &&

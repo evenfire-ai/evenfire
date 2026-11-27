@@ -242,7 +242,7 @@ export function normalizeSessionChannelId(
   const raw = (channelId || '').trim()
   if (!raw) return 'default'
   if (channelType === 'teams') {
-    const stripped = raw.replace(/[;?&]messageid=[^;?&]+$/i, '').trim()
+    const stripped = raw.replace(/[;?&]messageid=[^;?&]+.*/i, '').trim()
     return stripped || 'default'
   }
   return raw
@@ -292,6 +292,8 @@ export interface Message {
   slackThreadTs?: string | null
   /** Slack handoff origin (`event_callback` vs `block_actions`). */
   slackEventKind?: 'event_callback' | 'block_actions'
+  /** Slack event type when originating from `event_callback` (`message` vs `app_mention`). */
+  slackEventType?: 'message' | 'app_mention'
   attachments?: ProviderAttachmentDescriptorV1[]
   channelAttachmentIds?: string[]
   attachmentIngestErrors?: ChannelAttachmentIngestError[]

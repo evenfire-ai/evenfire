@@ -3,10 +3,16 @@ import {
   TeamsAdapter,
   type TeamsFileDownloadAuthStrategy,
   isAllowedTeamsInlineContentUrl,
+  rootTeamsConversationId,
 } from '../channels/teams'
+import { clampChannelAttachmentMaxCount } from '../config'
 import type { TeamsMessageHandoff } from '../handoffServer'
 import { ChannelReader, type ChannelReaderOptions } from '../main'
-import type { Message, ProviderAttachmentDescriptorV1 } from '../types'
+import {
+  type Message,
+  type ProviderAttachmentDescriptorV1,
+  normalizeSessionChannelId,
+} from '../types'
 
 vi.mock('../progressClient', () => ({
   createProgressStream: vi.fn(() => ({
@@ -546,5 +552,201 @@ describe('Teams inbound attachments (X8)', () => {
       filename: 'budget.xlsx',
       declaredMediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     })
+  })
+
+  it('T-BR10 · enforces total descriptors + attachmentIngestErrors maxCount and clamps config', async () => {
+    expect(clampChannelAttachmentMaxCount(25)).toBe(10)
+    expect(clampChannelAttachmentMaxCount(0)).toBe(1)
+    expect(clampChannelAttachmentMaxCount(-3)).toBe(1)
+    expect(clampChannelAttachmentMaxCount(undefined)).toBe(10)
+
+    const adapter = new TeamsAdapter()
+    await adapter.connect({
+      teamsAppId: 'app-1',
+      teamsTenantId: 'tenant-1',
+      teamsAppPassword: 'secret',
+    })
+    vi.spyOn(adapter, 'downloadAttachment').mockImplementation(async d => ({
+      ok: true,
+      bytes: Buffer.from(`bytes-${d.providerAttachmentId}`),
+      filename: d.filename,
+      declaredMediaType: d.declaredMediaType,
+    }))
+    const sendReplySpy = vi.spyOn(adapter, 'sendMessage').mockResolvedValue('teams-reply')
+
+    const rpc = makeRpc()
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      notificationDeliveryClient: null,
+      adapters: new Map([['teams', adapter]]),
+    })
+
+    const makeError = (idx: number) => ({
+      filename: `err-${idx}.bin`,
+      code: 'provider_scope_unsupported',
+      message: 'Channel file unsupported',
+    })
+    const makeDesc = (idx: number): ProviderAttachmentDescriptorV1 => ({
+      providerAttachmentId: `sp-${idx}`,
+      filename: `doc-${idx}.pdf`,
+      declaredMediaType: 'application/pdf',
+      reportedSizeBytes: 10,
+      downloadRef: {
+        provider: 'teams',
+        mode: 'file_download_info',
+        downloadUrl: `https://contoso.sharepoint.com/doc-${idx}.pdf`,
+      },
+    })
+
+    // Case 1: 11 pre-existing attachmentIngestErrors -> rejected with too_many_attachments, 0 sendMessage
+    await reader.handleTeamsHandoff({
+      kind: 'teams.attachment-message.v1',
+      content: 'too many errors',
+      providerUserId: 'teams-user-1',
+      providerWorkspaceId: 'tenant-1',
+      providerChannelId: 'a:personal-1',
+      providerConversationId: 'a:personal-1',
+      providerReplyToMessageId: 'act-err-11',
+      providerChannelType: 'personal',
+      providerEventId: 'teams:tenant-1:a:personal-1:act-err-11',
+      providerMessageId: 'act-err-11',
+      serviceUrl: 'https://smba.trafficmanager.net/amer/',
+      attachmentIngestErrors: Array.from({ length: 11 }, (_, i) => makeError(i + 1)),
+      providerTarget: PROVIDER_TARGET,
+    })
+
+    // Case 2: 6 descriptors + 5 attachmentIngestErrors = 11 > 10 -> rejected with too_many_attachments
+    await reader.handleTeamsHandoff({
+      kind: 'teams.attachment-message.v1',
+      content: 'mixed overflow',
+      providerUserId: 'teams-user-1',
+      providerWorkspaceId: 'tenant-1',
+      providerChannelId: 'a:personal-1',
+      providerConversationId: 'a:personal-1',
+      providerReplyToMessageId: 'act-mix-11',
+      providerChannelType: 'personal',
+      providerEventId: 'teams:tenant-1:a:personal-1:act-mix-11',
+      providerMessageId: 'act-mix-11',
+      serviceUrl: 'https://smba.trafficmanager.net/amer/',
+      attachments: Array.from({ length: 6 }, (_, i) => makeDesc(i + 1)),
+      attachmentIngestErrors: Array.from({ length: 5 }, (_, i) => makeError(i + 1)),
+      providerTarget: PROVIDER_TARGET,
+    })
+    await reader.flushConversationQueues()
+
+    expect(rpc.ingestChannelAttachment).not.toHaveBeenCalled()
+    expect(rpc.sendMessage).not.toHaveBeenCalled()
+    expect(sendReplySpy).toHaveBeenCalledTimes(2)
+    expect(sendReplySpy.mock.calls[0]?.[1]).toContain('too_many_attachments')
+    expect(sendReplySpy.mock.calls[1]?.[1]).toContain('too_many_attachments')
+
+    // Liveness witness: 5 descriptors + 5 attachmentIngestErrors = 10 -> accepted and forwarded
+    await reader.handleTeamsHandoff({
+      kind: 'teams.attachment-message.v1',
+      content: 'exactly ten',
+      providerUserId: 'teams-user-1',
+      providerWorkspaceId: 'tenant-1',
+      providerChannelId: 'a:personal-1',
+      providerConversationId: 'a:personal-1',
+      providerReplyToMessageId: 'act-mix-10',
+      providerChannelType: 'personal',
+      providerEventId: 'teams:tenant-1:a:personal-1:act-mix-10',
+      providerMessageId: 'act-mix-10',
+      serviceUrl: 'https://smba.trafficmanager.net/amer/',
+      attachments: Array.from({ length: 5 }, (_, i) => makeDesc(i + 1)),
+      attachmentIngestErrors: Array.from({ length: 5 }, (_, i) => makeError(i + 1)),
+      providerTarget: PROVIDER_TARGET,
+    })
+    await reader.flushConversationQueues()
+
+    expect(rpc.ingestChannelAttachment).toHaveBeenCalledTimes(5)
+    expect(rpc.sendMessage).toHaveBeenCalledTimes(1)
+    const sent = (vi.mocked(rpc.sendMessage).mock.calls[0] as unknown as [Message])[0]
+    expect(sent.channelAttachmentIds).toHaveLength(5)
+    expect(sent.attachmentIngestErrors).toHaveLength(5)
+  })
+
+  it('T-BR17-b · decodes legacy percent-encoded Teams messageid and falls back to root providerMessageId', async () => {
+    const adapter = new TeamsAdapter()
+    await adapter.connect({
+      teamsAppId: 'app-1',
+      teamsTenantId: 'tenant-1',
+      teamsAppPassword: 'secret',
+    })
+    vi.spyOn(adapter, 'sendMessage').mockResolvedValue('reply-id')
+
+    const sentMsgs: Message[] = []
+    const rpc = makeRpc({
+      sendMessage: vi.fn(async msg => {
+        sentMsgs.push(msg)
+        return { success: true, status: 'completed' as const, response: 'ok' }
+      }),
+    })
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      notificationDeliveryClient: null,
+      adapters: new Map([['teams', adapter]]),
+    })
+
+    // 1. Legacy channel handoff (no providerThreadRootId) with percent-encoded `;messageid=17000%3A1`
+    await reader.handleTeamsHandoff({
+      kind: 'teams.message',
+      content: 'encoded reply',
+      providerUserId: 'teams-user-1',
+      providerWorkspaceId: 'tenant-1',
+      providerChannelId: '19:chan@thread.tacv2',
+      providerConversationId: '19:chan@thread.tacv2;messageid=17000%3A1',
+      providerChannelType: 'channel',
+      providerEventId: 'teams:tenant-1:enc:1',
+      providerMessageId: 'reply-msg-1',
+      serviceUrl: 'https://smba.trafficmanager.net/amer/',
+      providerTarget: PROVIDER_TARGET,
+    })
+
+    // 2. Legacy channel root post (no providerThreadRootId, no `;messageid=` suffix) -> falls back to providerMessageId
+    await reader.handleTeamsHandoff({
+      kind: 'teams.message',
+      content: 'root post',
+      providerUserId: 'teams-user-1',
+      providerWorkspaceId: 'tenant-1',
+      providerChannelId: '19:chan@thread.tacv2',
+      providerConversationId: '19:chan@thread.tacv2',
+      providerChannelType: 'channel',
+      providerEventId: 'teams:tenant-1:root:1',
+      providerMessageId: 'root-post-42',
+      serviceUrl: 'https://smba.trafficmanager.net/amer/',
+      providerTarget: PROVIDER_TARGET,
+    })
+
+    // 3. Personal & groupChat remain undefined
+    await reader.handleTeamsHandoff({
+      kind: 'teams.message',
+      content: 'group chat msg',
+      providerUserId: 'teams-user-1',
+      providerWorkspaceId: 'tenant-1',
+      providerChannelId: '19:grp@thread.v2',
+      providerConversationId: '19:grp@thread.v2',
+      providerChannelType: 'groupChat',
+      providerEventId: 'teams:tenant-1:grp:1',
+      providerMessageId: 'grp-msg-1',
+      serviceUrl: 'https://smba.trafficmanager.net/amer/',
+      providerTarget: PROVIDER_TARGET,
+    })
+    await reader.flushConversationQueues()
+
+    expect(sentMsgs).toHaveLength(3)
+    expect(sentMsgs.find(m => m.messageId === 'reply-msg-1')?.threadId).toBe('17000:1')
+    expect(sentMsgs.find(m => m.messageId === 'root-post-42')?.threadId).toBe('root-post-42')
+    expect(sentMsgs.find(m => m.messageId === 'grp-msg-1')?.threadId).toBeUndefined()
+  })
+
+  it('T-BR25 · normalizeSessionChannelId strips mid-string Teams messageid consistently with rootTeamsConversationId', () => {
+    const withExtra = '19:abc@thread.tacv2;messageid=123;extra=1'
+    expect(normalizeSessionChannelId('teams', withExtra)).toBe('19:abc@thread.tacv2')
+    expect(normalizeSessionChannelId('teams', withExtra)).toBe(rootTeamsConversationId(withExtra))
+    expect(normalizeSessionChannelId('teams', '19:abc@thread.tacv2;messageid=123')).toBe(
+      '19:abc@thread.tacv2'
+    )
+    expect(normalizeSessionChannelId('slack', 'C123;messageid=123')).toBe('C123;messageid=123')
   })
 })

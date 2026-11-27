@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
-import { TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS, TelegramAdapter } from '../channels/telegram'
+import {
+  TELEGRAM_DOWNLOAD_TIMEOUT_MS,
+  TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS,
+  TelegramAdapter,
+} from '../channels/telegram'
 import { ChannelReader } from '../main'
 import { RPCClient } from '../rpcClient'
 import type { ChannelAttachmentIngestMetadataV1, ProviderAttachmentDescriptorV1 } from '../types'
@@ -898,6 +902,159 @@ describe('Telegram inbound attachments (X6)', () => {
       'ingest:photo3',
       'message:album',
       'message:text',
+    ])
+  })
+
+  it('T-BR15 · passes AbortSignal.timeout to bot.api.getFile and aborts hung calls cleanly', async () => {
+    vi.useFakeTimers()
+    const adapter = new TelegramAdapter(null)
+    await adapter.connect({ telegramBotToken: TEST_TOKEN })
+    const bot = grammy.instances[0]!
+
+    const capturedSignals: Array<unknown> = []
+    bot.api.getFile.mockImplementationOnce(
+      (_fileId: string, signal?: AbortSignal) =>
+        new Promise(() => {
+          capturedSignals.push(signal)
+        })
+    )
+
+    const descriptor: ProviderAttachmentDescriptorV1 = {
+      providerAttachmentId: 'u-hang',
+      filename: 'hang.pdf',
+      declaredMediaType: 'application/pdf',
+      reportedSizeBytes: 128,
+      downloadRef: { provider: 'telegram', fileId: 'f-hang', kindHint: 'document' },
+    }
+
+    const downloadPromise = adapter.downloadAttachment(descriptor)
+    expect(capturedSignals).toHaveLength(1)
+    expect(capturedSignals[0]).toBeInstanceOf(AbortSignal)
+
+    await vi.advanceTimersByTimeAsync(TELEGRAM_DOWNLOAD_TIMEOUT_MS)
+    const timedOut = await downloadPromise
+    expect(timedOut).toMatchObject({
+      ok: false,
+      code: 'provider_download_failed',
+      retryable: true,
+    })
+
+    // Liveness witness: resolving getFile receives AbortSignal and succeeds with bytes
+    bot.api.getFile.mockImplementationOnce(async (_fileId: string, signal?: AbortSignal) => {
+      capturedSignals.push(signal)
+      return { file_id: 'f-ok', file_path: 'docs/ok.pdf', file_size: 8 }
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('%PDF-1.7', { status: 200 }))
+    )
+
+    const okResult = await adapter.downloadAttachment({
+      ...descriptor,
+      providerAttachmentId: 'u-ok',
+      downloadRef: { provider: 'telegram', fileId: 'f-ok', kindHint: 'document' },
+    })
+    expect(capturedSignals[1]).toBeInstanceOf(AbortSignal)
+    expect(okResult).toEqual({
+      ok: true,
+      bytes: Buffer.from('%PDF-1.7'),
+      filename: 'hang.pdf',
+      declaredMediaType: 'application/pdf',
+    })
+  })
+
+  it('T-BR23 · concatenates multi-caption media groups and shifts caption_entities offsets', async () => {
+    vi.useFakeTimers()
+    const adapter = new TelegramAdapter(null)
+    await adapter.connect({ telegramBotToken: TEST_TOKEN })
+    const bot = grammy.instances[0]!
+    const handler = getMessageHandler(bot)
+
+    await adapter.fetchMessages('-100777', new Set(['123456']), {
+      telegramChatType: 'group',
+      replyOnlyWhenMentioned: true,
+      providerTarget: PROVIDER_TARGET,
+    })
+
+    // Album item 1: "First" (bold 0..5), NO @mention
+    handler({
+      from: { id: 123456, username: 'alice' },
+      chat: { id: -100777, type: 'group' },
+      message: {
+        message_id: 801,
+        date: 1700000801,
+        media_group_id: 'mg-multi-cap',
+        caption: 'First',
+        caption_entities: [{ type: 'bold', offset: 0, length: 5 }],
+        photo: [{ file_id: 'p1', file_unique_id: 'u-mc-1', width: 640, height: 480 }],
+      },
+    })
+    // Album item 2: "@test_bot Second" (mention 0..9) -> shifted to offset 6
+    handler({
+      from: { id: 123456, username: 'alice' },
+      chat: { id: -100777, type: 'group' },
+      message: {
+        message_id: 802,
+        date: 1700000801,
+        media_group_id: 'mg-multi-cap',
+        caption: '@test_bot Second',
+        caption_entities: [{ type: 'mention', offset: 0, length: 9 }],
+        photo: [{ file_id: 'p2', file_unique_id: 'u-mc-2', width: 640, height: 480 }],
+      },
+    })
+    vi.advanceTimersByTime(TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS)
+
+    const fetched = await adapter.fetchMessages('-100777', new Set(['123456']), {
+      telegramChatType: 'group',
+      replyOnlyWhenMentioned: true,
+      providerTarget: PROVIDER_TARGET,
+    })
+    expect(fetched).toHaveLength(1)
+    expect(fetched[0]!.content).toBe('First\n@test_bot Second')
+    expect(fetched[0]!.rawData?.caption_entities).toEqual([
+      { type: 'bold', offset: 0, length: 5 },
+      { type: 'mention', offset: 6, length: 9 },
+    ])
+
+    // Liveness witnesses: 0-caption and 1-caption albums preserved in private chat
+    await adapter.fetchMessages('111222', new Set(['123456']), {
+      telegramChatType: 'private',
+      providerTarget: PROVIDER_TARGET,
+    })
+    handler({
+      from: { id: 123456, username: 'alice' },
+      chat: { id: 111222, type: 'private' },
+      message: {
+        message_id: 810,
+        date: 1700000810,
+        media_group_id: 'mg-zero',
+        photo: [{ file_id: 'pz1', file_unique_id: 'uz1', width: 640, height: 480 }],
+      },
+    })
+    vi.advanceTimersByTime(TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS)
+    handler({
+      from: { id: 123456, username: 'alice' },
+      chat: { id: 111222, type: 'private' },
+      message: {
+        message_id: 811,
+        date: 1700000811,
+        media_group_id: 'mg-one',
+        caption: 'Only one',
+        caption_entities: [{ type: 'italic', offset: 0, length: 4 }],
+        photo: [{ file_id: 'po1', file_unique_id: 'uo1', width: 640, height: 480 }],
+      },
+    })
+    vi.advanceTimersByTime(TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS)
+
+    const privateFetched = await adapter.fetchMessages('111222', new Set(['123456']), {
+      telegramChatType: 'private',
+      providerTarget: PROVIDER_TARGET,
+    })
+    expect(privateFetched).toHaveLength(2)
+    expect(privateFetched[0]!.content).toBe('')
+    expect(privateFetched[1]!.content).toBe('Only one')
+    expect(privateFetched[1]!.rawData?.caption_entities).toEqual([
+      { type: 'italic', offset: 0, length: 4 },
     ])
   })
 })

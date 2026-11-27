@@ -24,6 +24,7 @@ import {
   RPCClient,
   type ShellAction,
   type ShellCardDescriptor,
+  TaskResultHttpError,
 } from './rpcClient'
 import { type TraceContextV1, mintChannelTraceContext } from './traceContext'
 import {
@@ -182,6 +183,7 @@ const SHELL_CARD_ONCE_NOTICE = '/approve allows this command once.'
  * events from earlier reconnect gaps.
  */
 export const CHANNEL_RESYNC_INTERVAL_MS = 60_000 // 60 seconds
+export const RESTART_QUEUE_DRAIN_TIMEOUT_MS = 10_000 // 10 seconds
 
 type ToolApprovalDecision = '/approve' | '/approve always' | '/deny'
 type ParsedToolApproval =
@@ -1063,8 +1065,20 @@ export class ChannelReader {
       : Array.isArray(handoff.rawData?.attachmentIngestErrors)
         ? (handoff.rawData?.attachmentIngestErrors as ChannelAttachmentIngestError[])
         : []
+    const eventKind: 'event_callback' | 'block_actions' =
+      handoff.eventKind ??
+      (parseToolApprovalAction(handoff.content || '') || handoff.workflowRunId
+        ? 'block_actions'
+        : 'event_callback')
+    const slackEventType: 'message' | 'app_mention' | undefined =
+      handoff.slackEventType === 'message' || handoff.slackEventType === 'app_mention'
+        ? handoff.slackEventType
+        : undefined
     const hasContentOrAttachments =
-      Boolean(handoff.content?.trim()) || attachments.length > 0 || handoffErrors.length > 0
+      Boolean(handoff.content?.trim()) ||
+      attachments.length > 0 ||
+      handoffErrors.length > 0 ||
+      (slackEventType === 'app_mention' && eventKind === 'event_callback')
     if (
       !hasContentOrAttachments ||
       !handoff.providerUserId?.trim() ||
@@ -1096,12 +1110,6 @@ export class ChannelReader {
         ? inboundThreadTs || responseThreadTs || messageTs
         : inboundThreadTs || undefined
 
-    const eventKind: 'event_callback' | 'block_actions' =
-      handoff.eventKind ??
-      (parseToolApprovalAction(handoff.content || '') || handoff.workflowRunId
-        ? 'block_actions'
-        : 'event_callback')
-
     const timestampMs = Number.parseFloat(messageTs) * 1000
     return {
       channelType: 'slack',
@@ -1114,6 +1122,7 @@ export class ChannelReader {
       replyToMessageId: responseThreadTs,
       slackThreadTs: inboundThreadTs,
       slackEventKind: eventKind,
+      ...(slackEventType ? { slackEventType } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
       ...(handoffErrors.length > 0 ? { attachmentIngestErrors: handoffErrors } : {}),
       providerIdentity: {
@@ -1156,17 +1165,25 @@ export class ChannelReader {
 
     const extractConversationMessageId = (conversationId: string): string | undefined => {
       const match = /[;?&]messageid=([^;?&]+)/i.exec(conversationId)
-      return match?.[1]?.trim() || undefined
+      const rawId = match?.[1]?.trim()
+      if (!rawId) return undefined
+      try {
+        return decodeURIComponent(rawId).trim() || undefined
+      } catch {
+        return rawId
+      }
     }
 
     // Canonical sessionThreadId per C0 / X8:
-    // - channel: providerThreadRootId (or legacy `;messageid=` from conversationId), NEVER providerReplyToMessageId
+    // - channel: providerThreadRootId (or legacy `;messageid=` from conversationId, falling back to root-post providerMessageId), NEVER providerReplyToMessageId
     // - personal / groupChat: ALWAYS undefined
     const sessionThreadId =
       handoff.providerChannelType === 'channel'
         ? handoff.providerThreadRootId !== undefined
           ? handoff.providerThreadRootId?.trim() || undefined
-          : extractConversationMessageId(handoff.providerConversationId)
+          : extractConversationMessageId(handoff.providerConversationId) ||
+            handoff.providerMessageId.trim() ||
+            undefined
         : undefined
     const replyToMessageId =
       handoff.providerReplyToMessageId?.trim() || handoff.providerMessageId.trim() || null
@@ -1919,20 +1936,21 @@ export class ChannelReader {
         const adapter = this.adapterForMessage(msg)
 
         // Slack `event_callback` `app_mention` may arrive before `message(file_share)`
-        // with zero embedded files; hydrate single-message `files[]` once after auth (R9/R56).
-        const slackRawEventType =
-          typeof msg.rawData?.slackEventType === 'string'
+        // with zero embedded files; hydrate single-message `files[]` once after auth (R9/R56/BR-02).
+        const slackEventType =
+          msg.slackEventType ??
+          (typeof msg.rawData?.slackEventType === 'string'
             ? msg.rawData.slackEventType
             : typeof msg.rawData?.eventType === 'string'
               ? msg.rawData.eventType
               : typeof msg.rawData?.type === 'string'
                 ? msg.rawData.type
-                : undefined
+                : undefined)
         const shouldHydrateSlackAttachments =
           msg.channelType === 'slack' &&
           msg.slackEventKind === 'event_callback' &&
           (!runtimeMsg.attachments || runtimeMsg.attachments.length === 0) &&
-          slackRawEventType !== 'message' &&
+          slackEventType === 'app_mention' &&
           Boolean(adapter?.hydrateMessageAttachments)
         if (shouldHydrateSlackAttachments && adapter?.hydrateMessageAttachments) {
           const hydrated = await adapter.hydrateMessageAttachments({
@@ -1952,14 +1970,18 @@ export class ChannelReader {
         ]
         const channelAttachmentIds: string[] = [...(runtimeMsg.channelAttachmentIds ?? [])]
 
-        if (descriptors.length > (config.channelAttachmentMaxCount ?? 10)) {
-          const maxCount = config.channelAttachmentMaxCount ?? 10
+        const maxCount = Math.min(
+          10,
+          Math.max(1, Math.trunc(config.channelAttachmentMaxCount ?? 10))
+        )
+        const totalAttachmentCount = descriptors.length + attachmentIngestErrors.length
+        if (totalAttachmentCount > maxCount) {
           if (providerEventKey) {
             this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
           }
           await this.sendReply(
             msg,
-            `Too many attachments (${descriptors.length}). At most ${maxCount} files can be attached per message (too_many_attachments).`
+            `Too many attachments (${totalAttachmentCount}). At most ${maxCount} files can be attached per message (too_many_attachments).`
           )
           continue
         }
@@ -2046,11 +2068,17 @@ export class ChannelReader {
           continue
         }
 
-        if (channelAttachmentIds.length > 0 || attachmentIngestErrors.length > 0) {
+        const boundedAttachmentIngestErrors =
+          attachmentIngestErrors.length > maxCount
+            ? attachmentIngestErrors.slice(0, maxCount)
+            : attachmentIngestErrors
+        if (channelAttachmentIds.length > 0 || boundedAttachmentIngestErrors.length > 0) {
           runtimeMsg = {
             ...runtimeMsg,
             ...(channelAttachmentIds.length > 0 ? { channelAttachmentIds } : {}),
-            ...(attachmentIngestErrors.length > 0 ? { attachmentIngestErrors } : {}),
+            ...(boundedAttachmentIngestErrors.length > 0
+              ? { attachmentIngestErrors: boundedAttachmentIngestErrors }
+              : {}),
           }
         }
 
@@ -2059,9 +2087,12 @@ export class ChannelReader {
           !runtimeMsg.content.trim() &&
           descriptors.length === 0 &&
           channelAttachmentIds.length === 0 &&
-          attachmentIngestErrors.length === 0
+          boundedAttachmentIngestErrors.length === 0
         ) {
-          if (providerEventKey) {
+          // When Slack `app_mention` hydration found 0 files on an attachment-only
+          // mention, do NOT record `providerEventKey` so the sibling `message(file_share)`
+          // for the same `ts` is not suppressed (BR-14 / V2).
+          if (providerEventKey && !shouldHydrateSlackAttachments) {
             this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
           }
           continue
@@ -2602,6 +2633,13 @@ export class ChannelReader {
           if (result.status === 'pending' || result.status === 'waiting_approval') {
             return false
           }
+          if (result.status === 'cancelled' || (result.success === false && !result.error)) {
+            acceptProgressUpdates = false
+            finalDelivered = true
+            stopResultPollingFallback()
+            this.clearPendingApprovalForTask(msg, taskId)
+            return true
+          }
           acceptProgressUpdates = false
 
           if (result.success && result.response) {
@@ -2665,6 +2703,18 @@ export class ChannelReader {
         }
       }
 
+      const isRevokedOrMissingTaskError = (err: unknown): boolean =>
+        err instanceof TaskResultHttpError && (err.status === 403 || err.status === 404)
+
+      const abortRevokedTask = (): void => {
+        acceptProgressUpdates = false
+        finalDelivered = true
+        stopResultPollingFallback()
+        this.clearPendingApprovalForTask(msg, taskId)
+        stream.close()
+        resolveOnce()
+      }
+
       const startResultPollingFallback = () => {
         if (resultPollingFallbackStarted || resultPollingCancelled) return
         resultPollingFallbackStarted = true
@@ -2682,6 +2732,10 @@ export class ChannelReader {
                 return
               }
             } catch (err) {
+              if (isRevokedOrMissingTaskError(err)) {
+                abortRevokedTask()
+                return
+              }
               console.error(`[Main] result polling fallback failed for task ${taskId}:`, err)
             }
           }
@@ -2700,12 +2754,18 @@ export class ChannelReader {
           void editStatus(formatProgressUpdate(steps))
         },
         onSuspended: async suspended => {
+          if (finalDelivered) {
+            stream.close()
+            resolveOnce()
+            return
+          }
           // Approval needed. Fetch the server-formatted notification once.
           // If getTaskResult reports `success === false` (e.g. approval_identity_revoked
-          // or approval_identity_mismatch) OR any terminal status (completed/failed/cancelled),
-          // abort immediately without disclosing suspended.toolName or populating pendingApprovals (R84).
+          // or approval_identity_mismatch), any terminal status (completed/failed/cancelled),
+          // or HTTP 403/404 (`TaskResultHttpError`), abort immediately without disclosing
+          // suspended.toolName or populating pendingApprovals (R84 / BR-01).
           // Preserve fallback prompt delivery ONLY for `{ success: true, status: 'pending' }`
-          // micro-races or transient network errors while the task is still live.
+          // micro-races or transient network/5xx errors while `!finalDelivered`.
           let notification =
             `Tool \`${suspended.toolName}\` requires approval. ` +
             (msg.channelType === 'slack'
@@ -2719,6 +2779,11 @@ export class ChannelReader {
           let abortWithoutPrompt = false
           try {
             const result = await this.rpcClient.getTaskResult(taskId, msg)
+            if (finalDelivered) {
+              stream.close()
+              resolveOnce()
+              return
+            }
             if (
               result.success === false ||
               result.status === 'completed' ||
@@ -2737,15 +2802,24 @@ export class ChannelReader {
               shellCard = readShellCard(result.approval.shellCard)
             }
           } catch (err) {
-            console.error(`[Main] Failed to fetch approval notification for task ${taskId}:`, err)
+            if (finalDelivered) {
+              stream.close()
+              resolveOnce()
+              return
+            }
+            if (isRevokedOrMissingTaskError(err)) {
+              abortWithoutPrompt = true
+            } else {
+              console.error(`[Main] Failed to fetch approval notification for task ${taskId}:`, err)
+            }
           }
-          if (abortWithoutPrompt) {
-            acceptProgressUpdates = false
-            finalDelivered = true
-            stopResultPollingFallback()
-            this.clearPendingApprovalForTask(msg, taskId)
+          if (finalDelivered) {
             stream.close()
             resolveOnce()
+            return
+          }
+          if (abortWithoutPrompt) {
+            abortRevokedTask()
             return
           }
           await deliverApprovalPrompt({
@@ -2787,6 +2861,10 @@ export class ChannelReader {
                 )
               }
             } catch (err) {
+              if (isRevokedOrMissingTaskError(err)) {
+                abortRevokedTask()
+                return
+              }
               console.error(`[Main] terminal(completed) result fetch failed:`, err)
               startResultPollingFallback()
               await editStatus(formatFinalMessage(stream.steps, 'Final response is still syncing.'))
@@ -2822,6 +2900,10 @@ export class ChannelReader {
                 return
               }
             } catch (err) {
+              if (isRevokedOrMissingTaskError(err)) {
+                abortRevokedTask()
+                return
+              }
               console.error(
                 `[Main] reconcile after task_not_found_or_expired failed for task ${taskId}:`,
                 err
@@ -3058,6 +3140,19 @@ export class ChannelReader {
     if (config.devMode) return
 
     console.log('[Main] Restarting with new channel configurations...')
+
+    // Drain active per-conversation FIFO queues before tearing down adapters (BR-26 / V3).
+    let drainTimeoutId: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        this.flushConversationQueues(),
+        new Promise<void>(resolve => {
+          drainTimeoutId = setTimeout(resolve, RESTART_QUEUE_DRAIN_TIMEOUT_MS)
+        }),
+      ])
+    } finally {
+      if (drainTimeoutId !== undefined) clearTimeout(drainTimeoutId)
+    }
 
     // Shutdown existing adapters
     await this.shutdownAdapters()

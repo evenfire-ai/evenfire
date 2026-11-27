@@ -1,7 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { AddressInfo } from 'node:net'
+import { readBoundedResponseBytes } from '../channels/downloadStream'
 import { SlackAdapter } from '../channels/slack'
-import type { SlackMessageHandoff } from '../handoffServer'
-import { ChannelReader, type ChannelReaderOptions } from '../main'
+import {
+  DEFAULT_CHANNEL_ATTACHMENT_MAX_BYTES,
+  clampChannelAttachmentMaxBytes,
+  config,
+} from '../config'
+import {
+  type SlackMessageHandoff,
+  type TeamsMessageHandoff,
+  createChannelReaderHandoffServer,
+} from '../handoffServer'
+import { ChannelReader, type ChannelReaderOptions, RESTART_QUEUE_DRAIN_TIMEOUT_MS } from '../main'
 import { createProgressStream } from '../progressClient'
 import { RPCClient } from '../rpcClient'
 import type { ChannelAdapter, Message, ProviderAttachmentDescriptorV1 } from '../types'
@@ -334,13 +345,17 @@ describe('ChannelReader inbound concurrency, auth ordering, retries & revocation
       releaseFetch = resolve
     })
 
+    const seenTokens: string[] = []
     vi.stubGlobal(
       'fetch',
       vi.fn(async (_url: string | URL, init?: RequestInit) => {
-        await fetchGate
         const headers = (init?.headers ?? {}) as Record<string, string>
-        expect(headers.authorization).toBe('Bearer xoxb-initial-token')
-        return new Response('downloaded-during-restart', { status: 200 })
+        seenTokens.push(headers.authorization ?? '')
+        if (seenTokens.length === 1) {
+          await fetchGate
+          return new Response('downloaded-during-restart', { status: 200 })
+        }
+        return new Response('downloaded-after-rotate', { status: 200 })
       })
     )
 
@@ -357,9 +372,18 @@ describe('ChannelReader inbound concurrency, auth ordering, retries & revocation
       filename: 'F_RESTART.pdf',
       declaredMediaType: 'application/pdf',
     })
+    expect(seenTokens[0]).toBe('Bearer xoxb-initial-token')
 
-    // Reconnecting adapter works cleanly with rotated token
+    // Reconnecting adapter works cleanly with rotated token (BR-T9: real post-reconnect download)
     await adapter.connect({ slackBotToken: 'xoxb-rotated-token' })
+    const rotatedResult = await adapter.downloadAttachment(sampleDescriptor('F_AFTER_ROTATE'))
+    expect(rotatedResult).toEqual({
+      ok: true,
+      bytes: Buffer.from('downloaded-after-rotate'),
+      filename: 'F_AFTER_ROTATE.pdf',
+      declaredMediaType: 'application/pdf',
+    })
+    expect(seenTokens[1]).toBe('Bearer xoxb-rotated-token')
   })
 
   it('S21 · retries_ingest_after_host_draining_503', async () => {
@@ -816,5 +840,405 @@ describe('ChannelReader inbound concurrency, auth ordering, retries & revocation
     expect(String(caseC.editCalls[0]?.[2])).toContain('clerum__gfs_save_attachment')
     expect(caseC.pendingSize).toBe(1)
     expect(caseC.streamClosed).toBe(0)
+  })
+
+  it('T-BR16 · defaults channelAttachmentMaxBytes to 11 MiB and clamps to [1, 20 MiB]', () => {
+    expect(DEFAULT_CHANNEL_ATTACHMENT_MAX_BYTES).toBe(11_534_336)
+    if (!process.env.CLERUM_CHANNEL_ATTACHMENT_MAX_BYTES) {
+      expect(config.channelAttachmentMaxBytes).toBe(11_534_336)
+    }
+    expect(clampChannelAttachmentMaxBytes(undefined)).toBe(11_534_336)
+    expect(clampChannelAttachmentMaxBytes(50_000_000)).toBe(20_971_520)
+    expect(clampChannelAttachmentMaxBytes(0)).toBe(1)
+    expect(clampChannelAttachmentMaxBytes(-5)).toBe(1)
+    expect(clampChannelAttachmentMaxBytes(4096)).toBe(4096)
+  })
+
+  it('T-BR24 · RPCClient.sendMessage preserves structured 503 MessageResponse while still throwing plain 503', async () => {
+    const structured503 = {
+      success: false,
+      error: {
+        code: 'CHANNEL_IDENTITY_CHECK_UNAVAILABLE',
+        message: 'Identity service temporarily unavailable',
+        retryable: true,
+        provider: 'mcp-host',
+      },
+    }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(structured503), { status: 503 }))
+      .mockResolvedValueOnce(
+        new Response('Service Unavailable', { status: 503, statusText: 'Service Unavailable' })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ code: 'host_draining' }), { status: 503 })
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ success: true, status: 'completed', response: 'after drain' }),
+          { status: 200 }
+        )
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new RPCClient('http://mcp-host.test', {
+      sleep: async () => undefined,
+      drainRetryBaseDelayMs: 5,
+      drainRetryMaxMs: 500,
+    })
+
+    const msg: Message = {
+      channelType: 'slack',
+      channelId: 'C1',
+      sender: 'U1',
+      content: 'hello',
+      timestamp: new Date(),
+      messageId: 'm-503-struct',
+    }
+
+    // 1. Structured 503 returned intact with CHANNEL_IDENTITY_CHECK_UNAVAILABLE
+    const resStruct = await client.sendMessage(msg)
+    expect(resStruct).toEqual(structured503)
+
+    // 2. Liveness witness: plain-text 503 still maps to LLM_API_CALL_FAILED
+    const resPlain = await client.sendMessage(msg)
+    expect(resPlain.success).toBe(false)
+    expect(resPlain.error?.code).toBe('LLM_API_CALL_FAILED')
+
+    // 3. Liveness witness: host_draining 503 still retries
+    const resDrain = await client.sendMessage(msg)
+    expect(resDrain).toMatchObject({ success: true, response: 'after drain' })
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+
+  it('T-BR26 · ChannelReader.restart drains active conversation queues before shutdownAdapters and bounds wedged queues', async () => {
+    const savedDevMode = config.devMode
+    config.devMode = false
+    try {
+      // Part 1: active queue drains before adapter disconnect
+      const events: string[] = []
+      let releaseTask!: () => void
+      const taskGate = new Promise<void>(resolve => {
+        releaseTask = resolve
+      })
+
+      const adapter = makeStubAdapter('slack', {
+        disconnect: vi.fn(async () => {
+          events.push('adapter:disconnect')
+        }),
+      })
+      const rpc = makeRpc({
+        authorizeProviderMessage: vi.fn(async () => {
+          events.push('queue:start')
+          await taskGate
+          events.push('queue:done')
+          return { authorized: true }
+        }),
+      })
+      const reader = new ChannelReader({
+        rpcClient: rpc,
+        notificationDeliveryClient: null,
+        adapters: new Map([['slack', adapter]]),
+      })
+      ;(reader as unknown as { watcher: { getChannels: () => unknown[] } }).watcher = {
+        getChannels: vi.fn(() => []),
+      }
+
+      const handoff: SlackMessageHandoff = {
+        kind: 'slack.message',
+        content: 'in-flight work',
+        providerUserId: 'U1',
+        providerWorkspaceId: 'T1',
+        providerChannelId: 'C1',
+        providerEventId: 'slack:T1:C1:EvRestart1',
+        providerMessageTs: '1700.1',
+        eventKind: 'event_callback',
+        slackEventType: 'message',
+        providerTarget: PROVIDER_TARGET,
+      }
+      expect(await reader.handleSlackHandoff(handoff)).toEqual({ ok: true })
+      // Wait for queue worker to enter authorizeProviderMessage
+      await vi.waitFor(() => expect(events).toEqual(['queue:start']))
+
+      const restartPromise = reader.restart()
+      // Give microtasks a turn; disconnect MUST NOT have run while queue is active
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(adapter.disconnect).not.toHaveBeenCalled()
+
+      // Release active task -> queue finishes, then disconnect runs, restart resolves
+      releaseTask()
+      await restartPromise
+      expect(events).toEqual(['queue:start', 'queue:done', 'adapter:disconnect'])
+
+      // Part 2: wedged queue bounds at RESTART_QUEUE_DRAIN_TIMEOUT_MS and proceeds to disconnect
+      vi.useFakeTimers()
+      const wedgedAdapter = makeStubAdapter('slack')
+      const wedgedRpc = makeRpc({
+        authorizeProviderMessage: vi.fn(
+          () => new Promise<{ authorized: boolean }>(() => undefined)
+        ),
+      })
+      const wedgedReader = new ChannelReader({
+        rpcClient: wedgedRpc,
+        notificationDeliveryClient: null,
+        adapters: new Map([['slack', wedgedAdapter]]),
+      })
+      ;(wedgedReader as unknown as { watcher: { getChannels: () => unknown[] } }).watcher = {
+        getChannels: vi.fn(() => []),
+      }
+
+      await wedgedReader.handleSlackHandoff({
+        ...handoff,
+        providerEventId: 'slack:T1:C1:EvRestartWedged',
+        providerMessageTs: '1700.2',
+      })
+
+      let restarted = false
+      const wedgedRestart = wedgedReader.restart().then(() => {
+        restarted = true
+      })
+
+      await vi.advanceTimersByTimeAsync(RESTART_QUEUE_DRAIN_TIMEOUT_MS - 100)
+      expect(restarted).toBe(false)
+      expect(wedgedAdapter.disconnect).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(100)
+      await wedgedRestart
+      expect(restarted).toBe(true)
+      expect(wedgedAdapter.disconnect).toHaveBeenCalledTimes(1)
+      vi.useRealTimers()
+    } finally {
+      config.devMode = savedDevMode
+    }
+  })
+
+  it('BR-T7 · covers readBoundedResponseBytes, 429 queue saturation recovery, and loopback handoff server', async () => {
+    // Part 1: readBoundedResponseBytes
+    // 1a. Content-Length overflow cancels stream without reading chunks
+    let clCancelled = false
+    let clPulls = 0
+    const clStream = new ReadableStream<Uint8Array>({
+      pull() {
+        clPulls += 1
+      },
+      cancel() {
+        clCancelled = true
+      },
+    })
+    const clRes = await readBoundedResponseBytes(
+      new Response(clStream, { status: 200, headers: { 'content-length': '100' } }),
+      32
+    )
+    expect(clRes).toMatchObject({ ok: false, code: 'file_too_large', retryable: false })
+    expect(clCancelled).toBe(true)
+    expect(clPulls).toBe(0)
+
+    // 1b. Chunked stream overflow (no Content-Length) cancels reader
+    let chunkedCancelled = false
+    let chunkIndex = 0
+    const chunkedStream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        chunkIndex += 1
+        controller.enqueue(new Uint8Array(10).fill(65))
+      },
+      cancel() {
+        chunkedCancelled = true
+      },
+    })
+    const chunkedRes = await readBoundedResponseBytes(
+      new Response(chunkedStream, { status: 200 }),
+      16
+    )
+    expect(chunkedRes).toMatchObject({ ok: false, code: 'file_too_large', retryable: false })
+    expect(chunkedCancelled).toBe(true)
+    expect(chunkIndex).toBe(2)
+
+    // 1c. Liveness witness: valid stream within limit returns exact bytes
+    const validStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(Buffer.from('hello '))
+        controller.enqueue(Buffer.from('world'))
+        controller.close()
+      },
+    })
+    const validRes = await readBoundedResponseBytes(new Response(validStream, { status: 200 }), 16)
+    expect(validRes).toEqual({ ok: true, bytes: Buffer.from('hello world') })
+
+    // Part 2: 429 conversation_queue_saturated + drain recovery witness
+    const savedMaxDepth = config.perConversationQueueMaxDepth
+    config.perConversationQueueMaxDepth = 2
+    try {
+      let releaseFirst!: () => void
+      const firstGate = new Promise<void>(resolve => {
+        releaseFirst = resolve
+      })
+      const adapter = makeStubAdapter('slack')
+      let authCalls = 0
+      const rpc = makeRpc({
+        authorizeProviderMessage: vi.fn(async () => {
+          authCalls += 1
+          if (authCalls === 1) await firstGate
+          return { authorized: true }
+        }),
+      })
+      const reader = new ChannelReader({
+        rpcClient: rpc,
+        notificationDeliveryClient: null,
+        adapters: new Map([['slack', adapter]]),
+      })
+      const makeHandoff = (idx: number): SlackMessageHandoff => ({
+        kind: 'slack.message',
+        content: `msg-${idx}`,
+        providerUserId: 'U1',
+        providerWorkspaceId: 'T1',
+        providerChannelId: 'C1',
+        providerEventId: `slack:T1:C1:EvSat${idx}`,
+        providerMessageTs: `1700.${idx}`,
+        eventKind: 'event_callback',
+        slackEventType: 'message',
+        providerTarget: PROVIDER_TARGET,
+      })
+
+      expect(await reader.handleSlackHandoff(makeHandoff(1))).toEqual({ ok: true })
+      expect(await reader.handleSlackHandoff(makeHandoff(2))).toEqual({ ok: true })
+      // 3rd exceeds maxDepth=2 -> 429 conversation_queue_saturated
+      expect(await reader.handleSlackHandoff(makeHandoff(3))).toEqual({
+        ok: false,
+        status: 429,
+        error: 'conversation_queue_saturated',
+      })
+
+      // Drain recovery witness: after draining, enqueueing succeeds again
+      releaseFirst()
+      await reader.flushConversationQueues()
+      expect(await reader.handleSlackHandoff(makeHandoff(4))).toEqual({ ok: true })
+      await reader.flushConversationQueues()
+      expect(rpc.sendMessage).toHaveBeenCalledTimes(3)
+    } finally {
+      config.perConversationQueueMaxDepth = savedMaxDepth
+    }
+
+    // Part 3: Real HTTP loopback createChannelReaderHandoffServer
+    const slackAdapter = makeStubAdapter('slack')
+    const teamsAdapter = makeStubAdapter('teams')
+    const rpc = makeRpc()
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      notificationDeliveryClient: null,
+      adapters: new Map([
+        ['slack', slackAdapter],
+        ['teams', teamsAdapter],
+      ]),
+    })
+    const server = createChannelReaderHandoffServer(reader, 'handoff-secret-token')
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => {
+        server.off('error', reject)
+        resolve()
+      })
+    })
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+
+    try {
+      const healthRes = await fetch(`${baseUrl}/health`)
+      expect(healthRes.status).toBe(200)
+      expect(await healthRes.json()).toEqual({ ok: true })
+
+      // 401 on wrong/missing bearer token
+      const unauthRes = await fetch(`${baseUrl}/internal/slack/handoff`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer wrong-token' },
+        body: JSON.stringify({ kind: 'slack.message' }),
+      })
+      expect(unauthRes.status).toBe(401)
+
+      // 400 unsupported_handoff_kind
+      const unsupportedRes = await fetch(`${baseUrl}/internal/slack/handoff`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer handoff-secret-token',
+        },
+        body: JSON.stringify({ kind: 'slack.unknown.v99' }),
+      })
+      expect(unsupportedRes.status).toBe(400)
+      expect(await unsupportedRes.json()).toEqual({ ok: false, error: 'unsupported_handoff_kind' })
+
+      // 200 slack.attachment-message.v1
+      const slackPayload: SlackMessageHandoff = {
+        kind: 'slack.attachment-message.v1',
+        content: 'slack file',
+        providerUserId: 'U1',
+        providerWorkspaceId: 'T1',
+        providerChannelId: 'C1',
+        providerEventId: 'slack:T1:C1:EvHttpSlack',
+        providerMessageTs: '1700.100',
+        eventKind: 'event_callback',
+        slackEventType: 'message',
+        attachments: [sampleDescriptor('F_HTTP_SLACK')],
+        providerTarget: PROVIDER_TARGET,
+      }
+      const slackRes = await fetch(`${baseUrl}/internal/slack/handoff`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer handoff-secret-token',
+        },
+        body: JSON.stringify(slackPayload),
+      })
+      expect(slackRes.status).toBe(200)
+      expect(await slackRes.json()).toEqual({ ok: true })
+
+      // 200 teams.attachment-message.v1
+      const teamsPayload: TeamsMessageHandoff = {
+        kind: 'teams.attachment-message.v1',
+        content: 'teams file',
+        providerUserId: 'teams-user-1',
+        providerWorkspaceId: 'tenant-1',
+        providerChannelId: 'a:personal-http',
+        providerConversationId: 'a:personal-http',
+        providerReplyToMessageId: 'act-http-1',
+        providerChannelType: 'personal',
+        providerEventId: 'teams:tenant-1:a:personal-http:act-http-1',
+        providerMessageId: 'act-http-1',
+        serviceUrl: 'https://smba.trafficmanager.net/amer/',
+        attachments: [
+          {
+            providerAttachmentId: 'sp-http-1',
+            filename: 'spec.pdf',
+            declaredMediaType: 'application/pdf',
+            reportedSizeBytes: 16,
+            downloadRef: {
+              provider: 'teams',
+              mode: 'file_download_info',
+              downloadUrl: 'https://contoso.sharepoint.com/spec.pdf',
+            },
+          },
+        ],
+        providerTarget: {
+          hostRef: 'test-host',
+          communicationChannelNamespace: 'channels',
+          communicationChannelName: 'teams-cc',
+        },
+      }
+      const teamsRes = await fetch(`${baseUrl}/internal/teams/handoff`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer handoff-secret-token',
+        },
+        body: JSON.stringify(teamsPayload),
+      })
+      expect(teamsRes.status).toBe(200)
+      expect(await teamsRes.json()).toEqual({ ok: true })
+
+      await reader.flushConversationQueues()
+      expect(rpc.ingestChannelAttachment).toHaveBeenCalledTimes(2)
+      expect(rpc.sendMessage).toHaveBeenCalledTimes(2)
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
   })
 })

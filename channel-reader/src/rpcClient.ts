@@ -177,6 +177,20 @@ const DEFAULT_DRAIN_RETRY_BASE_DELAY_MS = 500
 const DEFAULT_DRAIN_RETRY_MAX_DELAY_MS = 5_000
 const MAX_ATTACHMENT_META_HEADER_BYTES = 16 * 1024
 
+export class TaskResultHttpError extends Error {
+  readonly status: number
+  readonly code?: string
+
+  constructor(status: number, message: string, code?: string) {
+    super(message)
+    this.name = 'TaskResultHttpError'
+    this.status = status
+    if (code !== undefined) {
+      this.code = code
+    }
+  }
+}
+
 function isHostDrainingResponseBody(body: unknown): boolean {
   if (!body || typeof body !== 'object') return false
   const record = body as Record<string, unknown>
@@ -186,6 +200,15 @@ function isHostDrainingResponseBody(body: unknown): boolean {
     if (nested.code === 'host_draining') return true
   }
   return false
+}
+
+function isStructuredErrorMessageResponse(body: unknown): body is MessageResponse {
+  if (!body || typeof body !== 'object') return false
+  const record = body as Record<string, unknown>
+  if (record.success !== false) return false
+  if (!record.error || typeof record.error !== 'object') return false
+  const errObj = record.error as Record<string, unknown>
+  return typeof errObj.code === 'string' && errObj.code.trim().length > 0
 }
 
 /**
@@ -439,6 +462,9 @@ export class RPCClient {
                 provider: 'mcp-host',
               },
             }
+          }
+          if (isStructuredErrorMessageResponse(parsed503)) {
+            return parsed503
           }
           throw new Error(`HTTP ${response.status}: ${response.statusText}`)
         }
@@ -1025,7 +1051,22 @@ export class RPCClient {
       }
     )
     if (!response.ok) {
-      throw new Error(`Failed to get task result: ${response.status}`)
+      const body = (await response.json().catch(() => null)) as Record<string, unknown> | null
+      const code =
+        typeof body?.code === 'string'
+          ? body.code
+          : typeof body?.error === 'string'
+            ? body.error
+            : body?.error &&
+                typeof body.error === 'object' &&
+                typeof (body.error as Record<string, unknown>).code === 'string'
+              ? ((body.error as Record<string, unknown>).code as string)
+              : undefined
+      throw new TaskResultHttpError(
+        response.status,
+        `Failed to get task result: ${response.status}`,
+        code
+      )
     }
     return response.json() as Promise<MessageResponse>
   }

@@ -41,7 +41,7 @@ const TELEGRAM_MAX_LENGTH = 4096
 const TELEGRAM_CALLBACK_DEBOUNCE_MS = 2_000
 const TELEGRAM_DEFAULT_API_ROOT = 'https://api.telegram.org'
 const TELEGRAM_GET_FILE_MAX_BYTES = 20 * 1024 * 1024 // 20 MiB Telegram Bot API limit
-const TELEGRAM_DOWNLOAD_TIMEOUT_MS = 30_000
+export const TELEGRAM_DOWNLOAD_TIMEOUT_MS = 30_000
 export const TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS = 800
 export const TELEGRAM_MEDIA_GROUP_MAX_ITEMS = 10
 
@@ -753,18 +753,27 @@ export class TelegramAdapter implements ChannelAdapter {
     if (!first) return
 
     let combinedText = ''
-    let combinedEntities: TelegramEntity[] | undefined
-    let combinedCaptionEntities: TelegramEntity[] | undefined
+    const combinedEntities: TelegramEntity[] = []
+    const combinedCaptionEntities: TelegramEntity[] = []
     let replyToMessage: { from?: { id?: number } } | undefined
     const combinedAttachments: ProviderAttachmentDescriptorV1[] = []
     const coalescedMessageIds: Array<number | string> = []
 
     for (const item of entry.items) {
       coalescedMessageIds.push(item.messageId)
-      if (!combinedText && item.text) {
-        combinedText = item.text
-        combinedEntities = item.rawMessage.entities
-        combinedCaptionEntities = item.rawMessage.caption_entities
+      if (item.text) {
+        const offsetDelta = combinedText ? combinedText.length + 1 : 0
+        combinedText = combinedText ? `${combinedText}\n${item.text}` : item.text
+        if (Array.isArray(item.rawMessage.entities)) {
+          for (const entity of item.rawMessage.entities) {
+            combinedEntities.push({ ...entity, offset: entity.offset + offsetDelta })
+          }
+        }
+        if (Array.isArray(item.rawMessage.caption_entities)) {
+          for (const entity of item.rawMessage.caption_entities) {
+            combinedCaptionEntities.push({ ...entity, offset: entity.offset + offsetDelta })
+          }
+        }
       }
       if (!replyToMessage && item.rawMessage.reply_to_message) {
         replyToMessage = item.rawMessage.reply_to_message
@@ -780,8 +789,8 @@ export class TelegramAdapter implements ChannelAdapter {
       ...first.rawMessage,
       media_group_id: entry.mediaGroupId,
       coalescedMessageIds,
-      ...(combinedEntities ? { entities: combinedEntities } : {}),
-      ...(combinedCaptionEntities ? { caption_entities: combinedCaptionEntities } : {}),
+      ...(combinedEntities.length > 0 ? { entities: combinedEntities } : {}),
+      ...(combinedCaptionEntities.length > 0 ? { caption_entities: combinedCaptionEntities } : {}),
       ...(replyToMessage ? { reply_to_message: replyToMessage } : {}),
     }
 
@@ -1025,8 +1034,7 @@ export class TelegramAdapter implements ChannelAdapter {
       }
     }
 
-    const configuredMax =
-      options?.maxBytes ?? config.channelAttachmentMaxBytes ?? TELEGRAM_GET_FILE_MAX_BYTES
+    const configuredMax = options?.maxBytes ?? config.channelAttachmentMaxBytes ?? 11_534_336
     const effectiveMaxBytes = Math.min(configuredMax, TELEGRAM_GET_FILE_MAX_BYTES)
 
     if (
@@ -1059,7 +1067,28 @@ export class TelegramAdapter implements ChannelAdapter {
 
     try {
       if (snapshotBotApi && typeof snapshotBotApi.getFile === 'function') {
-        const fileInfo = (await snapshotBotApi.getFile(fileId)) as {
+        const getFileSignal = AbortSignal.timeout(TELEGRAM_DOWNLOAD_TIMEOUT_MS)
+        const getFilePromise = Promise.resolve(
+          snapshotBotApi.getFile(
+            fileId,
+            getFileSignal as Parameters<typeof snapshotBotApi.getFile>[1]
+          )
+        )
+        // Prevent unhandled rejections if getFile rejects after the timeout race settles.
+        void getFilePromise.catch(() => undefined)
+        let timeoutId: ReturnType<typeof setTimeout> | undefined
+        const fileInfo = (await Promise.race([
+          getFilePromise,
+          new Promise<never>((_resolve, reject) => {
+            timeoutId = setTimeout(() => {
+              reject(
+                new Error(`Telegram getFile timed out after ${TELEGRAM_DOWNLOAD_TIMEOUT_MS}ms`)
+              )
+            }, TELEGRAM_DOWNLOAD_TIMEOUT_MS)
+          }),
+        ]).finally(() => {
+          if (timeoutId !== undefined) clearTimeout(timeoutId)
+        })) as {
           file_path?: string
           file_size?: number
         }

@@ -61,9 +61,9 @@ function looksLikeSlackLoginHtml(bytes: Buffer): boolean {
   const head = bytes.subarray(0, 4096).toString('utf8').toLowerCase()
   return (
     head.includes('sign in to your workspace') ||
-    head.includes('/signin') ||
     head.includes('slack_signin') ||
-    (head.includes('<html') && head.includes('slack'))
+    head.includes('slack.com/signin') ||
+    (head.includes('/signin') && head.includes('slack'))
   )
 }
 
@@ -946,7 +946,7 @@ export class SlackAdapter implements ChannelAdapter {
       }
     }
 
-    const maxBytes = options?.maxBytes ?? config.channelAttachmentMaxBytes ?? 20_971_520
+    const maxBytes = options?.maxBytes ?? config.channelAttachmentMaxBytes ?? 11_534_336
     const ref = descriptor.downloadRef
 
     if (ref.isExternal === true) {

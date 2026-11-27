@@ -61,13 +61,46 @@ vi.mock('@slack/web-api', () => ({
   }),
 }))
 
+const slackStreamControl = vi.hoisted(() => ({
+  calls: [] as Array<{
+    taskId: string
+    close: ReturnType<typeof vi.fn>
+    onSuspended: (data: {
+      taskId: string
+      requestId: string
+      toolName: string
+      displayName: string
+      reason: string
+    }) => Promise<void> | void
+  }>,
+}))
+
 vi.mock('../progressClient', () => ({
-  createProgressStream: vi.fn(() => ({
-    close: vi.fn(),
-    get steps() {
-      return []
-    },
-  })),
+  createProgressStream: vi.fn(
+    (options: {
+      taskId: string
+      onSuspended: (data: {
+        taskId: string
+        requestId: string
+        toolName: string
+        displayName: string
+        reason: string
+      }) => Promise<void> | void
+    }) => {
+      const close = vi.fn()
+      slackStreamControl.calls.push({
+        taskId: options.taskId,
+        close,
+        onSuspended: options.onSuspended,
+      })
+      return {
+        close,
+        get steps() {
+          return []
+        },
+      }
+    }
+  ),
 }))
 
 vi.hoisted(() => {
@@ -118,6 +151,7 @@ function makeRpc(overrides: Partial<NonNullable<ChannelReaderOptions['rpcClient'
 
 beforeEach(() => {
   slackState.instances.length = 0
+  slackStreamControl.calls.length = 0
 })
 
 afterEach(() => {
@@ -177,6 +211,7 @@ describe('Slack inbound attachments (X7)', () => {
       threadTs: null,
       responseThreadTs: null,
       eventKind: 'event_callback',
+      slackEventType: 'app_mention',
       providerTarget: PROVIDER_TARGET,
     }
     // Replica 2 delivers `message(file_share)` (with attachments, distinct event_id Ev2)
@@ -685,6 +720,7 @@ describe('Slack inbound attachments (X7)', () => {
       threadTs: 'T1',
       responseThreadTs: null,
       eventKind: 'event_callback',
+      slackEventType: 'app_mention',
       providerTarget: PROVIDER_TARGET,
     })
     await reader.flushConversationQueues()
@@ -709,18 +745,26 @@ describe('Slack inbound attachments (X7)', () => {
     await adapter.connect({ slackBotToken: SLACK_TOKEN })
     const client = slackState.instances[0]!
 
-    let sendCount = 0
+    let resultFetchCount = 0
     const rpc = makeRpc({
       sendMessage: vi.fn(async () => ({
         success: true,
-        status: 'waiting_approval' as const,
-        approval: {
-          taskId: 'task-multi',
-          requestId: `req-${++sendCount}`,
-          userId: 'U1',
-          notification: `Approve tool #${sendCount}`,
-        },
+        status: 'pending' as const,
+        taskId: 'task-multi',
       })),
+      getTaskResult: vi.fn(async () => {
+        resultFetchCount += 1
+        return {
+          success: true,
+          status: 'waiting_approval' as const,
+          approval: {
+            taskId: 'task-multi',
+            requestId: `req-${resultFetchCount}`,
+            userId: 'U1',
+            notification: `Approve tool #${resultFetchCount}`,
+          },
+        }
+      }),
     })
 
     const reader = new ChannelReader({
@@ -729,7 +773,23 @@ describe('Slack inbound attachments (X7)', () => {
       adapters: new Map([['slack', adapter]]),
     })
 
-    // Register first pending approval directly via initial turn
+    const extractApproveValue = (callIndex: number): string => {
+      const updateArg = client.chat.update.mock.calls[callIndex]?.[0] as
+        | {
+            blocks?: Array<{ type: string; elements?: Array<{ action_id: string; value: string }> }>
+          }
+        | undefined
+      const actionsBlock = updateArg?.blocks?.find(block => block.type === 'actions')
+      const approveBtn = actionsBlock?.elements?.find(
+        el => el.action_id === 'tool_approval_approve'
+      )
+      if (!approveBtn?.value) {
+        throw new Error(`Expected approve button value in chat.update call #${callIndex}`)
+      }
+      return approveBtn.value
+    }
+
+    // Register first pending approval via real onSuspended progress stream flow
     await reader.handleSlackHandoff({
       kind: 'slack.message',
       content: 'run two tools',
@@ -741,22 +801,25 @@ describe('Slack inbound attachments (X7)', () => {
       threadTs: null,
       responseThreadTs: '1700009000.000100',
       eventKind: 'event_callback',
-      rawData: { eventType: 'message' },
+      slackEventType: 'message',
       providerTarget: PROVIDER_TARGET,
     })
     await reader.flushConversationQueues()
 
-    const pendingMap = (
-      reader as unknown as {
-        pendingApprovals: Map<string, { actionToken: string; requestId: string }>
-      }
-    ).pendingApprovals
-    const firstPending = [...pendingMap.values()][0]!
+    const stream = slackStreamControl.calls[0]!
+    await stream.onSuspended({
+      taskId: 'task-multi',
+      requestId: 'req-1',
+      toolName: 'tool_one',
+      displayName: 'Tool One',
+      reason: 'approval_required',
+    })
+    const firstApproveAction = extractApproveValue(0)
 
     // Click #1 on status bubble T_bubble
     await reader.handleSlackHandoff({
       kind: 'slack.message',
-      content: `tool:a:${firstPending.actionToken}`,
+      content: firstApproveAction,
       providerUserId: 'U1',
       providerWorkspaceId: 'T123',
       providerChannelId: 'C123',
@@ -769,38 +832,22 @@ describe('Slack inbound attachments (X7)', () => {
     })
     await reader.flushConversationQueues()
 
-    // Re-populate pending approval #2 on the same edited status bubble T_bubble
-    pendingMap.set('slack:C123:1700009000.000100:U1', {
+    // Register second pending approval via real onSuspended on the same stream & status bubble
+    const updatesBeforeSecond = client.chat.update.mock.calls.length
+    await stream.onSuspended({
       taskId: 'task-multi',
       requestId: 'req-2',
-      userId: 'U1',
-      channelType: 'slack',
-      channelId: 'C123',
-      originalMessage: {
-        channelType: 'slack',
-        channelId: 'C123',
-        sender: 'U1',
-        content: 'run two tools',
-        timestamp: new Date(),
-        messageId: '1700009000.000100',
-        threadId: '1700009000.000100',
-        providerIdentity: {
-          medium: 'slack',
-          providerUserId: 'U1',
-          providerWorkspaceId: 'T123',
-          providerChannelId: 'C123',
-          providerEventId: 'slack:T123:C123:EvInit',
-          providerTarget: PROVIDER_TARGET,
-        },
-      },
-      createdAt: new Date(),
-      actionToken: 'secondToken12345',
-    } as never)
+      toolName: 'tool_two',
+      displayName: 'Tool Two',
+      reason: 'approval_required',
+    })
+    const secondApproveAction = extractApproveValue(updatesBeforeSecond)
+    expect(secondApproveAction).not.toBe(firstApproveAction)
 
     // Click #2 on the EXACT SAME status bubble `providerMessageTs: 'T_bubble'` with distinct trigger_id
     await reader.handleSlackHandoff({
       kind: 'slack.message',
-      content: 'tool:a:secondToken12345',
+      content: secondApproveAction,
       providerUserId: 'U1',
       providerWorkspaceId: 'T123',
       providerChannelId: 'C123',
@@ -814,6 +861,292 @@ describe('Slack inbound attachments (X7)', () => {
     await reader.flushConversationQueues()
 
     expect(rpc.sendApproval).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(rpc.sendApproval).mock.calls[0]?.[1]).toBe('req-1')
+    expect(vi.mocked(rpc.sendApproval).mock.calls[1]?.[1]).toBe('req-2')
     expect(client.conversations.history).toHaveBeenCalledTimes(0)
+  })
+
+  it('T-BR02-b · gates Slack attachment hydration positively on slackEventType === app_mention', async () => {
+    const adapter = new SlackAdapter(null)
+    await adapter.connect({ slackBotToken: SLACK_TOKEN })
+    const client = slackState.instances[0]!
+
+    const rpc = makeRpc()
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      notificationDeliveryClient: null,
+      adapters: new Map([['slack', adapter]]),
+    })
+
+    // 1. Plain-text `event.type: 'message'` handoff (no files) -> 0 hydration calls, sendMessage called
+    await reader.handleSlackHandoff({
+      kind: 'slack.message',
+      content: 'hello world',
+      providerUserId: 'U123',
+      providerWorkspaceId: 'T123',
+      providerChannelId: 'C123',
+      providerEventId: 'slack:T123:C123:EvPlain',
+      providerMessageTs: '1700010001.000100',
+      threadTs: null,
+      responseThreadTs: null,
+      eventKind: 'event_callback',
+      slackEventType: 'message',
+      providerTarget: PROVIDER_TARGET,
+    })
+
+    // 2. Legacy handoff omitting `slackEventType` (no files) -> 0 hydration calls, sendMessage called
+    await reader.handleSlackHandoff({
+      kind: 'slack.message',
+      content: 'legacy plain text',
+      providerUserId: 'U123',
+      providerWorkspaceId: 'T123',
+      providerChannelId: 'C123',
+      providerEventId: 'slack:T123:C123:EvLegacy',
+      providerMessageTs: '1700010002.000100',
+      threadTs: null,
+      responseThreadTs: null,
+      eventKind: 'event_callback',
+      providerTarget: PROVIDER_TARGET,
+    })
+
+    await reader.flushConversationQueues()
+    expect(client.conversations.history).not.toHaveBeenCalled()
+    expect(client.conversations.replies).not.toHaveBeenCalled()
+    expect(rpc.sendMessage).toHaveBeenCalledTimes(2)
+    expect((vi.mocked(rpc.sendMessage).mock.calls[0] as unknown as [Message])[0].content).toBe(
+      'hello world'
+    )
+    expect((vi.mocked(rpc.sendMessage).mock.calls[1] as unknown as [Message])[0].content).toBe(
+      'legacy plain text'
+    )
+
+    // 3. Liveness witness: `slackEventType: 'app_mention'` with no files -> hydrates once
+    await reader.handleSlackHandoff({
+      kind: 'slack.message',
+      content: 'check this',
+      providerUserId: 'U123',
+      providerWorkspaceId: 'T123',
+      providerChannelId: 'C123',
+      providerEventId: 'slack:T123:C123:EvMention',
+      providerMessageTs: '1700010003.000100',
+      threadTs: null,
+      responseThreadTs: null,
+      eventKind: 'event_callback',
+      slackEventType: 'app_mention',
+      providerTarget: PROVIDER_TARGET,
+    })
+    await reader.flushConversationQueues()
+    expect(client.conversations.history).toHaveBeenCalledTimes(1)
+    expect(rpc.sendMessage).toHaveBeenCalledTimes(3)
+  })
+
+  it('T-BR14-b · accepts empty app_mention for hydration and does not poison processedProviderEvents on 0-file drop', async () => {
+    const adapter = new SlackAdapter(null)
+    await adapter.connect({ slackBotToken: SLACK_TOKEN })
+    const client = slackState.instances[0]!
+
+    const pdfBytes = Buffer.from('%PDF-1.7 mention-only')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(new Uint8Array(pdfBytes), { status: 200 }))
+    )
+
+    // Case 1: empty `app_mention` hydrates 1 file -> accepted & forwarded to mcp-host
+    client.conversations.history.mockResolvedValueOnce({
+      ok: true,
+      messages: [
+        {
+          ts: '1700020001.000100',
+          user: 'U123',
+          text: '<@U_BOT>',
+          files: [
+            {
+              id: 'F_MENTION_ONLY',
+              name: 'invoice.pdf',
+              mimetype: 'application/pdf',
+              size: pdfBytes.byteLength,
+              url_private_download:
+                'https://files.slack.com/files-pri/T123-F_MENTION_ONLY/invoice.pdf',
+            },
+          ],
+        },
+      ],
+    })
+
+    const rpc = makeRpc()
+    const reader = new ChannelReader({
+      rpcClient: rpc,
+      notificationDeliveryClient: null,
+      adapters: new Map([['slack', adapter]]),
+    })
+
+    expect(
+      await reader.handleSlackHandoff({
+        kind: 'slack.message',
+        content: '',
+        providerUserId: 'U123',
+        providerWorkspaceId: 'T123',
+        providerChannelId: 'C123',
+        providerEventId: 'slack:T123:C123:EvMentionEmpty1',
+        providerMessageTs: '1700020001.000100',
+        threadTs: null,
+        responseThreadTs: null,
+        eventKind: 'event_callback',
+        slackEventType: 'app_mention',
+        providerTarget: PROVIDER_TARGET,
+      })
+    ).toEqual({ ok: true })
+    await reader.flushConversationQueues()
+    expect(rpc.ingestChannelAttachment).toHaveBeenCalledTimes(1)
+    expect(rpc.sendMessage).toHaveBeenCalledTimes(1)
+    expect(
+      (vi.mocked(rpc.sendMessage).mock.calls[0] as unknown as [Message])[0].channelAttachmentIds
+    ).toEqual(['att-F_MENTION_ONLY'])
+
+    // Case 2: empty `app_mention` hydrates 0 files -> drops WITHOUT calling sendMessage,
+    // and MUST NOT suppress sibling `message(file_share)` for the exact same `ts`
+    client.conversations.history.mockResolvedValueOnce({
+      ok: true,
+      messages: [{ ts: '1700020002.000100', user: 'U123', text: '<@U_BOT>' }],
+    })
+
+    expect(
+      await reader.handleSlackHandoff({
+        kind: 'slack.message',
+        content: '',
+        providerUserId: 'U123',
+        providerWorkspaceId: 'T123',
+        providerChannelId: 'C123',
+        providerEventId: 'slack:T123:C123:EvMentionEmpty2',
+        providerMessageTs: '1700020002.000100',
+        threadTs: null,
+        responseThreadTs: null,
+        eventKind: 'event_callback',
+        slackEventType: 'app_mention',
+        providerTarget: PROVIDER_TARGET,
+      })
+    ).toEqual({ ok: true })
+    await reader.flushConversationQueues()
+    // Hydrated (liveness witness) and dropped without forwarding
+    expect(client.conversations.history).toHaveBeenCalledTimes(2)
+    expect(rpc.sendMessage).toHaveBeenCalledTimes(1)
+
+    // Sibling `message(file_share)` for the SAME ts `1700020002.000100` succeeds!
+    expect(
+      await reader.handleSlackHandoff({
+        kind: 'slack.attachment-message.v1',
+        content: '',
+        providerUserId: 'U123',
+        providerWorkspaceId: 'T123',
+        providerChannelId: 'C123',
+        providerEventId: 'slack:T123:C123:EvFileShareSibling',
+        providerMessageTs: '1700020002.000100',
+        threadTs: null,
+        responseThreadTs: null,
+        eventKind: 'event_callback',
+        slackEventType: 'message',
+        attachments: [
+          {
+            providerAttachmentId: 'F_SIBLING',
+            filename: 'sibling.pdf',
+            declaredMediaType: 'application/pdf',
+            reportedSizeBytes: pdfBytes.byteLength,
+            downloadRef: {
+              provider: 'slack',
+              fileId: 'F_SIBLING',
+              urlPrivateDownload: 'https://files.slack.com/files-pri/T123-F_SIBLING/sibling.pdf',
+            },
+          },
+        ],
+        providerTarget: PROVIDER_TARGET,
+      })
+    ).toEqual({ ok: true })
+    await reader.flushConversationQueues()
+    expect(rpc.ingestChannelAttachment).toHaveBeenCalledTimes(2)
+    expect(rpc.sendMessage).toHaveBeenCalledTimes(2)
+    expect(
+      (vi.mocked(rpc.sendMessage).mock.calls[1] as unknown as [Message])[0].channelAttachmentIds
+    ).toEqual(['att-F_SIBLING'])
+  })
+
+  it('T-BR22 · allows legitimate HTML files mentioning Slack while still rejecting Slack signin HTML', async () => {
+    const adapter = new SlackAdapter(null)
+    await adapter.connect({ slackBotToken: SLACK_TOKEN })
+
+    const legitHtml =
+      '<html><body><h1>Slack Metrics Q4</h1><p>Active channels: 42</p></body></html>'
+    const signinHtml =
+      '<html><body><form action="https://acme.slack.com/signin">Sign in to your workspace</form></body></html>'
+    const signinTokenHtml = '<html><body class="slack_signin">Please log in</body></html>'
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL) => {
+        const url = String(input)
+        if (url.includes('F_LEGIT_HTML')) {
+          return new Response(legitHtml, {
+            status: 200,
+            headers: { 'content-type': 'text/html; charset=utf-8' },
+          })
+        }
+        if (url.includes('F_SIGNIN_HTML')) {
+          return new Response(signinHtml, {
+            status: 200,
+            headers: { 'content-type': 'text/html; charset=utf-8' },
+          })
+        }
+        if (url.includes('F_SIGNIN_TOKEN')) {
+          return new Response(signinTokenHtml, {
+            status: 200,
+            headers: { 'content-type': 'text/html; charset=utf-8' },
+          })
+        }
+        throw new Error(`Unexpected URL: ${url}`)
+      })
+    )
+
+    const legitRes = await adapter.downloadAttachment({
+      providerAttachmentId: 'F_LEGIT_HTML',
+      filename: 'metrics.html',
+      declaredMediaType: 'text/html',
+      reportedSizeBytes: Buffer.byteLength(legitHtml),
+      downloadRef: {
+        provider: 'slack',
+        fileId: 'F_LEGIT_HTML',
+        urlPrivateDownload: 'https://files.slack.com/files-pri/T123-F_LEGIT_HTML/metrics.html',
+      },
+    })
+    expect(legitRes).toEqual({
+      ok: true,
+      bytes: Buffer.from(legitHtml),
+      filename: 'metrics.html',
+      declaredMediaType: 'text/html',
+    })
+
+    const signinRes = await adapter.downloadAttachment({
+      providerAttachmentId: 'F_SIGNIN_HTML',
+      filename: 'page.html',
+      declaredMediaType: 'text/html',
+      reportedSizeBytes: Buffer.byteLength(signinHtml),
+      downloadRef: {
+        provider: 'slack',
+        fileId: 'F_SIGNIN_HTML',
+        urlPrivateDownload: 'https://files.slack.com/files-pri/T123-F_SIGNIN_HTML/page.html',
+      },
+    })
+    expect(signinRes).toMatchObject({ ok: false, code: 'slack_files_read_scope_missing' })
+
+    const signinTokenRes = await adapter.downloadAttachment({
+      providerAttachmentId: 'F_SIGNIN_TOKEN',
+      filename: 'login.html',
+      declaredMediaType: 'text/html',
+      reportedSizeBytes: Buffer.byteLength(signinTokenHtml),
+      downloadRef: {
+        provider: 'slack',
+        fileId: 'F_SIGNIN_TOKEN',
+        urlPrivateDownload: 'https://files.slack.com/files-pri/T123-F_SIGNIN_TOKEN/login.html',
+      },
+    })
+    expect(signinTokenRes).toMatchObject({ ok: false, code: 'slack_files_read_scope_missing' })
   })
 })

@@ -19,6 +19,7 @@ export type SlackMessageHandoff = {
   threadTs?: string | null
   responseThreadTs?: string | null
   eventKind?: 'event_callback' | 'block_actions'
+  slackEventType?: 'message' | 'app_mention'
   attachments?: ProviderAttachmentDescriptorV1[]
   attachmentIngestErrors?: ChannelAttachmentIngestError[]
   providerTarget: ProviderTargetIdentity
