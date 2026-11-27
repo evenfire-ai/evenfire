@@ -84,6 +84,10 @@ type Row = {
 
 const REQUESTED_AT = '2026-11-26T10:00:05Z'
 
+// Written out rather than imported, so a change to the page's sentence fails here.
+const CANCEL_EFFECT =
+  'A running run stops at the first step boundary after its coordinator receives the signal (normally within 5 s). A step that starts before then still runs, and steps that already ran are not undone.'
+
 // Button only when the viewer may cancel, the run is non-terminal and no cancel was
 // requested; "Canceling" when non-terminal with a request; neither on a terminal run.
 const ROWS: Row[] = [
@@ -222,6 +226,14 @@ describe('WorkflowsPage cancel', () => {
     } else {
       expect(button).toBeNull()
     }
+  })
+
+  it('the Cancel tooltip says when a cancel takes effect', () => {
+    const table = renderWithLatestRun(makeRun({ viewerCanCancel: true }))
+
+    // Liveness witness: the button is found by its accessible name.
+    const button = table.getByRole('button', { name: 'Cancel run' })
+    expect(button.getAttribute('title')).toBe(`Cancel this run. ${CANCEL_EFFECT}`)
   })
 
   it('clicking Cancel calls cancelRun with the recipe and the latest run id', async () => {

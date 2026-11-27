@@ -16,6 +16,10 @@ import { formatRelativeTime } from '../lib/format'
 import { workflowStatusPillTone } from '../lib/workflowStatus'
 import type { WorkflowSummary } from '../workflows.types'
 
+// When a requested cancel takes effect, as the Cancel button's tooltip states it.
+const WORKFLOW_RUN_CANCEL_EFFECT =
+  'A running run stops at the first step boundary after its coordinator receives the signal (normally within 5 s). A step that starts before then still runs, and steps that already ran are not undone.'
+
 function workflowKey(wf: WorkflowSummary): string {
   return `${wf.namespace}/${wf.name}`
 }
@@ -81,7 +85,7 @@ function RecentRunsCell({
             loading={cancelPending}
             onClick={() => onCancel(run)}
             size="xs"
-            title="Cancel this run: the current step finishes and the next does not start"
+            title={`Cancel this run. ${WORKFLOW_RUN_CANCEL_EFFECT}`}
             variant="ghost"
           >
             Cancel
