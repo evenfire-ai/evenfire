@@ -3,7 +3,7 @@ import request from 'supertest'
 import { controlApiAnswers, controlApiRecord } from './helpers/controlApiDesktopSignInRecords.js'
 
 /**
- * The edge's part of the invitation link through OIDC (design §9): /attempts forwards a
+ * The edge's part of the invitation link through OIDC: /attempts forwards a
  * well-formed `invitationToken`, and /complete relays the `invitation_email_mismatch` refusal.
  * Every control-api answer is one control-api recorded.
  */
@@ -116,7 +116,7 @@ describe('edge relay of /oidc/profile-flow/attempts with an invitation token', (
 
   it('forwards both fields and relays the 400 when Desktop and invitation fields are combined', async () => {
     // control-api owns the rule that an attempt is for Desktop or from an invitation, never
-    // both (design §7.2); the edge relays its recorded 400.
+    // both; the edge relays its recorded 400.
     const fetchMock = controlApiAnswers(
       controlApiRecord('POST /external/oidc/profile-flow/attempts invalid')
     )

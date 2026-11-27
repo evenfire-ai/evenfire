@@ -472,7 +472,7 @@ describeRealPostgres(
     })
 
     /**
-     * Design §9: `/attempts` with the token of an invitation link. The hub is
+     * `/attempts` with the token of an invitation link. The hub is
      * the only stand-in; the route, its default hub check and bucket, the
      * context writer, the engine and member sign-in are the real ones. Every
      * statement the app runs goes through a pool whose connections start as

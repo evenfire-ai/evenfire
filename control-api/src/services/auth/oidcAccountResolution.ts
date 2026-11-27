@@ -239,14 +239,14 @@ async function invitationQualifies(
  * refused with `invitation_email_mismatch`.
  *
  * With account creation off, a matching invitation that is pending creates
- * the one account it was sent to (design §9's exception). The account gets
- * neither the new-member team nor its check: only the teams of the person's
- * pending invitations, which the sign-in applies afterwards. Whether the
- * invitation qualifies is read before the email lookup, so a password
- * acceptance of it that commits during the sign-in leads to the account that
- * acceptance created, never to `no_account`. If the invitation stops
- * qualifying while the sign-in waits on its lock, this throws
- * OidcInvitationWithdrawnError, so the caller's transaction rolls back whole.
+ * the one account it was sent to. The account gets neither the new-member
+ * team nor its check: only the teams of the person's pending invitations,
+ * which the sign-in applies afterwards. Whether the invitation qualifies is
+ * read before the email lookup, so a password acceptance of it that commits
+ * during the sign-in leads to the account that acceptance created, never to
+ * `no_account`. If the invitation stops qualifying while the sign-in waits on
+ * its lock, this throws OidcInvitationWithdrawnError, so the caller's
+ * transaction rolls back whole.
  */
 export async function resolveOidcAccount(
   db: DbTransactionClient,
@@ -385,8 +385,8 @@ export async function resolveOidcAccount(
   )
   await insertLink(db, identity, user.id)
   if (creatingInvitation !== null) {
-    // Decision 14: only the teams of the person's pending invitations, which
-    // the sign-in applies next, so an inviter grants no other team.
+    // Only the teams of the person's pending invitations, which the sign-in
+    // applies next, so an inviter grants no other team.
     return resolved(user, { account: true, link: true, byInvitation: true }, guest)
   }
   if (policy.newMemberTeamId !== null) {

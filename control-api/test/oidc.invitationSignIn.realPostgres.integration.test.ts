@@ -38,7 +38,7 @@ import './realPostgres.requirement.js'
 import { waitForDatabaseConnectionsToClose } from './realPostgresCleanup.ts'
 
 /**
- * OIDC sign-in from an invitation link (design §9): the attempt carries an
+ * OIDC sign-in from an invitation link: the attempt carries an
  * `invitation` sign-in context, and account resolution compares the
  * provider's email with the invited email before it writes any account,
  * link or membership. With account creation off, the invitation creates the
@@ -726,7 +726,7 @@ describeRealPostgres('OIDC sign-in from an invitation link on real PostgreSQL', 
       expect(outcome.status).toBe('signed_in')
       const result = signedIn(outcome)
       expect(result.created).toStrictEqual({ account: true, link: true, byInvitation: true })
-      // Decision 14: an inviter of these teams grants no other team.
+      // An inviter of these teams grants no other team.
       expect(await membershipsOf(result.userId)).toEqual(
         byTeam([
           { team_id: firstTeamId, role: 'member' },
