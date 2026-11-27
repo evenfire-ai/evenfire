@@ -49,6 +49,11 @@ export interface Config {
   attachmentMaxCount: number
   attachmentMaxBytes: number
 
+  // Inbound channel attachment ingest limits (issue #1640)
+  channelAttachmentMaxBytes: number
+  channelAttachmentMaxCount: number
+  perConversationQueueMaxDepth: number
+
   // Internal handoff endpoint used by workflow-approval-request-reader after
   // provider signature verification. Empty token disables the listener.
   channelReaderHandoffPort: number
@@ -112,6 +117,31 @@ function parseDevChannelConfig(): CommunicationChannelSpec | undefined {
   }
 }
 
+export const DEFAULT_CHANNEL_ATTACHMENT_MAX_BYTES = 11_534_336
+export const MAX_CHANNEL_ATTACHMENT_MAX_BYTES = 20_971_520
+export const DEFAULT_CHANNEL_ATTACHMENT_MAX_COUNT = 10
+export const MAX_CHANNEL_ATTACHMENT_MAX_COUNT = 10
+
+export function clampChannelAttachmentMaxBytes(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return DEFAULT_CHANNEL_ATTACHMENT_MAX_BYTES
+  }
+  const truncated = Math.trunc(value)
+  if (truncated < 1) return 1
+  if (truncated > MAX_CHANNEL_ATTACHMENT_MAX_BYTES) return MAX_CHANNEL_ATTACHMENT_MAX_BYTES
+  return truncated
+}
+
+export function clampChannelAttachmentMaxCount(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return DEFAULT_CHANNEL_ATTACHMENT_MAX_COUNT
+  }
+  const truncated = Math.trunc(value)
+  if (truncated < 1) return 1
+  if (truncated > MAX_CHANNEL_ATTACHMENT_MAX_COUNT) return MAX_CHANNEL_ATTACHMENT_MAX_COUNT
+  return truncated
+}
+
 const devMode = getEnvBool('CLERUM_DEV_MODE', false)
 
 export const config: Config = {
@@ -167,6 +197,13 @@ export const config: Config = {
   enableResponseAttachments: getEnvBool('CLERUM_ENABLE_RESPONSE_ATTACHMENTS', true),
   attachmentMaxCount: getEnvInt('CLERUM_ATTACHMENT_MAX_COUNT', 3),
   attachmentMaxBytes: getEnvInt('CLERUM_ATTACHMENT_MAX_BYTES', 52_428_800),
+  channelAttachmentMaxBytes: clampChannelAttachmentMaxBytes(
+    getEnvInt('CLERUM_CHANNEL_ATTACHMENT_MAX_BYTES', DEFAULT_CHANNEL_ATTACHMENT_MAX_BYTES)
+  ),
+  channelAttachmentMaxCount: clampChannelAttachmentMaxCount(
+    getEnvInt('CLERUM_CHANNEL_ATTACHMENT_MAX_COUNT', DEFAULT_CHANNEL_ATTACHMENT_MAX_COUNT)
+  ),
+  perConversationQueueMaxDepth: getEnvInt('CLERUM_CONVERSATION_QUEUE_MAX_DEPTH', 64),
   channelReaderHandoffPort: getEnvInt('CLERUM_CHANNEL_READER_HANDOFF_PORT', 8099),
   channelReaderHandoffToken: getEnv('CLERUM_CHANNEL_READER_HANDOFF_TOKEN', '')!,
 }

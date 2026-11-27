@@ -38,7 +38,7 @@ export function contentWithoutAddressedBotMention(message: Message): string {
   )
   if (!botUsername) return content
 
-  const mentionMatch = /^@([a-z0-9_]{3,64})\s+/i.exec(content)
+  const mentionMatch = /^@([a-z0-9_]{3,64})(?:\s+|$)/i.exec(content)
   if (mentionMatch?.[1]?.toLowerCase() === botUsername) {
     content = content.slice(mentionMatch[0].length).trim()
   }

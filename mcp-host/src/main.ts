@@ -23,6 +23,7 @@ import { createFileReferenceGfsGate } from './agent/fileReferenceGfsGate'
 import { createIncomingAdmission, replayedIncomingMessage } from './agent/incomingAdmission'
 import { INCOMING_ATTACHMENT_MAX_COUNT } from './agent/incomingAttachments'
 import { IncomingDelivery } from './agent/incomingDelivery'
+import { workflowAccessDeniedResponseForMessage } from './agent/providerWorkflowAccessGate'
 import { applySessionApprovalMode } from './agent/sessionApprovalMode'
 import {
   type SessionModelSelectionOptions,
@@ -66,7 +67,6 @@ import { FsSpilloverResolver } from './core/spillover/fsResolver'
 import { isInternalGeneratedArtifactAttachment } from './core/tools/generatedArtifactAttachments'
 import { NativeToolRegistry } from './core/tools/nativeToolRegistry'
 import { WorkflowResultTool } from './core/tools/workflow'
-import { WorkflowBrokerRequestError } from './core/tools/workflowBrokerClient.js'
 import type { Attachment } from './core/types'
 import { ConversationState } from './core/types'
 import { wireActivityEvents } from './eventWiring'
@@ -75,6 +75,10 @@ import {
   resolveGuardrailHookDescriptors,
   withResolvedHookDescriptors,
 } from './guardrailHookResolver'
+import {
+  ChannelAttachmentStore,
+  ChannelAttachmentStoreError,
+} from './internalTools/channelAttachmentStore'
 import { createGfscClient, inspectGfsToolScopes } from './internalTools/gfsClient'
 import { GfsDownloadStore } from './internalTools/gfsDownloadStore'
 import { HostWatcher, LlmHookWatcher, getHost, getLlmHook } from './k8sClient'
@@ -178,6 +182,10 @@ import {
   WorkflowApprovalNotificationClaim,
   WorkflowApprovalNotificationTerminal,
 } from './server'
+import {
+  ChannelAttachmentIngestTracker,
+  createChannelAttachmentIngestHandler,
+} from './server/channelAttachmentIngest'
 import { createSessionRouteHandlers } from './server/sessionRouteHandlers'
 import { pendingApprovalsForStatus } from './server/statusProjection'
 import { projectContextBreakdown } from './server/wireProjections'
@@ -198,6 +206,11 @@ import {
   createGovernedRunReporter,
 } from './usage/usageReporter'
 import { VISUAL_INPUT_LIMITS } from './visualInput/policy'
+import {
+  classifyAuthorizationFailureDetailed,
+  isExternalChannelType,
+  workspaceOrTargetKeyForIdentity,
+} from './workflow/channelIdentity'
 import { getOutputDir, setOutputDirHostAccessor } from './workflow/internalTools'
 import { loadPersistedWorkflowControlToken } from './workflow/mcpHostJwtState'
 import { submitProviderWorkflowApprovalDecision } from './workflow/providerWorkflowApprovalDecisionClient'
@@ -220,7 +233,10 @@ import {
 } from './workflow/runtimeAuthRefreshScheduler'
 import { type McpHostRuntimeAuth, refreshWithRecovery } from './workflow/userApprovalRequester'
 import { countSharedOutputs, resolveRpcCallerOutputDir } from './workspace/callerOutputs'
-import { resolveCallerRootBinding } from './workspace/callerRootBinding'
+import {
+  resolveCallerRootBinding,
+  resolveLinkedUserCallerRootBinding,
+} from './workspace/callerRootBinding'
 import { ScopedWorkspaceProvider } from './workspace/scopedWorkspace'
 
 // Global state
@@ -275,6 +291,10 @@ let workspaceProvider: ScopedWorkspaceProvider | null = null
 let gfsWorkspaceProvider: ScopedWorkspaceProvider | null = null
 let gfsDownloadStore: GfsDownloadStore | null = null
 let gfsRuntimeStop: (() => Promise<void>) | null = null
+let channelAttachmentStore: ChannelAttachmentStore | null = null
+const inFlightChannelAttachmentIngests = new ChannelAttachmentIngestTracker()
+let channelAttachmentSweepTimer: ReturnType<typeof setInterval> | null = null
+const CHANNEL_ATTACHMENT_SWEEP_INTERVAL_MS = 15 * 60 * 1000
 let spilloverStorage: SpilloverStorage | null = null
 let conversationStoreHandle: ConversationStoreHandle | null = null
 let promptCache: PromptCache | null = null
@@ -2164,6 +2184,46 @@ async function initializeAgent(): Promise<void> {
   // happen before agent.bootstrap() so pending_approvals can rehydrate.
   conversationStoreHandle = await initializeConversationStore()
 
+  // Issue #1640 (X3/X4) — Construct Host-owned PVC channel attachment store,
+  // clean up orphan `.partial` files from any previous crash, and schedule
+  // periodic expiry sweeps. Fails closed in `memory` sessionStoreMode.
+  const attachmentWorkspaceRoot =
+    memoryCfg?.workspacePath ?? config.memory.workspacePath ?? config.nativeTool.workspacePath
+  channelAttachmentStore = new ChannelAttachmentStore({
+    hostWorkspaceRoot: attachmentWorkspaceRoot,
+    sessionStoreMode: config.sessionStoreMode,
+    maxFileBytes: config.channelAttachmentMaxBytes,
+  })
+  agent.setChannelAttachmentStore(channelAttachmentStore)
+  agent.setPendingTaskResults(pendingTaskResults)
+  if (channelAttachmentStore.isAvailable() && conversationStoreHandle) {
+    const activeAttachmentStore = channelAttachmentStore
+    const activeConversationStore = conversationStoreHandle.store
+    await activeAttachmentStore.cleanupOrphanPartials().catch(err => {
+      logger.warn(
+        { err },
+        '[Main] Channel attachment boot orphan-partial cleanup failed (non-fatal):'
+      )
+    })
+    if (activeConversationStore.sweepExpiredChannelAttachments) {
+      const sweeper = {
+        sweepExpiredChannelAttachments:
+          activeConversationStore.sweepExpiredChannelAttachments.bind(activeConversationStore),
+      }
+      channelAttachmentSweepTimer = setInterval(() => {
+        void activeAttachmentStore
+          .sweepExpired(sweeper, { partialGraceWindowMs: 5 * 60 * 1000 })
+          .catch(err => {
+            logger.warn(
+              { err },
+              '[Main] Channel attachment periodic expiry sweep failed (non-fatal):'
+            )
+          })
+      }, CHANNEL_ATTACHMENT_SWEEP_INTERVAL_MS)
+      channelAttachmentSweepTimer.unref()
+    }
+  }
+
   // T3.1 — Session search. Requires SQLite persistence (the FTS5 index lives
   // there) AND the feature flag. In `memory` mode there is no `persistQueue`
   // so the tool/endpoint simply stay unregistered.
@@ -2314,16 +2374,122 @@ function dispatchIncomingMessage(
   return handler.execute()
 }
 
-function handleIncomingMessage(
+async function handleIncomingMessage(
   message: IncomingMessage,
   options?: { async?: boolean }
-): MessageResponse | Promise<MessageResponse> {
-  if (!messageQueue) return prepareIncomingMessage(message, options)
+): Promise<MessageResponse> {
+  // Issue #1640 (X11, R82/R88): resolve live `linkedUserId` BEFORE
+  // `incomingDelivery.run` / `messageQueue.admit` for external channel messages
+  // carrying `providerIdentity` or `channelAttachmentIds`, and stamp
+  // `admittedLinkedUserId` so `deliveryKeyOf`, `TaskRecord`, and `TaskExecutor`
+  // all bind to the verified caller identity.
+  let effectiveMessage = message
+  if (
+    isExternalChannelType(message.channelType) &&
+    (message.providerIdentity || (message.channelAttachmentIds?.length ?? 0) > 0)
+  ) {
+    const model = currentHost?.spec.model?.name || 'unknown'
+    const provider = currentHost?.spec.model?.provider ?? 'unknown'
+    const deniedText =
+      workflowAccessDeniedResponseForMessage(message) ??
+      'Could not verify this channel conversation for your Clerum account.'
+    if (!message.providerIdentity) {
+      return {
+        success: false,
+        status: 'completed',
+        response: deniedText,
+        error: {
+          code: 'CHANNEL_IDENTITY_UNRESOLVED',
+          message: deniedText,
+          retryable: false,
+          provider,
+        },
+        model,
+      }
+    }
+    const identity = message.providerIdentity
+    try {
+      const callerContext = await resolveProviderWorkflowCallerContext(
+        message,
+        key => process.env[key],
+        message.traceContext
+      )
+      const liveLinkedUserId = callerContext?.targetUserId?.trim() ?? ''
+      if (!liveLinkedUserId) {
+        await agent?.reconcileChannelIdentity({
+          medium: identity.medium,
+          workspaceOrTargetKey: workspaceOrTargetKeyForIdentity(identity),
+          providerUserId: identity.providerUserId,
+          channelScope: null,
+          liveLinkedUserId: null,
+        })
+        return {
+          success: false,
+          status: 'completed',
+          response: deniedText,
+          error: {
+            code: 'CHANNEL_IDENTITY_UNRESOLVED',
+            message: deniedText,
+            retryable: false,
+            provider,
+          },
+          model,
+        }
+      }
+      await agent?.reconcileChannelIdentity({
+        medium: identity.medium,
+        workspaceOrTargetKey: workspaceOrTargetKeyForIdentity(identity),
+        providerUserId: identity.providerUserId,
+        channelScope: null,
+        liveLinkedUserId,
+      })
+      effectiveMessage = { ...message, admittedLinkedUserId: liveLinkedUserId }
+    } catch (error) {
+      const kind = classifyAuthorizationFailureDetailed(error)
+      if (kind === 'account_unresolved' || kind === 'channel_access_denied') {
+        await agent?.reconcileChannelIdentity({
+          medium: identity.medium,
+          workspaceOrTargetKey: workspaceOrTargetKeyForIdentity(identity),
+          providerUserId: identity.providerUserId,
+          channelScope: kind === 'channel_access_denied' ? identity.providerChannelId : null,
+          liveLinkedUserId: null,
+        })
+        return {
+          success: false,
+          status: 'completed',
+          response: deniedText,
+          error: {
+            code: 'CHANNEL_IDENTITY_UNRESOLVED',
+            message: deniedText,
+            retryable: false,
+            provider,
+          },
+          model,
+        }
+      }
+      logger.warn(
+        { channelType: message.channelType, err: error },
+        '[Main] Transient error resolving external-channel sender identity before admission:'
+      )
+      return {
+        success: false,
+        error: {
+          code: 'CHANNEL_IDENTITY_CHECK_UNAVAILABLE',
+          message: 'Unable to verify sender identity right now. Please try again.',
+          retryable: true,
+          provider,
+        },
+        model,
+      }
+    }
+  }
+
+  if (!messageQueue) return prepareIncomingMessage(effectiveMessage, options)
   return incomingDelivery.run(
-    message,
+    effectiveMessage,
     messageQueue,
-    () => prepareIncomingMessage(message, options),
-    () => dispatchIncomingMessage(replayedIncomingMessage(message), options)
+    () => prepareIncomingMessage(effectiveMessage, options),
+    () => dispatchIncomingMessage(replayedIncomingMessage(effectiveMessage), options)
   )
 }
 
@@ -2356,10 +2522,14 @@ const prepareIncomingMessage = createIncomingAdmission({
   applySessionModelSelection,
   dispatch: dispatchIncomingMessage,
   getConversationManager: () => agent!.getConversationManager(),
+  onSessionRotated: sessionKey => promptCache?.drop(sessionKey),
   approvalSnapshot: () => agent!.approvalSnapshot(),
   fileReferenceGfs: fileReferenceGfsGate,
   gfsSurfaceRuntimeCapability: message => {
-    const callerRootBinding = resolveCallerRootBinding(gfsWorkspaceProvider, message)
+    const callerRootBinding =
+      isExternalChannelType(message.channelType) && message.admittedLinkedUserId
+        ? resolveLinkedUserCallerRootBinding(gfsWorkspaceProvider, message.admittedLinkedUserId)
+        : resolveCallerRootBinding(gfsWorkspaceProvider, message)
     if (callerRootBinding.failureCode) {
       logger.warn(
         {
@@ -2469,6 +2639,121 @@ async function handleTaskResult(
 
   const result = pendingTaskResults.get(taskId)
   if (result) {
+    // Issue #1640 (X11/R79): re-verify live linked identity on ALL external
+    // channel pendingTaskResults statuses (waiting_approval, completed, failed)
+    // before returning any response, attachments, or approval payload.
+    if (
+      isExternalChannelType(result.source.channelType) &&
+      (result.linkedUserId || result.providerIdentity)
+    ) {
+      const provider = currentHost?.spec.model?.provider ?? 'unknown'
+      if (!result.linkedUserId || !result.providerIdentity) {
+        pendingTaskResults.delete(taskId)
+        return {
+          success: false,
+          status: 'completed',
+          error: {
+            code: 'approval_identity_revoked',
+            message: 'Your channel account link is no longer active.',
+            retryable: false,
+            provider,
+          },
+          model: result.model,
+        }
+      }
+      const identity = result.providerIdentity
+      try {
+        const liveContext = await resolveProviderWorkflowCallerContext(
+          {
+            content: '',
+            channelType: identity.medium,
+            channelId: result.source.channelId,
+            sender: result.source.sender,
+            timestamp: new Date().toISOString(),
+            messageId: `task-result-verify-${taskId}`,
+            hostRef: identity.providerTarget?.hostRef || currentHost?.name || config.hostName,
+            providerIdentity: identity,
+          },
+          key => process.env[key]
+        )
+        const liveLinkedUserId = liveContext?.targetUserId?.trim() ?? ''
+        if (!liveLinkedUserId) {
+          pendingTaskResults.delete(taskId)
+          await agent?.reconcileChannelIdentity({
+            medium: identity.medium,
+            workspaceOrTargetKey: workspaceOrTargetKeyForIdentity(identity),
+            providerUserId: identity.providerUserId,
+            channelScope: null,
+            liveLinkedUserId: null,
+          })
+          return {
+            success: false,
+            status: 'completed',
+            error: {
+              code: 'approval_identity_revoked',
+              message: 'Your channel account link is no longer active.',
+              retryable: false,
+              provider,
+            },
+            model: result.model,
+          }
+        }
+        if (liveLinkedUserId !== result.linkedUserId) {
+          pendingTaskResults.delete(taskId)
+          await agent?.reconcileChannelIdentity({
+            medium: identity.medium,
+            workspaceOrTargetKey: workspaceOrTargetKeyForIdentity(identity),
+            providerUserId: identity.providerUserId,
+            channelScope: null,
+            liveLinkedUserId,
+          })
+          return {
+            success: false,
+            status: 'completed',
+            error: {
+              code: 'approval_identity_mismatch',
+              message: 'Your channel account link changed.',
+              retryable: false,
+              provider,
+            },
+            model: result.model,
+          }
+        }
+      } catch (error) {
+        const kind = classifyAuthorizationFailureDetailed(error)
+        if (kind === 'account_unresolved' || kind === 'channel_access_denied') {
+          pendingTaskResults.delete(taskId)
+          await agent?.reconcileChannelIdentity({
+            medium: identity.medium,
+            workspaceOrTargetKey: workspaceOrTargetKeyForIdentity(identity),
+            providerUserId: identity.providerUserId,
+            channelScope: kind === 'channel_access_denied' ? identity.providerChannelId : null,
+            liveLinkedUserId: null,
+          })
+          return {
+            success: false,
+            status: 'completed',
+            error: {
+              code: 'approval_identity_revoked',
+              message: 'Your channel account link is no longer active.',
+              retryable: false,
+              provider,
+            },
+            model: result.model,
+          }
+        }
+        // Transient broker error: keep entry intact and do not disclose body.
+        logger.warn(
+          { taskId, channelType: result.source.channelType, err: error },
+          '[Main] Transient error verifying identity for task result poll:'
+        )
+        return {
+          success: true,
+          status: 'pending',
+        }
+      }
+    }
+
     if (result.status === 'waiting_approval' && result.approval) {
       // Another tool needs approval — return notification for channel-reader
       return {
@@ -2505,6 +2790,13 @@ async function handleTaskResult(
     return response
   }
 
+  if (taskLifecycle?.getStatus(taskId) === 'cancelled') {
+    return {
+      success: false,
+      status: 'cancelled',
+    }
+  }
+
   // Task still processing or not found
   return {
     success: true,
@@ -2515,9 +2807,14 @@ async function handleTaskResult(
 /**
  * Phase 6: Handle approval/denial decisions from /approve and /deny endpoints.
  */
-async function handleApprovalDecision(
-  decision: ApprovalDecision
-): Promise<{ success: boolean; error?: string }> {
+async function handleApprovalDecision(decision: ApprovalDecision): Promise<{
+  success: boolean
+  error?: string
+  status?: number
+  cancelled?: boolean
+  retryable?: boolean
+  code?: 'denial_not_saved'
+}> {
   if (!agent) {
     return { success: false, error: 'Agent not initialized' }
   }
@@ -2576,17 +2873,6 @@ async function handleProviderWorkflowApprovalDecision(
 }
 
 /**
- * Each code is bound to the ONE status control-api emits it with. A pair that
- * does not match exactly (403 medium_account_not_found, 404
- * communication_channel_access_denied) is 'error', so a code reused later under a
- * different status with a different meaning cannot silently widen this whitelist.
- */
-const UNRESOLVED_BROKER_CODE_STATUS = new Map<string, number>([
-  ['medium_account_not_found', 404],
-  ['communication_channel_access_denied', 403],
-])
-
-/**
  * An unlinked or access-denied identity reaches us as a THROWN 404/403 from the
  * broker, not as a null context. Only these map to 'unresolved'; everything else
  * (5xx, timeouts, network failures, unrecognized codes) is 'error', which keeps
@@ -2594,16 +2880,8 @@ const UNRESOLVED_BROKER_CODE_STATUS = new Map<string, number>([
  * unlinked.
  */
 export function classifyAuthorizationFailure(error: unknown): 'unresolved' | 'error' {
-  if (error instanceof WorkflowBrokerRequestError && error.code) {
-    const expectedStatus = UNRESOLVED_BROKER_CODE_STATUS.get(error.code)
-    // `expectedStatus !== undefined` first: an unrecognized code lookup and a
-    // missing status would otherwise compare undefined === undefined and classify
-    // 'unresolved'.
-    if (expectedStatus !== undefined && expectedStatus === error.status) {
-      return 'unresolved'
-    }
-  }
-  return 'error'
+  const kind = classifyAuthorizationFailureDetailed(error)
+  return kind === 'account_unresolved' || kind === 'channel_access_denied' ? 'unresolved' : 'error'
 }
 
 export async function handleProviderMessageAuthorization(
@@ -2624,7 +2902,15 @@ export async function handleProviderMessageAuthorization(
       },
       key => process.env[key]
     )
-    if (context?.targetUserId) {
+    const liveLinkedUserId = context?.targetUserId?.trim() ?? ''
+    if (liveLinkedUserId) {
+      await agent?.reconcileChannelIdentity({
+        medium: identity.medium,
+        workspaceOrTargetKey: workspaceOrTargetKeyForIdentity(identity),
+        providerUserId: identity.providerUserId,
+        channelScope: null,
+        liveLinkedUserId,
+      })
       return { authorized: true }
     }
     // A null context is unreachable for validated Slack traffic: channel-reader's
@@ -2633,7 +2919,28 @@ export async function handleProviderMessageAuthorization(
     // reason we cannot substantiate.
     return { authorized: false, reason: 'error' }
   } catch (error) {
-    const reason = classifyAuthorizationFailure(error)
+    const detailed = classifyAuthorizationFailureDetailed(error)
+    const reason =
+      detailed === 'account_unresolved' || detailed === 'channel_access_denied'
+        ? 'unresolved'
+        : 'error'
+    if (detailed === 'account_unresolved') {
+      await agent?.reconcileChannelIdentity({
+        medium: identity.medium,
+        workspaceOrTargetKey: workspaceOrTargetKeyForIdentity(identity),
+        providerUserId: identity.providerUserId,
+        channelScope: null,
+        liveLinkedUserId: null,
+      })
+    } else if (detailed === 'channel_access_denied') {
+      await agent?.reconcileChannelIdentity({
+        medium: identity.medium,
+        workspaceOrTargetKey: workspaceOrTargetKeyForIdentity(identity),
+        providerUserId: identity.providerUserId,
+        channelScope: identity.providerChannelId,
+        liveLinkedUserId: null,
+      })
+    }
     logger.warn(
       { reason: reason, err: error },
       '[Main] Provider message authorization failed closed ():'
@@ -3109,6 +3416,39 @@ async function startRPCServer(): Promise<void> {
     )
 
   rpcServer.onMessage(handleIncomingMessage)
+  // Issue #1640 (X4) — streaming inbound channel attachment ingest route.
+  rpcServer.onChannelAttachmentIngest(
+    createChannelAttachmentIngestHandler({
+      store:
+        channelAttachmentStore ??
+        new ChannelAttachmentStore({ hostWorkspaceRoot: null, sessionStoreMode: 'memory' }),
+      insertAttachment: async row => {
+        const store = conversationStoreHandle?.store
+        if (!store?.insertChannelAttachment) {
+          throw new ChannelAttachmentStoreError(
+            'channel_attachment_store_unavailable',
+            'Durable conversation store is unavailable for channel attachments'
+          )
+        }
+        return store.insertChannelAttachment(row)
+      },
+      resolveCallerContext: msg =>
+        resolveProviderWorkflowCallerContext(msg, key => process.env[key], msg.traceContext),
+      lifecycleGate: {
+        isIntakeFenced: () => statelessHeartbeat?.isIntakeFenced() ?? false,
+        noteIntakeActivity: () => {
+          statelessHeartbeat?.noteIntakeActivity()
+        },
+        noteFencedIntake: () => {
+          statelessHeartbeat?.noteFencedIntake()
+        },
+      },
+      tracker: inFlightChannelAttachmentIngests,
+      maxBytes: config.channelAttachmentMaxBytes,
+      ttlHours: config.channelAttachmentTtlHours,
+      sessionStoreMode: config.sessionStoreMode,
+    })
+  )
   rpcServer.setArtifactSecretEntriesProvider(() => configStore?.listSecretEntries() ?? [])
   // Generated files are per user: each Desktop user lists and downloads only
   // their own folder under the Host's caller roots.
@@ -3338,7 +3678,7 @@ function startStatelessHeartbeat(): void {
     // the store's RAM cache (reconcilePinning), so the in-RAM scan cannot
     // miss an active or awaiting session.
     getConditions: () => {
-      let activeTask = false
+      let activeTask = inFlightChannelAttachmentIngests.count > 0
       let awaitingApproval = false
       for (const { conversation } of handle.store.listByPrefix('')) {
         if (
@@ -3380,7 +3720,10 @@ function startStatelessHeartbeat(): void {
         activeCronSchedules: cronScheduler !== null && cronScheduler.hasEnabledJobs(),
       }
     },
-    flushFinalCheckpoint: () => persistQueue.drain(),
+    flushFinalCheckpoint: async () => {
+      await inFlightChannelAttachmentIngests.waitForAll()
+      await persistQueue.drain()
+    },
   })
   rpcServer.setLifecycleGate(heartbeat)
   heartbeat.start()
@@ -3432,6 +3775,10 @@ async function shutdown(signal: string): Promise<void> {
     clearInterval(guardrailResolveTimer)
     guardrailResolveTimer = null
   }
+  if (channelAttachmentSweepTimer) {
+    clearInterval(channelAttachmentSweepTimer)
+    channelAttachmentSweepTimer = null
+  }
 
   if (agent) {
     await agent.stop()
@@ -3464,6 +3811,7 @@ async function shutdown(signal: string): Promise<void> {
   await pluginWorkloadSdkBootstrapServer?.stop()
   await pluginWorkloadSdkServer?.stop()
   await rpcServer?.stop()
+  await inFlightChannelAttachmentIngests.waitForAll()
 
   // T2.1 — drain pending DB writes, then terminate the SQLite worker. A
   // write that could not be persisted makes the process exit 1.
@@ -4017,6 +4365,9 @@ export const mainRpcTestSeams = {
   },
   setMessageQueue(next: MessageQueue | null): void {
     messageQueue = next
+  },
+  setTaskLifecycle(next: TaskLifecycle | null): void {
+    taskLifecycle = next
   },
   failoverEngine(): FailoverEngine | null {
     return failoverEngine

@@ -3,7 +3,7 @@ import * as path from 'node:path'
 import type { IncomingMessage } from '../server/types'
 import { isProtectedRealPath } from './protectedPaths'
 import type { ScopedWorkspaceProvider } from './scopedWorkspace'
-import { deriveUserKeyFromSource } from './userKey'
+import { deriveLinkedUserKey, deriveUserKeyFromSource } from './userKey'
 
 export interface CallerRootBinding {
   root?: string
@@ -62,9 +62,10 @@ function bindingFailureCode(error: unknown): CallerRootBinding['failureCode'] {
  * fake system identity or shared-root fallback. Unexpected programming errors
  * propagate; only concrete caller-root creation/access failures return undefined.
  */
-export function resolveCallerRootBinding(
+function resolveCallerRootBindingForKey(
   provider: ScopedWorkspaceProvider | null | undefined,
-  sourceMessage?: Pick<IncomingMessage, 'sender' | 'channelType'> | null
+  callerKey: string,
+  resolveWorkspace: (p: ScopedWorkspaceProvider) => { userRootPath: string }
 ): CallerRootBinding {
   if (!provider) return {}
   try {
@@ -73,9 +74,9 @@ export function resolveCallerRootBinding(
     const lexicalUsersRoot = path.join(lexicalHostBase, 'users')
     const canonicalUsersRoot = path.join(canonicalHostBase, 'users')
 
-    // Establish and verify the trusted parent before provider.forSource(),
-    // which get-or-creates the caller child. A redirected parent must never
-    // receive that child creation.
+    // Establish and verify the trusted parent before resolving the caller
+    // workspace (which get-or-creates the caller child). A redirected parent
+    // must never receive that child creation.
     let usersInfo: fs.Stats
     try {
       usersInfo = fs.lstatSync(lexicalUsersRoot)
@@ -92,9 +93,8 @@ export function resolveCallerRootBinding(
       return { failureCode: 'EEXIST' }
     }
 
-    const callerKey = deriveUserKeyFromSource(sourceMessage)
     const expectedLexicalCallerRoot = path.join(lexicalUsersRoot, callerKey)
-    const lexicalCallerRoot = path.resolve(provider.forSource(sourceMessage).userRootPath)
+    const lexicalCallerRoot = path.resolve(resolveWorkspace(provider).userRootPath)
     if (lexicalCallerRoot !== expectedLexicalCallerRoot) return { failureCode: 'EEXIST' }
 
     const canonicalCallerRoot = verifyManagedCallerRootPath(lexicalCallerRoot)
@@ -110,4 +110,22 @@ export function resolveCallerRootBinding(
     if (failureCode === undefined) throw error
     return { failureCode }
   }
+}
+
+export function resolveCallerRootBinding(
+  provider: ScopedWorkspaceProvider | null | undefined,
+  sourceMessage?: Pick<IncomingMessage, 'sender' | 'channelType'> | null
+): CallerRootBinding {
+  return resolveCallerRootBindingForKey(provider, deriveUserKeyFromSource(sourceMessage), p =>
+    p.forSource(sourceMessage)
+  )
+}
+
+export function resolveLinkedUserCallerRootBinding(
+  provider: ScopedWorkspaceProvider | null | undefined,
+  linkedUserId: string
+): CallerRootBinding {
+  return resolveCallerRootBindingForKey(provider, deriveLinkedUserKey(linkedUserId), p =>
+    p.forLinkedUser(linkedUserId)
+  )
 }

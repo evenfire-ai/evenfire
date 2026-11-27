@@ -148,6 +148,128 @@ export interface ProviderIdentity {
   providerTarget?: ProviderTargetIdentity
 }
 
+export type ProviderAttachmentDownloadRef =
+  | {
+      provider: 'telegram'
+      fileId: string
+      kindHint:
+        | 'photo'
+        | 'document'
+        | 'audio'
+        | 'video'
+        | 'voice'
+        | 'animation'
+        | 'video_note'
+        | 'sticker'
+    }
+  | {
+      provider: 'slack'
+      fileId: string
+      urlPrivateDownload?: string | null
+      urlPrivate?: string | null
+      fileAccess?: string | null
+      isExternal?: boolean
+    }
+  | {
+      provider: 'teams'
+      mode: 'file_download_info'
+      downloadUrl: string
+      uniqueId?: string | null
+    }
+  | {
+      provider: 'teams'
+      mode: 'inline_content'
+      contentUrl: string
+      serviceUrl: string
+    }
+
+export interface ProviderAttachmentDescriptorV1 {
+  providerAttachmentId: string
+  filename: string | null
+  declaredMediaType: string | null
+  reportedSizeBytes: number | null
+  downloadRef: ProviderAttachmentDownloadRef
+}
+
+export interface ChannelAttachmentIngestError {
+  filename: string | null
+  code: string
+  message: string
+}
+
+export interface ChannelAttachmentIngestMetadataV1 {
+  channelType: 'telegram' | 'slack' | 'teams'
+  channelId: string
+  sender: string
+  sessionThreadId?: string
+  messageId: string
+  providerIdentity: ProviderIdentity
+  providerAttachmentId: string
+  filename: string | null
+  declaredMediaType: string | null
+}
+
+export type ChannelAttachmentReceiptV1 =
+  | {
+      ok: true
+      attachmentId: string
+      fileReference: Record<string, unknown>
+      expiresAt: string
+      width?: number
+      height?: number
+      visualValid?: boolean
+      documentReadOverLimit?: boolean
+      deduplicated?: boolean
+    }
+  | {
+      ok: false
+      error: {
+        code: string
+        message: string
+        retryable: boolean
+      }
+    }
+
+/**
+ * Normalize channelId for per-conversation FIFO & session key derivation
+ * (mirrors mcp-host `normalizeSessionChannelId`). Raw `msg.channelId` remains
+ * intact for runtime ownership checks and provider reply delivery.
+ */
+export function normalizeSessionChannelId(
+  channelType: string | undefined,
+  channelId: string | undefined
+): string {
+  const raw = (channelId || '').trim()
+  if (!raw) return 'default'
+  if (channelType === 'teams') {
+    const stripped = raw.replace(/[;?&]messageid=[^;?&]+.*/i, '').trim()
+    return stripped || 'default'
+  }
+  return raw
+}
+
+export interface DownloadedChannelAttachment {
+  ok: true
+  bytes: Buffer
+  filename: string | null
+  declaredMediaType: string | null
+}
+
+export interface FailedChannelAttachmentDownload {
+  ok: false
+  code: string
+  message: string
+  retryable?: boolean
+}
+
+export type ChannelAttachmentDownloadResult =
+  | DownloadedChannelAttachment
+  | FailedChannelAttachmentDownload
+
+export interface DownloadAttachmentOptions {
+  maxBytes?: number
+}
+
 /**
  * Represents a message from any channel.
  */
@@ -158,7 +280,23 @@ export interface Message {
   content: string
   timestamp: Date
   messageId: string
+  /** Canonical session thread id sent to mcp-host (distinct from delivery reply target). */
   threadId?: string
+  /**
+   * Explicit provider delivery reply target (e.g. Slack `responseThreadTs`,
+   * Teams `providerReplyToMessageId`). `null` explicitly means top-level reply;
+   * `undefined` falls back to legacy `threadId`/`messageId` behavior.
+   */
+  replyToMessageId?: string | null
+  /** Inbound Slack `event.thread_ts` (even when `replyInThreads` is false). */
+  slackThreadTs?: string | null
+  /** Slack handoff origin (`event_callback` vs `block_actions`). */
+  slackEventKind?: 'event_callback' | 'block_actions'
+  /** Slack event type when originating from `event_callback` (`message` vs `app_mention`). */
+  slackEventType?: 'message' | 'app_mention'
+  attachments?: ProviderAttachmentDescriptorV1[]
+  channelAttachmentIds?: string[]
+  attachmentIngestErrors?: ChannelAttachmentIngestError[]
   providerIdentity?: ProviderIdentity
   rawData?: Record<string, unknown>
 }
@@ -272,6 +410,25 @@ export interface ChannelAdapter {
 
   /** Slack only: post a message visible solely to `userId`. */
   sendEphemeral?(channelId: string, userId: string, content: string): Promise<void>
+
+  /**
+   * Download raw bytes for a single inbound provider attachment descriptor
+   * using snapshotted credentials safe across CRD adapter restarts.
+   */
+  downloadAttachment?(
+    descriptor: ProviderAttachmentDescriptorV1,
+    options?: DownloadAttachmentOptions
+  ): Promise<ChannelAttachmentDownloadResult>
+
+  /**
+   * Slack only: hydrate `files[]` descriptors for a single `app_mention` event
+   * that arrived without embedded file metadata.
+   */
+  hydrateMessageAttachments?(params: {
+    channelId: string
+    messageTs: string
+    threadTs?: string | null
+  }): Promise<ProviderAttachmentDescriptorV1[]>
 }
 
 export interface AdapterCredentials {

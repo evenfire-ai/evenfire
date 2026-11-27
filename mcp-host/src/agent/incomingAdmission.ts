@@ -32,7 +32,8 @@ import {
 import { logger } from '../logger'
 import type { TaskError } from '../queue/types'
 import type { IncomingMessage, MessageResponse, SetModelResult } from '../server/types'
-import { serializeSessionKey } from '../session/types.js'
+import { normalizeSessionChannelId, resolveCanonicalSessionKey } from '../session/types.js'
+import { isExternalChannelType } from '../workflow/channelIdentity'
 import type { FileReferenceGfsAccess } from './fileReferenceGfsGate'
 import {
   type FileReferenceCheckFailure,
@@ -99,6 +100,8 @@ export interface IncomingAdmissionDeps {
   }
   /** Live session store for the first-message mode and the messaging command. */
   getConversationManager?: () => ConversationManager
+  /** Called after an external-channel session rotates on linked-identity change (BR-03). */
+  onSessionRotated?: (sessionKey: string) => void
   /**
    * Live ceiling, channel switch and approver policy. Read when a writer runs,
    * not at wiring time.
@@ -224,10 +227,13 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       return { success: false, error: validated.error }
     }
 
-    // Only images engage the image-capability gate, the revision check and the
-    // visual model selection write. A file-only message runs on any model: the
-    // model reads it through a tool, not as image input (issue #666).
-    const hasImageAttachments = Boolean(validated.attachments?.some(a => a.kind === 'image'))
+    // Only Desktop (`rpc`) inline images engage the `#654/#669` hard-refusal
+    // gate, the revision check, and the visual model selection write. Channel
+    // attachments (`channelAttachmentIds`) and non-rpc turns without Desktop
+    // inline images degrade gracefully per-attempt in `LlmPortAdapter` (`X12`),
+    // and file-only messages run on any model (issue #666).
+    const hasImageAttachments =
+      message.channelType === 'rpc' && Boolean(validated.attachments?.some(a => a.kind === 'image'))
     const acceptedAttachmentIds = validated.attachments?.map(a => a.id) ?? []
 
     /** One structured line per refusal, so an operator can tell WHY a turn was
@@ -345,18 +351,31 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
         let sessionLogId: string | undefined
         try {
           const manager = deps.getConversationManager!()
-          const key = serializeSessionKey({
-            userId: normalizedMessage.sender,
-            channelType: normalizedMessage.channelType,
-            channelId: normalizedMessage.channelId,
-            threadId: normalizedMessage.threadId,
-          })
+          const key = resolveCanonicalSessionKey(normalizedMessage)
+          const isExternalChannel = isExternalChannelType(normalizedMessage.channelType)
+          const admittedLinkedUserId = isExternalChannel
+            ? normalizedMessage.admittedLinkedUserId?.trim() || undefined
+            : undefined
+          if (admittedLinkedUserId) {
+            const rotated = await manager.getStore().rotateSessionOnIdentityChange?.({
+              sessionKey: key,
+              expectedLinkedUserId: admittedLinkedUserId,
+              endReason: 'identity_changed',
+            })
+            if (rotated?.rotated) {
+              deps.onSessionRotated?.(key)
+            }
+          }
           const { conversation } = await manager.getOrCreateDetailed(key, {
             userId: normalizedMessage.sender,
             channelType: normalizedMessage.channelType,
-            channelId: normalizedMessage.channelId,
+            channelId: normalizeSessionChannelId(
+              normalizedMessage.channelType,
+              normalizedMessage.channelId
+            ),
             threadId: normalizedMessage.threadId,
             source: normalizedMessage.channelType,
+            ...(admittedLinkedUserId ? { linkedUserId: admittedLinkedUserId } : {}),
           })
           sessionLogId = approvalLogId(conversation.id)
           const live = deps.approvalSnapshot()
@@ -544,12 +563,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
     const runHandler = (): MessageResponse | Promise<MessageResponse> => {
       if (!hasImageAttachments) return dispatchMessage()
       return (async () => {
-        const key = serializeSessionKey({
-          userId: normalizedMessage.sender,
-          channelType: normalizedMessage.channelType,
-          channelId: normalizedMessage.channelId || 'default',
-          threadId: normalizedMessage.threadId,
-        })
+        const key = resolveCanonicalSessionKey(normalizedMessage)
         const conversation = await deps.getConversationByKey(key, normalizedMessage.sender)
         // Checked again here even after the pre-write check below: this is the
         // pair the task will actually run on, on every path into the handler.
@@ -576,8 +590,8 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
       let sessionLogId: string | undefined
       try {
         const manager = deps.getConversationManager()
-        const key = serializeSessionKey({
-          userId: normalizedMessage.sender,
+        const key = resolveCanonicalSessionKey({
+          sender: normalizedMessage.sender,
           channelType: 'rpc',
           channelId: normalizedMessage.channelId,
           threadId: normalizedMessage.threadId,

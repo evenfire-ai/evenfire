@@ -41,6 +41,7 @@ export interface PromptCacheEntry {
   model?: string
   provider?: string
   toolGuidanceKey?: string
+  linkedUserId?: string
 }
 
 export interface PromptCacheObserver {

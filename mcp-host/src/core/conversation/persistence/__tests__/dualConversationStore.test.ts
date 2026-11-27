@@ -310,4 +310,131 @@ describe('DualConversationStore — dual-write parity', () => {
       await sqlite.shutdown()
     }
   })
+
+  it('BR-T8: delegates all 6 channel attachment and identity rotation methods cleanly across DualConversationStore', async () => {
+    const sqlite = makeSqliteStore({ cacheSize: 8 })
+    try {
+      const memory = new InMemoryConversationStore()
+      const dual = new DualConversationStore(memory, sqlite.store)
+      const manager = new ConversationManager(dual)
+
+      const sessionKey = 'U_DUAL:slack:C_DUAL:default'
+      const nowEpoch = 1_700_000_000
+
+      // 1) insertChannelAttachment
+      const inserted = await dual.insertChannelAttachment({
+        attachment_id: 'att-dual-1',
+        session_key: sessionKey,
+        linked_user_id: 'linked-dual-a',
+        provider_event_id: 'evt-dual-1',
+        provider_attachment_id: 'patt-dual-1',
+        storage_rel_path: '00000000-0000-4000-8000-000000000001.bin',
+        sha256: 'a'.repeat(64),
+        byte_length: 12,
+        file_reference_json: '{}',
+        width: null,
+        height: null,
+        visual_valid: 0,
+        created_at: nowEpoch,
+        expires_at: nowEpoch + 3600,
+        status: 'ready',
+      })
+      expect(inserted.deduplicated).toBe(false)
+      expect(inserted.record.attachment_id).toBe('att-dual-1')
+
+      // 2) listActiveChannelAttachments
+      const active = await dual.listActiveChannelAttachments(
+        sessionKey,
+        'linked-dual-a',
+        nowEpoch + 10
+      )
+      expect(active.map(r => r.attachment_id)).toEqual(['att-dual-1'])
+      // Cross-user isolation witness: other user sees 0 rows.
+      expect(
+        await dual.listActiveChannelAttachments(sessionKey, 'linked-dual-b', nowEpoch + 10)
+      ).toEqual([])
+
+      // 3) getChannelAttachmentForOwner
+      const fetched = await dual.getChannelAttachmentForOwner(
+        'att-dual-1',
+        sessionKey,
+        'linked-dual-a',
+        nowEpoch + 10
+      )
+      expect(fetched?.attachment_id).toBe('att-dual-1')
+      expect(
+        await dual.getChannelAttachmentForOwner(
+          'att-dual-1',
+          sessionKey,
+          'linked-dual-b',
+          nowEpoch + 10
+        )
+      ).toBeNull()
+
+      // 4) sweepExpiredChannelAttachments
+      expect(await dual.sweepExpiredChannelAttachments(nowEpoch + 100)).toEqual([])
+      const swept = await dual.sweepExpiredChannelAttachments(nowEpoch + 7200)
+      expect(swept).toEqual([
+        {
+          attachment_id: 'att-dual-1',
+          storage_rel_path: '00000000-0000-4000-8000-000000000001.bin',
+        },
+      ])
+
+      // 5) rotateSessionOnIdentityChange (rotates both memory and sqlite)
+      const convA = await manager.getOrCreate(sessionKey, {
+        userId: 'U_DUAL',
+        channelType: 'slack',
+        channelId: 'C_DUAL',
+        source: 'slack',
+        linkedUserId: 'linked-dual-a',
+      })
+      const rotated = await dual.rotateSessionOnIdentityChange({
+        sessionKey,
+        expectedLinkedUserId: 'linked-dual-b',
+        endReason: 'identity_changed',
+      })
+      expect(rotated).toEqual({ rotated: true, endedSessionId: convA.id })
+      expect(memory.get(sessionKey)).toBeUndefined()
+
+      // 6) endObsoleteApprovalSession (ends active session & clears pending approval in both stores)
+      const convB = await manager.getOrCreate(sessionKey, {
+        userId: 'U_DUAL',
+        channelType: 'slack',
+        channelId: 'C_DUAL',
+        source: 'slack',
+        linkedUserId: 'linked-dual-b',
+      })
+      await manager.startTurn(convB, 'gated', 'task-dual-b')
+      await manager.suspendForApproval(convB, {
+        request_id: 'req-dual-b',
+        tool_name: 'shell_exec',
+        tool_call_id: 'tc-dual-b',
+        parameters: {},
+        description: 'dual suspend',
+        context_snapshot: [],
+      })
+
+      // Also verify loadAllPendingApprovals preserves ownership metadata across dual overlay.
+      const pendingListings = await dual.loadAllPendingApprovals()
+      expect(pendingListings).toHaveLength(1)
+      expect(pendingListings[0]).toMatchObject({
+        sessionKey,
+        channelType: 'slack',
+        userId: 'U_DUAL',
+        channelId: 'C_DUAL',
+      })
+
+      const ended = await dual.endObsoleteApprovalSession({
+        sessionKey,
+        requestId: 'req-dual-b',
+        endReason: 'identity_revoked',
+      })
+      expect(ended).toEqual({ ended: true, sessionId: convB.id })
+      expect(memory.get(sessionKey)).toBeUndefined()
+      expect(await dual.loadAllPendingApprovals()).toEqual([])
+    } finally {
+      await sqlite.shutdown()
+    }
+  })
 })

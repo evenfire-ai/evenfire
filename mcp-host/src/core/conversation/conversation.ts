@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { ModelSelectionWriteOutcome } from '../../db/worker/protocol'
 import { logger } from '../../logger'
 import { parseSessionKey } from '../../session/types'
@@ -137,7 +138,7 @@ export class ConversationManager {
     const parsed = parseSessionKey(sessionKey)
 
     const conv: Conversation = {
-      id: `conv-${sessionKey}-${Date.now()}`,
+      id: `conv-${sessionKey}-${Date.now()}-${randomUUID()}`,
       session_key: sessionKey,
       user_id: opts?.userId ?? parsed?.userId ?? sessionKey,
       state: ConversationState.Idle,
@@ -147,6 +148,7 @@ export class ConversationManager {
       approval_mode: opts?.approvalMode ?? 'manual',
       auto_shell_grants: { wholeTool: false, commands: new Set() },
       ...(opts?.channelType !== undefined ? { channel_type: opts.channelType } : {}),
+      ...(opts?.linkedUserId != null ? { linked_user_id: opts.linkedUserId } : {}),
       created_at: new Date(),
       updated_at: new Date(),
       // #654 — a freshly inserted row carries the column default, so the RAM
@@ -315,10 +317,11 @@ export class ConversationManager {
     // A new user message starts a new task: plain session-scoped approvals end here.
     conversation.task_approved_tools?.clear()
 
-    // Materialize the auto-title (spec 15) in RAM before persisting so the
-    // dual-store projection and the durable COALESCE write agree. `??=` keeps
-    // any title already set.
-    if (autoTitle !== undefined) conversation.title ??= autoTitle
+    // Materialize the auto-title (spec 15 / issue #1640 R32) in RAM before
+    // persisting so the dual-store projection and the durable COALESCE write
+    // agree. Only apply when the conversation has no title yet (never clobber).
+    const appliedAutoTitle = conversation.title == null ? autoTitle : undefined
+    if (appliedAutoTitle !== undefined) conversation.title = appliedAutoTitle
 
     const turn: Turn = {
       number: conversation.turns.length + 1,
@@ -329,7 +332,7 @@ export class ConversationManager {
 
     conversation.turns.push(turn)
     try {
-      await Promise.resolve(this.store.persistTurnStart(conversation, userInput))
+      await Promise.resolve(this.store.persistTurnStart(conversation, userInput, appliedAutoTitle))
     } catch (err) {
       // Roll back the in-RAM mutation so the cached conversation is not left
       // poisoned in Processing — the next startTurn would otherwise throw

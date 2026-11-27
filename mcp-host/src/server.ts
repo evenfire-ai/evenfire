@@ -29,6 +29,7 @@ import {
   handleActivityRoute,
   handleActivityStreamRoute,
   handleApprovalRoute,
+  handleChannelAttachmentIngestRoute,
   handleCompactionRoute,
   handleContextBreakdownRoute,
   handleCronResultAckRoute,
@@ -61,6 +62,7 @@ import type {
   ActivityStreamHandler,
   ApprovalHandler,
   CancelHandler,
+  ChannelAttachmentIngestHandler,
   CompactionHandler,
   ContextBreakdownHandler,
   CronResultAckHandler,
@@ -121,6 +123,11 @@ export type {
   ActivityStreamCheckpointHandler,
   ActivityStreamHandler,
   ApprovalHandler,
+  ChannelAttachmentIngestError,
+  ChannelAttachmentIngestHandler,
+  ChannelAttachmentIngestMetadataV1,
+  ChannelAttachmentIngestResponse,
+  ChannelAttachmentReceiptV1,
   ProviderMessageAuthorizationHandler,
   ProviderWorkflowApprovalDecisionHandler,
   ProviderWorkflowApprovalResolveHandler,
@@ -352,6 +359,7 @@ export class RPCServer {
     null
   private providerWorkflowResultRequestHandler: ProviderWorkflowResultRequestHandler | null = null
   private providerMessageAuthorizationHandler: ProviderMessageAuthorizationHandler | null = null
+  private channelAttachmentIngestHandler: ChannelAttachmentIngestHandler | null = null
   private workflowApprovalNotificationClaimHandler: WorkflowApprovalNotificationClaimHandler | null =
     null
   private workflowApprovalNotificationTerminalHandler: WorkflowApprovalNotificationTerminalHandler | null =
@@ -417,6 +425,10 @@ export class RPCServer {
       },
     })
     this.app.use((req, res, next) => {
+      if (req.method === 'POST' && req.path === '/v1/runtime/channel-attachments/ingest') {
+        next()
+        return
+      }
       const isChatMessagePost = req.method === 'POST' && req.path === '/v1/runtime/messages'
       const parser = isChatMessagePost ? chatJsonParser : jsonParser
       parser(req, res, error => {
@@ -520,6 +532,14 @@ export class RPCServer {
         }
         this.lifecycleGate?.noteIntakeActivity()
         await handleMessageRoute(req, res, this.routeDeps())
+      }
+    )
+
+    this.app.post(
+      '/v1/runtime/channel-attachments/ingest',
+      runtimeEdgeGuard(['channel-reader']),
+      async (req, res) => {
+        await handleChannelAttachmentIngestRoute(req, res, this.routeDeps(), this.lifecycleGate)
       }
     )
 
@@ -1010,6 +1030,10 @@ export class RPCServer {
     this.providerMessageAuthorizationHandler = handler
   }
 
+  onChannelAttachmentIngest(handler: ChannelAttachmentIngestHandler): void {
+    this.channelAttachmentIngestHandler = handler
+  }
+
   onWorkflowApprovalNotificationClaim(handler: WorkflowApprovalNotificationClaimHandler): void {
     this.workflowApprovalNotificationClaimHandler = handler
   }
@@ -1134,6 +1158,7 @@ export class RPCServer {
       providerWorkflowApprovalResolveHandler: this.providerWorkflowApprovalResolveHandler,
       providerWorkflowResultRequestHandler: this.providerWorkflowResultRequestHandler,
       providerMessageAuthorizationHandler: this.providerMessageAuthorizationHandler,
+      channelAttachmentIngestHandler: this.channelAttachmentIngestHandler,
       workflowApprovalNotificationClaimHandler: this.workflowApprovalNotificationClaimHandler,
       workflowApprovalNotificationTerminalHandler: this.workflowApprovalNotificationTerminalHandler,
       workflowApprovalMediumEnrollmentHandler: this.workflowApprovalMediumEnrollmentHandler,

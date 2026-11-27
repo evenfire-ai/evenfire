@@ -25,6 +25,7 @@ export async function executeSingleTool(
     | 'progressReporter'
     | 'toolProgressInterval'
     | 'spilloverStorage'
+    | 'spilloverScope'
     | 'taskId'
     | 'visualInput'
     | 'abortSignal'
@@ -223,6 +224,12 @@ export async function executeSingleTool(
           toolName: call.name,
           content: wrappedContent,
           isError: false,
+          ...(config.spilloverScope?.linkedUserId !== undefined
+            ? { linkedUserId: config.spilloverScope.linkedUserId }
+            : {}),
+          ...(config.spilloverScope?.sessionKey !== undefined
+            ? { sessionKey: config.spilloverScope.sessionKey }
+            : {}),
         })
         if (summary) {
           finalContent = JSON.stringify(summary)

@@ -29,7 +29,11 @@ import type { IncomingMessage } from '../server/types'
 import type { Workspace } from './service'
 import { WorkspaceService } from './service'
 import type { SearchResult, WorkspaceEntry } from './types'
-import { deriveUserKeyFromSessionKey, deriveUserKeyFromSource } from './userKey'
+import {
+  deriveLinkedUserKey,
+  deriveUserKeyFromSessionKey,
+  deriveUserKeyFromSource,
+} from './userKey'
 
 const USERS_DIR = 'users'
 
@@ -281,5 +285,9 @@ export class ScopedWorkspaceProvider {
     sourceMessage?: Pick<IncomingMessage, 'sender' | 'channelType'> | null
   ): ScopedWorkspace {
     return this.forUser(deriveUserKeyFromSource(sourceMessage))
+  }
+
+  forLinkedUser(linkedUserId: string): ScopedWorkspace {
+    return this.forUser(deriveLinkedUserKey(linkedUserId))
   }
 }

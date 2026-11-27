@@ -24,11 +24,14 @@ import {
   RPCClient,
   type ShellAction,
   type ShellCardDescriptor,
+  TaskResultHttpError,
 } from './rpcClient'
 import { type TraceContextV1, mintChannelTraceContext } from './traceContext'
 import {
   Attachment,
   ChannelAdapter,
+  type ChannelAttachmentIngestError,
+  type ChannelAttachmentIngestMetadataV1,
   CommunicationChannelCRD,
   CommunicationChannelSpec,
   Message,
@@ -36,6 +39,7 @@ import {
   ProviderTargetIdentity,
   SendMessageOptions,
   TelegramProviderChatType,
+  normalizeSessionChannelId,
 } from './types'
 import { WorkflowApprovalCoordinator } from './workflowApprovalCoordinator'
 import {
@@ -95,6 +99,7 @@ interface PendingApprovalState {
    */
   alwaysApproveAllowed?: false
   startResultPollingFallback?: () => void
+  stopResultPollingFallback?: () => void
   updateStatusAfterDecision?: (content: string) => Promise<void>
 }
 
@@ -178,6 +183,7 @@ const SHELL_CARD_ONCE_NOTICE = '/approve allows this command once.'
  * events from earlier reconnect gaps.
  */
 export const CHANNEL_RESYNC_INTERVAL_MS = 60_000 // 60 seconds
+export const RESTART_QUEUE_DRAIN_TIMEOUT_MS = 10_000 // 10 seconds
 
 type ToolApprovalDecision = '/approve' | '/approve always' | '/deny'
 type ParsedToolApproval =
@@ -477,6 +483,7 @@ type ChannelReaderRpcClient = Pick<
   | 'acknowledgeCronResult'
 > & {
   authorizeProviderMessage?: RPCClient['authorizeProviderMessage']
+  ingestChannelAttachment?: RPCClient['ingestChannelAttachment']
   downloadWorkflowResultByRun?: RPCClient['downloadWorkflowResultByRun']
   confirmSlackLinkSession?: RPCClient['confirmSlackLinkSession']
   confirmTeamsLinkSession?: RPCClient['confirmTeamsLinkSession']
@@ -513,6 +520,25 @@ export class ChannelReader {
   private pendingApprovals: Map<string, PendingApprovalState> = new Map()
   /** Recently processed provider events keyed by stable provider or channel message identity. */
   private processedProviderEvents: Map<string, ProcessedProviderEvent> = new Map()
+  /**
+   * Provider events currently in flight (added synchronously before the first
+   * `await authorizeProviderMessage` and removed in `finally`) to close the
+   * concurrent webhook-retry TOCTOU window (R18).
+   */
+  private inFlightProviderEvents: Set<string> = new Set()
+  /**
+   * Bounded per-conversation FIFO queues keyed by
+   * `(channelType, normalizeSessionChannelId(channelType, channelId), sender)`
+   * so rapid follow-up text cannot overtake an in-flight attachment download+ingest (R19, R45, R55, R61).
+   */
+  private conversationQueues: Map<
+    string,
+    {
+      queue: Array<() => Promise<void>>
+      running: boolean
+      idleResolvers: Array<() => void>
+    }
+  > = new Map()
   /** Unresolved-sender notices already sent, keyed by workspace + user + channel. */
   private unresolvedNoticesSent: Map<string, { seenAt: number }> = new Map()
   /**
@@ -1016,10 +1042,45 @@ export class ChannelReader {
     return this.adapterForChannelType(source.channelType)
   }
 
+  private slackReplyInThreads(
+    providerTarget: ProviderTargetIdentity,
+    responseThreadTs: string | null
+  ): boolean {
+    const channel = this.channels.find(
+      item =>
+        item.namespace === providerTarget.communicationChannelNamespace &&
+        item.name === providerTarget.communicationChannelName
+    )
+    if (channel?.spec.slackSettings?.replyInThreads !== undefined) {
+      return channel.spec.slackSettings.replyInThreads
+    }
+    return Boolean(responseThreadTs)
+  }
+
   private slackMessageFromHandoff(handoff: SlackMessageHandoff): Message | null {
     const providerTarget = handoff.providerTarget
+    const attachments = Array.isArray(handoff.attachments) ? handoff.attachments : []
+    const handoffErrors = Array.isArray(handoff.attachmentIngestErrors)
+      ? handoff.attachmentIngestErrors
+      : Array.isArray(handoff.rawData?.attachmentIngestErrors)
+        ? (handoff.rawData?.attachmentIngestErrors as ChannelAttachmentIngestError[])
+        : []
+    const eventKind: 'event_callback' | 'block_actions' =
+      handoff.eventKind ??
+      (parseToolApprovalAction(handoff.content || '') || handoff.workflowRunId
+        ? 'block_actions'
+        : 'event_callback')
+    const slackEventType: 'message' | 'app_mention' | undefined =
+      handoff.slackEventType === 'message' || handoff.slackEventType === 'app_mention'
+        ? handoff.slackEventType
+        : undefined
+    const hasContentOrAttachments =
+      Boolean(handoff.content?.trim()) ||
+      attachments.length > 0 ||
+      handoffErrors.length > 0 ||
+      (slackEventType === 'app_mention' && eventKind === 'event_callback')
     if (
-      !handoff.content?.trim() ||
+      !hasContentOrAttachments ||
       !handoff.providerUserId?.trim() ||
       !handoff.providerWorkspaceId?.trim() ||
       !handoff.providerChannelId?.trim() ||
@@ -1032,20 +1093,43 @@ export class ChannelReader {
       return null
     }
 
-    const timestampMs = Number.parseFloat(handoff.providerMessageTs) * 1000
+    const channelId = handoff.providerChannelId.trim()
+    const messageTs = handoff.providerMessageTs.trim()
+    const inboundThreadTs = handoff.threadTs?.trim() || null
+    const responseThreadTs = handoff.responseThreadTs?.trim() || null
+    const isDm = channelId.startsWith('D')
+    const replyInThreads = this.slackReplyInThreads(providerTarget, responseThreadTs)
+
+    // Canonical sessionThreadId per C0:
+    // - Slack DM (`D...`): ALWAYS undefined (single 1:1 session even with replyInThreads: true)
+    // - Slack channel (`C...`/`G...`) with replyInThreads: false: inbound threadTs || undefined
+    // - Slack channel (`C...`/`G...`) with replyInThreads: true: inbound threadTs || responseThreadTs || messageTs
+    const sessionThreadId = isDm
+      ? undefined
+      : replyInThreads
+        ? inboundThreadTs || responseThreadTs || messageTs
+        : inboundThreadTs || undefined
+
+    const timestampMs = Number.parseFloat(messageTs) * 1000
     return {
       channelType: 'slack',
-      channelId: handoff.providerChannelId,
+      channelId,
       sender: handoff.providerUserId,
-      content: handoff.content,
+      content: handoff.content ?? '',
       timestamp: Number.isFinite(timestampMs) ? new Date(timestampMs) : new Date(),
-      messageId: handoff.providerMessageTs,
-      ...(handoff.responseThreadTs ? { threadId: handoff.responseThreadTs } : {}),
+      messageId: messageTs,
+      ...(sessionThreadId ? { threadId: sessionThreadId } : {}),
+      replyToMessageId: responseThreadTs,
+      slackThreadTs: inboundThreadTs,
+      slackEventKind: eventKind,
+      ...(slackEventType ? { slackEventType } : {}),
+      ...(attachments.length > 0 ? { attachments } : {}),
+      ...(handoffErrors.length > 0 ? { attachmentIngestErrors: handoffErrors } : {}),
       providerIdentity: {
         medium: 'slack',
         providerUserId: handoff.providerUserId,
         providerWorkspaceId: handoff.providerWorkspaceId,
-        providerChannelId: handoff.providerChannelId,
+        providerChannelId: channelId,
         providerEventId: handoff.providerEventId,
         providerTarget,
       },
@@ -1055,13 +1139,20 @@ export class ChannelReader {
 
   private teamsMessageFromHandoff(handoff: TeamsMessageHandoff): Message | null {
     const providerTarget = handoff.providerTarget
+    const attachments = Array.isArray(handoff.attachments) ? handoff.attachments : []
+    const handoffErrors = Array.isArray(handoff.attachmentIngestErrors)
+      ? handoff.attachmentIngestErrors
+      : Array.isArray(handoff.rawData?.attachmentIngestErrors)
+        ? (handoff.rawData?.attachmentIngestErrors as ChannelAttachmentIngestError[])
+        : []
+    const hasContentOrAttachments =
+      Boolean(handoff.content?.trim()) || attachments.length > 0 || handoffErrors.length > 0
     if (
-      !handoff.content?.trim() ||
+      !hasContentOrAttachments ||
       !handoff.providerUserId?.trim() ||
       !handoff.providerWorkspaceId?.trim() ||
       !handoff.providerChannelId?.trim() ||
       !handoff.providerConversationId?.trim() ||
-      !handoff.providerReplyToMessageId?.trim() ||
       !handoff.providerEventId?.trim() ||
       !handoff.providerMessageId?.trim() ||
       !handoff.serviceUrl?.trim() ||
@@ -1072,14 +1163,42 @@ export class ChannelReader {
       return null
     }
 
+    const extractConversationMessageId = (conversationId: string): string | undefined => {
+      const match = /[;?&]messageid=([^;?&]+)/i.exec(conversationId)
+      const rawId = match?.[1]?.trim()
+      if (!rawId) return undefined
+      try {
+        return decodeURIComponent(rawId).trim() || undefined
+      } catch {
+        return rawId
+      }
+    }
+
+    // Canonical sessionThreadId per C0 / X8:
+    // - channel: providerThreadRootId (or legacy `;messageid=` from conversationId, falling back to root-post providerMessageId), NEVER providerReplyToMessageId
+    // - personal / groupChat: ALWAYS undefined
+    const sessionThreadId =
+      handoff.providerChannelType === 'channel'
+        ? handoff.providerThreadRootId !== undefined
+          ? handoff.providerThreadRootId?.trim() || undefined
+          : extractConversationMessageId(handoff.providerConversationId) ||
+            handoff.providerMessageId.trim() ||
+            undefined
+        : undefined
+    const replyToMessageId =
+      handoff.providerReplyToMessageId?.trim() || handoff.providerMessageId.trim() || null
+
     return {
       channelType: 'teams',
       channelId: handoff.providerConversationId,
       sender: handoff.providerUserId,
-      content: handoff.content,
+      content: handoff.content ?? '',
       timestamp: new Date(),
       messageId: handoff.providerMessageId,
-      threadId: handoff.providerReplyToMessageId,
+      ...(sessionThreadId ? { threadId: sessionThreadId } : {}),
+      replyToMessageId,
+      ...(attachments.length > 0 ? { attachments } : {}),
+      ...(handoffErrors.length > 0 ? { attachmentIngestErrors: handoffErrors } : {}),
       providerIdentity: {
         medium: 'teams',
         providerUserId: handoff.providerUserId,
@@ -1116,11 +1235,12 @@ export class ChannelReader {
   ): Promise<void> {
     const adapter = this.adapterForMessage(message)
     if (!adapter) return
+    const replyTarget = this.replyTargetMessageId(message)
     if (!this.rpcClient.downloadWorkflowResultByRun) {
       await adapter.sendMessage(
         message.channelId,
         'Workflow result download is not available from this channel.',
-        message.threadId
+        replyTarget
       )
       return
     }
@@ -1129,7 +1249,7 @@ export class ChannelReader {
       await adapter.sendMessage(
         message.channelId,
         result.error?.message || 'Workflow result could not be downloaded.',
-        message.threadId
+        replyTarget
       )
       return
     }
@@ -1145,7 +1265,7 @@ export class ChannelReader {
             workflowRunId,
             artifactName: attachment.artifactName || attachment.filename || attachment.id,
           },
-          message.threadId
+          replyTarget
         )
         return
       }
@@ -1153,7 +1273,7 @@ export class ChannelReader {
         await adapter.sendMessage(
           message.channelId,
           'Open a direct chat with this bot to download the workflow result file.',
-          message.threadId
+          replyTarget
         )
         return
       }
@@ -1162,21 +1282,100 @@ export class ChannelReader {
     await adapter.sendMessage(
       message.channelId,
       attachments.length > 0 ? '' : result.response || 'No workflow result file is available.',
-      message.threadId,
+      replyTarget,
       attachments
     )
   }
 
+  private conversationQueueKey(msg: Message): string {
+    return `${msg.channelType}:${normalizeSessionChannelId(msg.channelType, msg.channelId)}:${msg.sender}`
+  }
+
+  private enqueueConversationMessage(msg: Message): SlackHandoffResponse {
+    const key = this.conversationQueueKey(msg)
+    const maxDepth = Math.max(1, config.perConversationQueueMaxDepth ?? 64)
+    let state = this.conversationQueues.get(key)
+    const currentDepth = state ? state.queue.length + (state.running ? 1 : 0) : 0
+    if (currentDepth >= maxDepth) {
+      console.warn(
+        `[Main] Per-conversation FIFO queue saturated for ${key} (${currentDepth}/${maxDepth})`
+      )
+      return { ok: false, status: 429, error: 'conversation_queue_saturated' }
+    }
+    if (!state) {
+      state = { queue: [], running: false, idleResolvers: [] }
+      this.conversationQueues.set(key, state)
+    }
+    state.queue.push(async () => {
+      await this.handleMessages([msg])
+    })
+    if (!state.running) {
+      void this.drainConversationQueue(key)
+    }
+    return { ok: true }
+  }
+
+  private async drainConversationQueue(key: string): Promise<void> {
+    const state = this.conversationQueues.get(key)
+    if (!state || state.running) return
+    state.running = true
+    try {
+      while (state.queue.length > 0) {
+        const job = state.queue.shift()!
+        try {
+          await job()
+        } catch (err) {
+          console.error(
+            `[Main] Unhandled error in conversation FIFO worker (${key}):`,
+            err instanceof Error ? err.message : err
+          )
+        }
+      }
+    } finally {
+      state.running = false
+      const resolvers = state.idleResolvers.splice(0, state.idleResolvers.length)
+      if (state.queue.length === 0) {
+        this.conversationQueues.delete(key)
+      }
+      for (const resolve of resolvers) {
+        resolve()
+      }
+      if (state.queue.length > 0 && !this.conversationQueues.has(key)) {
+        this.conversationQueues.set(key, state)
+        void this.drainConversationQueue(key)
+      }
+    }
+  }
+
+  /**
+   * Wait until all queued per-conversation FIFO workers have drained.
+   */
+  async flushConversationQueues(): Promise<void> {
+    while (this.conversationQueues.size > 0) {
+      const waits: Promise<void>[] = []
+      for (const state of this.conversationQueues.values()) {
+        if (state.running || state.queue.length > 0) {
+          waits.push(
+            new Promise<void>(resolve => {
+              state.idleResolvers.push(resolve)
+            })
+          )
+        }
+      }
+      if (waits.length === 0) break
+      await Promise.all(waits)
+    }
+  }
+
   async handleSlackHandoff(request: SlackHandoffRequest): Promise<SlackHandoffResponse> {
-    if (request.kind === 'slack.message') {
+    if (request.kind === 'slack.message' || request.kind === 'slack.attachment-message.v1') {
       const message = this.slackMessageFromHandoff(request)
       if (!message) return { ok: false, status: 400, error: 'invalid_slack_message_handoff' }
       if (request.workflowRunId) {
         await this.deliverProviderWorkflowResult(message, request.workflowRunId)
-      } else {
-        await this.handleMessages([message])
+        return { ok: true }
       }
-      return { ok: true }
+      return this.enqueueConversationMessage(message)
     }
 
     if (request.kind === 'slack.enrollment') {
@@ -1187,7 +1386,7 @@ export class ChannelReader {
   }
 
   async handleTeamsHandoff(request: TeamsHandoffRequest): Promise<SlackHandoffResponse> {
-    if (request.kind === 'teams.message') {
+    if (request.kind === 'teams.message' || request.kind === 'teams.attachment-message.v1') {
       const message = this.teamsMessageFromHandoff(request)
       if (!message) return { ok: false, status: 400, error: 'invalid_teams_message_handoff' }
       this.rememberTeamsConversation(
@@ -1197,10 +1396,9 @@ export class ChannelReader {
       )
       if (request.workflowRunId) {
         await this.deliverProviderWorkflowResult(message, request.workflowRunId)
-      } else {
-        await this.handleMessages([message])
+        return { ok: true }
       }
-      return { ok: true }
+      return this.enqueueConversationMessage(message)
     }
 
     if (request.kind === 'teams.file-consent') {
@@ -1639,83 +1837,327 @@ export class ChannelReader {
       console.log('-'.repeat(50))
 
       const providerEventKey = this.providerEventDedupeKey(msg)
-      if (providerEventKey && this.processedProviderEvents.has(providerEventKey)) {
+      if (
+        providerEventKey &&
+        (this.processedProviderEvents.has(providerEventKey) ||
+          this.inFlightProviderEvents.has(providerEventKey))
+      ) {
         console.warn(`[Main] Duplicate provider message ignored: ${providerEventKey}`)
         continue
       }
-      if (msg.providerIdentity && this.rpcClient.authorizeProviderMessage) {
-        const authorization = await this.rpcClient.authorizeProviderMessage(msg.providerIdentity)
-        if (!authorization.authorized) {
+      if (providerEventKey) {
+        this.inFlightProviderEvents.add(providerEventKey)
+      }
+
+      try {
+        if (msg.providerIdentity && this.rpcClient.authorizeProviderMessage) {
+          const authorization = await this.rpcClient.authorizeProviderMessage(msg.providerIdentity)
+          if (!authorization.authorized) {
+            // Strictly gate processedProviderEvents caching on `reason === 'unresolved'`
+            // so transient `'error'` / `undefined` failures never suppress retries (R81).
+            if (authorization.reason === 'unresolved') {
+              if (providerEventKey) {
+                this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
+              }
+              this.clearPendingApprovalForSender(msg)
+              await this.sendUnresolvedSenderNotice(msg)
+            }
+            console.warn(
+              `[Main] Ignoring unauthorized ${msg.channelType} message from ${msg.sender} in ${msg.channelId}`
+            )
+            continue
+          }
+        }
+
+        const traceContext = mintChannelTraceContext(msg)
+
+        // Check if this is an approval/denial command
+        const runtimeContent = contentWithoutAddressedBotMention(msg)
+        let runtimeMsg: Message =
+          runtimeContent === msg.content ? msg : { ...msg, content: runtimeContent }
+        const trimmed = runtimeContent.trim().toLowerCase()
+        const toolApprovalAction = parseToolApprovalAction(runtimeContent)
+        if (toolApprovalAction && 'rejected' in toolApprovalAction) {
           if (providerEventKey) {
             this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
           }
-          console.warn(
-            `[Main] Ignoring unauthorized ${msg.channelType} message from ${msg.sender} in ${msg.channelId}`
+          await this.sendReply(msg, 'That approval choice is not supported.')
+          continue
+        }
+        if (toolApprovalAction) {
+          if (providerEventKey) {
+            this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
+          }
+          await this.handleApprovalCommand(
+            msg,
+            toolApprovalAction.command,
+            toolApprovalAction.actionToken,
+            toolApprovalAction.shellAction
           )
-          if (authorization.reason === 'unresolved') {
-            await this.sendUnresolvedSenderNotice(msg)
+          continue
+        }
+        const workflowApprovalCallback = parseWorkflowApprovalDecisionCallback(msg)
+        if (workflowApprovalCallback) {
+          if (providerEventKey) {
+            this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
+          }
+          await this.workflowApprovalCoordinator.handleDecisionCallback(
+            msg,
+            workflowApprovalCallback
+          )
+          continue
+        }
+        const workflowApprovalDecision = parseWorkflowApprovalDecisionCommand(msg)
+        if (workflowApprovalDecision) {
+          if (providerEventKey) {
+            this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
+          }
+          await this.workflowApprovalCoordinator.handleDecisionCommand(
+            msg,
+            workflowApprovalDecision
+          )
+          continue
+        }
+        if (
+          trimmed === '/approve' ||
+          trimmed === '/approve always' ||
+          trimmed === '/deny' ||
+          trimmed === '\\approve' ||
+          trimmed === '\\approve always' ||
+          trimmed === '\\deny'
+        ) {
+          if (providerEventKey) {
+            this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
+          }
+          await this.handleApprovalCommand(msg, trimmed.replace(/^\\/, '/') as ToolApprovalDecision)
+          continue
+        }
+
+        const adapter = this.adapterForMessage(msg)
+
+        // Slack `event_callback` `app_mention` may arrive before `message(file_share)`
+        // with zero embedded files; hydrate single-message `files[]` once after auth (R9/R56/BR-02).
+        const slackEventType =
+          msg.slackEventType ??
+          (typeof msg.rawData?.slackEventType === 'string'
+            ? msg.rawData.slackEventType
+            : typeof msg.rawData?.eventType === 'string'
+              ? msg.rawData.eventType
+              : typeof msg.rawData?.type === 'string'
+                ? msg.rawData.type
+                : undefined)
+        const shouldHydrateSlackAttachments =
+          msg.channelType === 'slack' &&
+          msg.slackEventKind === 'event_callback' &&
+          (!runtimeMsg.attachments || runtimeMsg.attachments.length === 0) &&
+          slackEventType === 'app_mention' &&
+          Boolean(adapter?.hydrateMessageAttachments)
+        if (shouldHydrateSlackAttachments && adapter?.hydrateMessageAttachments) {
+          const hydrated = await adapter.hydrateMessageAttachments({
+            channelId: msg.channelId,
+            messageTs: msg.messageId,
+            threadTs: msg.slackThreadTs ?? null,
+          })
+          if (hydrated.length > 0) {
+            runtimeMsg = { ...runtimeMsg, attachments: hydrated }
+          }
+        }
+
+        // Download & stream inbound provider attachments ONLY AFTER authorization succeeds (R17).
+        const descriptors = runtimeMsg.attachments ?? []
+        const attachmentIngestErrors: ChannelAttachmentIngestError[] = [
+          ...(runtimeMsg.attachmentIngestErrors ?? []),
+        ]
+        const channelAttachmentIds: string[] = [...(runtimeMsg.channelAttachmentIds ?? [])]
+
+        const maxCount = Math.min(
+          10,
+          Math.max(1, Math.trunc(config.channelAttachmentMaxCount ?? 10))
+        )
+        const totalAttachmentCount = descriptors.length + attachmentIngestErrors.length
+        if (totalAttachmentCount > maxCount) {
+          if (providerEventKey) {
+            this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
+          }
+          await this.sendReply(
+            msg,
+            `Too many attachments (${totalAttachmentCount}). At most ${maxCount} files can be attached per message (too_many_attachments).`
+          )
+          continue
+        }
+
+        let abortedDueToUpgradeOrDrain = false
+        if (descriptors.length > 0) {
+          if (
+            msg.channelType === 'email' ||
+            !adapter?.downloadAttachment ||
+            !this.rpcClient.ingestChannelAttachment ||
+            !msg.providerIdentity
+          ) {
+            for (const descriptor of descriptors) {
+              attachmentIngestErrors.push({
+                filename: descriptor.filename,
+                code: 'channel_attachment_ingest_unavailable',
+                message: 'Inbound attachment ingest is not available for this channel.',
+              })
+            }
+          } else {
+            for (const descriptor of descriptors) {
+              const downloaded = await adapter.downloadAttachment(descriptor, {
+                maxBytes: config.channelAttachmentMaxBytes,
+              })
+              if (!downloaded.ok) {
+                attachmentIngestErrors.push({
+                  filename: descriptor.filename,
+                  code: downloaded.code,
+                  message: downloaded.message,
+                })
+                continue
+              }
+
+              const ingestMeta: ChannelAttachmentIngestMetadataV1 = {
+                channelType: msg.channelType,
+                channelId: msg.channelId,
+                sender: msg.sender,
+                ...(msg.threadId ? { sessionThreadId: msg.threadId } : {}),
+                messageId: msg.messageId,
+                providerIdentity: msg.providerIdentity,
+                providerAttachmentId: descriptor.providerAttachmentId,
+                filename: downloaded.filename ?? descriptor.filename,
+                declaredMediaType: downloaded.declaredMediaType ?? descriptor.declaredMediaType,
+              }
+              const receipt = await this.rpcClient.ingestChannelAttachment(
+                ingestMeta,
+                downloaded.bytes
+              )
+              if (receipt.ok) {
+                channelAttachmentIds.push(receipt.attachmentId)
+                continue
+              }
+
+              // Rolling upgrade fail-closed: NEVER dispatch caption without attachments (R69).
+              if (receipt.error.code === 'host_attachment_ingest_unsupported') {
+                await this.sendReply(
+                  msg,
+                  'Attachment upload is temporarily unavailable while the assistant host is upgrading (host_attachment_ingest_unsupported). Please resend your message with attachments shortly.'
+                )
+                abortedDueToUpgradeOrDrain = true
+                break
+              }
+
+              // Exhausted 503 host_draining retries: surface retryable notice & do NOT cache dedupe (R21/R65).
+              if (receipt.error.code === 'host_draining') {
+                await this.sendReply(
+                  msg,
+                  'The assistant host is restarting and could not accept your attachment right now. Please try again in a moment.'
+                )
+                abortedDueToUpgradeOrDrain = true
+                break
+              }
+
+              attachmentIngestErrors.push({
+                filename: descriptor.filename,
+                code: receipt.error.code,
+                message: receipt.error.message,
+              })
+            }
+          }
+        }
+
+        if (abortedDueToUpgradeOrDrain) {
+          continue
+        }
+
+        const boundedAttachmentIngestErrors =
+          attachmentIngestErrors.length > maxCount
+            ? attachmentIngestErrors.slice(0, maxCount)
+            : attachmentIngestErrors
+        if (channelAttachmentIds.length > 0 || boundedAttachmentIngestErrors.length > 0) {
+          runtimeMsg = {
+            ...runtimeMsg,
+            ...(channelAttachmentIds.length > 0 ? { channelAttachmentIds } : {}),
+            ...(boundedAttachmentIngestErrors.length > 0
+              ? { attachmentIngestErrors: boundedAttachmentIngestErrors }
+              : {}),
+          }
+        }
+
+        // Reject completely empty non-attachment messages after mention stripping.
+        if (
+          !runtimeMsg.content.trim() &&
+          descriptors.length === 0 &&
+          channelAttachmentIds.length === 0 &&
+          boundedAttachmentIngestErrors.length === 0
+        ) {
+          // When Slack `app_mention` hydration found 0 files on an attachment-only
+          // mention, do NOT record `providerEventKey` so the sibling `message(file_share)`
+          // for the same `ts` is not suppressed (BR-14 / V2).
+          if (providerEventKey && !shouldHydrateSlackAttachments) {
+            this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
           }
           continue
         }
-      }
 
-      const traceContext = mintChannelTraceContext(msg)
-      if (providerEventKey) {
-        this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
-      }
+        // Forward to mcp-host
+        console.log('[Main] Forwarding message to mcp-host...')
 
-      // Check if this is an approval/denial command
-      const runtimeContent = contentWithoutAddressedBotMention(msg)
-      const runtimeMsg = runtimeContent === msg.content ? msg : { ...msg, content: runtimeContent }
-      const trimmed = runtimeContent.trim().toLowerCase()
-      const toolApprovalAction = parseToolApprovalAction(runtimeContent)
-      if (toolApprovalAction && 'rejected' in toolApprovalAction) {
-        await this.sendReply(msg, 'That approval choice is not supported.')
-        continue
-      }
-      if (toolApprovalAction) {
-        await this.handleApprovalCommand(
-          msg,
-          toolApprovalAction.command,
-          toolApprovalAction.actionToken,
-          toolApprovalAction.shellAction
-        )
-        continue
-      }
-      const workflowApprovalCallback = parseWorkflowApprovalDecisionCallback(msg)
-      if (workflowApprovalCallback) {
-        await this.workflowApprovalCoordinator.handleDecisionCallback(msg, workflowApprovalCallback)
-        continue
-      }
-      const workflowApprovalDecision = parseWorkflowApprovalDecisionCommand(msg)
-      if (workflowApprovalDecision) {
-        await this.workflowApprovalCoordinator.handleDecisionCommand(msg, workflowApprovalDecision)
-        continue
-      }
-      if (
-        trimmed === '/approve' ||
-        trimmed === '/approve always' ||
-        trimmed === '/deny' ||
-        trimmed === '\\approve' ||
-        trimmed === '\\approve always' ||
-        trimmed === '\\deny'
-      ) {
-        await this.handleApprovalCommand(msg, trimmed.replace(/^\\/, '/') as ToolApprovalDecision)
-        continue
-      }
-
-      // Forward to mcp-host
-      console.log('[Main] Forwarding message to mcp-host...')
-
-      const adapter = this.adapterForMessage(msg)
-      if (adapter && msg.channelType !== 'email') {
-        // Telegram, Slack, and Teams: use async progress flow with edit-in-place
-        try {
-          await this.handleMessageWithProgress(runtimeMsg, adapter, traceContext)
-        } catch (err) {
-          console.error(`[Main] Progress flow failed, falling back:`, err)
-          // Fall back to synchronous
+        let suppressPermanentDedupe = false
+        if (adapter && msg.channelType !== 'email') {
+          // Telegram, Slack, and Teams: use async progress flow with edit-in-place
+          try {
+            const outcome = await this.handleMessageWithProgress(runtimeMsg, adapter, traceContext)
+            if (outcome === 'retryable_error') {
+              suppressPermanentDedupe = true
+            }
+          } catch (err) {
+            console.error(`[Main] Progress flow failed, falling back:`, err)
+            // Fall back to synchronous
+            const response = await this.rpcClient.sendMessage(runtimeMsg, { traceContext })
+            if (response.success && response.status === 'waiting_approval' && response.approval) {
+              const { taskId, requestId, userId } = response.approval
+              console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${requestId})`)
+              const approvalKey = this.pendingApprovalKey(msg)
+              const actionToken = newToolApprovalActionToken()
+              this.pendingApprovals.set(approvalKey, {
+                taskId,
+                requestId,
+                userId,
+                channelType: msg.channelType,
+                channelId: msg.channelId,
+                originalMessage: msg,
+                createdAt: new Date(),
+                actionToken,
+                ...lastingGrantState(response.approval),
+              })
+              const prompt = renderedApprovalPrompt(msg.channelType, response.approval, actionToken)
+              await this.sendReply(msg, prompt.notification, undefined, prompt.options)
+            } else if (response.success && response.response) {
+              console.log('[Main] mcp-host response:')
+              console.log(`[Main]   Model: ${response.model}`)
+              console.log(
+                `[Main]   Response: ${response.response.substring(0, 200)}${response.response.length > 200 ? '...' : ''}`
+              )
+              if (response.usage) {
+                console.log(`[Main]   Tokens: ${response.usage.totalTokens}`)
+              }
+              await this.sendReply(msg, response.response, response.attachments)
+            } else {
+              console.error(
+                `[Main] Failed to process message: ${response.error?.message ?? 'unknown error'}`
+              )
+              if (response.error?.retryable) {
+                suppressPermanentDedupe = true
+                await this.sendReply(
+                  msg,
+                  `Unable to reach the assistant right now (${response.error.message || 'temporary error'}). Please try again shortly.`
+                )
+              }
+            }
+          }
+        } else {
+          // Email (or adapterless unit test): synchronous flow
           const response = await this.rpcClient.sendMessage(runtimeMsg, { traceContext })
+
           if (response.success && response.status === 'waiting_approval' && response.approval) {
             const { taskId, requestId, userId } = response.approval
             console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${requestId})`)
@@ -1748,50 +2190,40 @@ export class ChannelReader {
             console.error(
               `[Main] Failed to process message: ${response.error?.message ?? 'unknown error'}`
             )
+            if (response.error?.retryable) {
+              suppressPermanentDedupe = true
+            }
           }
         }
-      } else {
-        // Email: existing synchronous flow
-        const response = await this.rpcClient.sendMessage(runtimeMsg, { traceContext })
 
-        if (response.success && response.status === 'waiting_approval' && response.approval) {
-          const { taskId, requestId, userId } = response.approval
-          console.log(`[Main] Tool approval needed (task: ${taskId}, request: ${requestId})`)
-          const approvalKey = this.pendingApprovalKey(msg)
-          const actionToken = newToolApprovalActionToken()
-          this.pendingApprovals.set(approvalKey, {
-            taskId,
-            requestId,
-            userId,
-            channelType: msg.channelType,
-            channelId: msg.channelId,
-            originalMessage: msg,
-            createdAt: new Date(),
-            actionToken,
-            ...lastingGrantState(response.approval),
-          })
-          const prompt = renderedApprovalPrompt(msg.channelType, response.approval, actionToken)
-          await this.sendReply(msg, prompt.notification, undefined, prompt.options)
-        } else if (response.success && response.response) {
-          console.log('[Main] mcp-host response:')
-          console.log(`[Main]   Model: ${response.model}`)
-          console.log(
-            `[Main]   Response: ${response.response.substring(0, 200)}${response.response.length > 200 ? '...' : ''}`
-          )
-          if (response.usage) {
-            console.log(`[Main]   Tokens: ${response.usage.totalTokens}`)
-          }
-          await this.sendReply(msg, response.response, response.attachments)
-        } else {
-          console.error(
-            `[Main] Failed to process message: ${response.error?.message ?? 'unknown error'}`
-          )
+        if (providerEventKey && !suppressPermanentDedupe) {
+          this.processedProviderEvents.set(providerEventKey, { seenAt: Date.now() })
+        }
+      } finally {
+        if (providerEventKey) {
+          this.inFlightProviderEvents.delete(providerEventKey)
         }
       }
     }
   }
 
   private providerEventDedupeKey(msg: Message): string | null {
+    // Canonical Slack `event_callback` identity deduplicates `app_mention` and
+    // `message(file_share)` for the same message `ts` across webhook replicas,
+    // while keeping per-click `providerEventId` for `block_actions` (R9, R59).
+    if (
+      msg.channelType === 'slack' &&
+      msg.slackEventKind === 'event_callback' &&
+      msg.providerIdentity?.providerWorkspaceId?.trim() &&
+      msg.messageId?.trim()
+    ) {
+      const workspaceId = msg.providerIdentity.providerWorkspaceId.trim()
+      const channelId = (msg.providerIdentity.providerChannelId || msg.channelId || '').trim()
+      if (channelId) {
+        return `provider:slack:${workspaceId}:${channelId}:${msg.messageId.trim()}`
+      }
+    }
+
     const providerEventId = msg.providerIdentity?.providerEventId?.trim()
     if (providerEventId) {
       return `provider:${providerEventId}`
@@ -1870,17 +2302,11 @@ export class ChannelReader {
     }
     try {
       if (msg.channelType === 'teams') {
-        // TeamsAdapter has no ephemeral concept, so the notice is a normal message.
-        // Thread it under the triggering message so an unconnected user does not
-        // produce a top-level post in a shared channel.
-        //
-        // The reply target is the thread ROOT, the same target replyTargetMessageId
-        // picks for every other Teams reply. threadId is the root activity id
-        // (providerReplyToMessageId) and messageId is the leaf activity that just
-        // arrived; replying to the leaf does not attach the notice to the
-        // conversation, which is the whole mitigation here. The fallback is for a
-        // direct chat, which has no separate root.
-        await adapter.sendMessage(channelId, content, msg.threadId || msg.messageId)
+        await adapter.sendMessage(
+          channelId,
+          content,
+          msg.replyToMessageId || msg.threadId || msg.messageId
+        )
       } else if (msg.channelType === 'telegram') {
         // No reply id: the spec fixes this as sendMessage(channelId, content) for
         // Telegram, with no threading. Group and supergroup chats do have a
@@ -1947,15 +2373,32 @@ export class ChannelReader {
         pending.taskId === taskId &&
         this.pendingApprovalChannelScope(pending.originalMessage) === channelScope
       ) {
+        pending.stopResultPollingFallback?.()
+        this.pendingApprovals.delete(key)
+      }
+    }
+  }
+
+  private clearPendingApprovalForSender(msg: Message): void {
+    const channelScope = this.pendingApprovalChannelScope(msg)
+    for (const [key, pending] of this.pendingApprovals) {
+      if (
+        pending.originalMessage.sender === msg.sender &&
+        this.pendingApprovalChannelScope(pending.originalMessage) === channelScope
+      ) {
+        pending.stopResultPollingFallback?.()
         this.pendingApprovals.delete(key)
       }
     }
   }
 
   private replyTargetMessageId(msg: Message): string | undefined {
-    if (msg.channelType === 'slack') return msg.threadId
+    if (msg.channelType === 'slack') {
+      return msg.replyToMessageId !== undefined ? msg.replyToMessageId || undefined : msg.threadId
+    }
     if (msg.channelType === 'teams') {
-      return this.teamsReplyInThreads(msg) ? msg.threadId || msg.messageId : undefined
+      if (!this.teamsReplyInThreads(msg)) return undefined
+      return msg.replyToMessageId || msg.threadId || msg.messageId
     }
     return msg.messageId
   }
@@ -2012,7 +2455,7 @@ export class ChannelReader {
     msg: Message,
     adapter: ChannelAdapter,
     traceContext: TraceContextV1
-  ): Promise<void> {
+  ): Promise<'ok' | 'retryable_error'> {
     // 1. Send message with async=true
     const response = await this.rpcClient.sendMessage(msg, { async: true, traceContext })
 
@@ -2042,8 +2485,15 @@ export class ChannelReader {
         console.error(
           `[Main] Failed to process message: ${response.error?.message ?? 'unknown error'}`
         )
+        const replyText = response.error.retryable
+          ? `Unable to process your request right now (${response.error.message || 'temporary error'}). Please try again shortly.`
+          : `Error: ${response.error.message || 'Unable to process your request.'}`
+        await this.sendReply(msg, replyText)
+        if (response.error.retryable) {
+          return 'retryable_error'
+        }
       }
-      return
+      return 'ok'
     }
 
     const taskId = response.taskId
@@ -2059,7 +2509,7 @@ export class ChannelReader {
 
     if (!statusMessageId) {
       console.log('[Main] No messageId returned from initial status message; cannot edit-in-place')
-      return
+      return 'ok'
     }
 
     // 3. Open SSE stream and wire callbacks. The stream stays open until terminal.
@@ -2104,7 +2554,12 @@ export class ChannelReader {
       let finalDelivered = false
       let finalDeliveryInFlight: Promise<boolean> | null = null
       let resultPollingFallbackStarted = false
+      let resultPollingCancelled = false
       let approvalPromptDelivered = false
+
+      const stopResultPollingFallback = () => {
+        resultPollingCancelled = true
+      }
 
       const deliverApprovalPrompt = async (params: {
         requestId: string
@@ -2137,6 +2592,7 @@ export class ChannelReader {
           actionToken,
           ...lastingGrantState(params),
           startResultPollingFallback,
+          stopResultPollingFallback,
           updateStatusAfterDecision: content => {
             acceptProgressUpdates = true
             return editStatus(content)
@@ -2176,6 +2632,13 @@ export class ChannelReader {
           }
           if (result.status === 'pending' || result.status === 'waiting_approval') {
             return false
+          }
+          if (result.status === 'cancelled' || (result.success === false && !result.error)) {
+            acceptProgressUpdates = false
+            finalDelivered = true
+            stopResultPollingFallback()
+            this.clearPendingApprovalForTask(msg, taskId)
+            return true
           }
           acceptProgressUpdates = false
 
@@ -2240,15 +2703,27 @@ export class ChannelReader {
         }
       }
 
+      const isRevokedOrMissingTaskError = (err: unknown): boolean =>
+        err instanceof TaskResultHttpError && (err.status === 403 || err.status === 404)
+
+      const abortRevokedTask = (): void => {
+        acceptProgressUpdates = false
+        finalDelivered = true
+        stopResultPollingFallback()
+        this.clearPendingApprovalForTask(msg, taskId)
+        stream.close()
+        resolveOnce()
+      }
+
       const startResultPollingFallback = () => {
-        if (resultPollingFallbackStarted) return
+        if (resultPollingFallbackStarted || resultPollingCancelled) return
         resultPollingFallbackStarted = true
 
         void (async () => {
           const deadline = Date.now() + RESULT_POLL_FALLBACK_TIMEOUT_MS
-          while (!finalDelivered && Date.now() < deadline) {
+          while (!finalDelivered && !resultPollingCancelled && Date.now() < deadline) {
             await new Promise(resolve => setTimeout(resolve, RESULT_POLL_FALLBACK_INTERVAL_MS))
-            if (finalDelivered) return
+            if (finalDelivered || resultPollingCancelled) return
             try {
               const delivered = await deliverFinalResult()
               if (delivered) {
@@ -2257,10 +2732,14 @@ export class ChannelReader {
                 return
               }
             } catch (err) {
+              if (isRevokedOrMissingTaskError(err)) {
+                abortRevokedTask()
+                return
+              }
               console.error(`[Main] result polling fallback failed for task ${taskId}:`, err)
             }
           }
-          if (!finalDelivered) {
+          if (!finalDelivered && !resultPollingCancelled) {
             console.warn(`[Main] Result polling fallback timed out for task ${taskId}`)
           }
         })()
@@ -2275,9 +2754,18 @@ export class ChannelReader {
           void editStatus(formatProgressUpdate(steps))
         },
         onSuspended: async suspended => {
-          // Approval needed. Fetch the server-formatted notification (which
-          // includes tool parameters) once. If the cache hasn't been written
-          // yet (sub-ms micro-race), fall back to a generic notification.
+          if (finalDelivered) {
+            stream.close()
+            resolveOnce()
+            return
+          }
+          // Approval needed. Fetch the server-formatted notification once.
+          // If getTaskResult reports `success === false` (e.g. approval_identity_revoked
+          // or approval_identity_mismatch), any terminal status (completed/failed/cancelled),
+          // or HTTP 403/404 (`TaskResultHttpError`), abort immediately without disclosing
+          // suspended.toolName or populating pendingApprovals (R84 / BR-01).
+          // Preserve fallback prompt delivery ONLY for `{ success: true, status: 'pending' }`
+          // micro-races or transient network/5xx errors while `!finalDelivered`.
           let notification =
             `Tool \`${suspended.toolName}\` requires approval. ` +
             (msg.channelType === 'slack'
@@ -2288,9 +2776,22 @@ export class ChannelReader {
           let notificationRendered = false
           let grantState: { alwaysApproveAllowed?: false } = {}
           let shellCard = readShellCard(suspended.shellCard)
+          let abortWithoutPrompt = false
           try {
             const result = await this.rpcClient.getTaskResult(taskId, msg)
+            if (finalDelivered) {
+              stream.close()
+              resolveOnce()
+              return
+            }
             if (
+              result.success === false ||
+              result.status === 'completed' ||
+              result.status === 'failed' ||
+              result.status === 'cancelled'
+            ) {
+              abortWithoutPrompt = true
+            } else if (
               result.success &&
               result.status === 'waiting_approval' &&
               result.approval?.notification
@@ -2301,7 +2802,25 @@ export class ChannelReader {
               shellCard = readShellCard(result.approval.shellCard)
             }
           } catch (err) {
-            console.error(`[Main] Failed to fetch approval notification for task ${taskId}:`, err)
+            if (finalDelivered) {
+              stream.close()
+              resolveOnce()
+              return
+            }
+            if (isRevokedOrMissingTaskError(err)) {
+              abortWithoutPrompt = true
+            } else {
+              console.error(`[Main] Failed to fetch approval notification for task ${taskId}:`, err)
+            }
+          }
+          if (finalDelivered) {
+            stream.close()
+            resolveOnce()
+            return
+          }
+          if (abortWithoutPrompt) {
+            abortRevokedTask()
+            return
           }
           await deliverApprovalPrompt({
             requestId: suspended.requestId,
@@ -2342,6 +2861,10 @@ export class ChannelReader {
                 )
               }
             } catch (err) {
+              if (isRevokedOrMissingTaskError(err)) {
+                abortRevokedTask()
+                return
+              }
               console.error(`[Main] terminal(completed) result fetch failed:`, err)
               startResultPollingFallback()
               await editStatus(formatFinalMessage(stream.steps, 'Final response is still syncing.'))
@@ -2377,6 +2900,10 @@ export class ChannelReader {
                 return
               }
             } catch (err) {
+              if (isRevokedOrMissingTaskError(err)) {
+                abortRevokedTask()
+                return
+              }
               console.error(
                 `[Main] reconcile after task_not_found_or_expired failed for task ${taskId}:`,
                 err
@@ -2401,6 +2928,7 @@ export class ChannelReader {
         startResultPollingFallback()
       }
     })
+    return 'ok'
   }
 
   /**
@@ -2457,6 +2985,10 @@ export class ChannelReader {
         await pending.updateStatusAfterDecision?.('Denied. The tool will not be executed.')
         await this.sendReply(msg, 'Denied. The tool will not be executed.')
       } else {
+        if (result.cancelled === true) {
+          pending.stopResultPollingFallback?.()
+          this.pendingApprovals.delete(approvalKey)
+        }
         await this.sendReply(msg, `Failed to send denial: ${result.error ?? 'unknown error'}`)
       }
       return
@@ -2483,6 +3015,10 @@ export class ChannelReader {
           pending.channelId
         )
     if (!result.success) {
+      if (result.cancelled === true) {
+        pending.stopResultPollingFallback?.()
+        this.pendingApprovals.delete(approvalKey)
+      }
       await this.sendReply(msg, `Failed to send approval: ${result.error ?? 'unknown error'}`)
       return
     }
@@ -2604,6 +3140,19 @@ export class ChannelReader {
     if (config.devMode) return
 
     console.log('[Main] Restarting with new channel configurations...')
+
+    // Drain active per-conversation FIFO queues before tearing down adapters (BR-26 / V3).
+    let drainTimeoutId: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        this.flushConversationQueues(),
+        new Promise<void>(resolve => {
+          drainTimeoutId = setTimeout(resolve, RESTART_QUEUE_DRAIN_TIMEOUT_MS)
+        }),
+      ])
+    } finally {
+      if (drainTimeoutId !== undefined) clearTimeout(drainTimeoutId)
+    }
 
     // Shutdown existing adapters
     await this.shutdownAdapters()
@@ -2735,6 +3284,7 @@ export class ChannelReader {
       this.watcher.stopWatch()
     }
     await this.stopHandoffServer()
+    await this.flushConversationQueues()
     await this.shutdownAdapters()
     console.log('[Main] Stopped')
   }

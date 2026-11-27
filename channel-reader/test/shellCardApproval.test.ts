@@ -322,7 +322,7 @@ describe('shell card approval handler', () => {
       const { adapter, edits } = capturingAdapter(channel)
       const getTaskResult = vi.fn(async () => {
         if (scenario === 'thrown lookup') throw new Error('approval lookup failed')
-        if (scenario === 'lookup miss') return { success: false, status: 'pending' as const }
+        if (scenario === 'lookup miss') return { success: true, status: 'pending' as const }
         return {
           success: true,
           status: 'waiting_approval' as const,

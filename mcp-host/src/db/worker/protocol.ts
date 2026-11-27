@@ -34,13 +34,10 @@ export interface SessionRow {
   model_selection_revision?: number
   /** Migration 018 — JSON array of `{ tool, userId }` denials. NULL if none. */
   denied_tools?: string | null
-  /**
-   * Migration 019 — stored approval mode (`manual`, `auto`, or `allow_all`).
-   * Optional on the in-memory shape so a fixture built before the column
-   * existed still typechecks; readers treat a missing or unknown value as
-   * `manual`. The worker does not interpret the ceiling or the channel cap.
-   */
+  /** Migration 019 — stored approval mode (`manual`, `auto`, or `allow_all`). */
   approval_mode?: string | null
+  /** Migration 020 — live verified linked user ID for external channel sessions. */
+  linked_user_id?: string | null
   system_prompt_stable_hash: string | null
   parent_session_id: string | null
   started_at: number
@@ -206,6 +203,50 @@ export interface SearchMessageRow {
   role: string
 }
 
+/**
+ * Migration 020 — durable channel attachment record keyed by
+ * `(session_key, linked_user_id)`. Timestamps are UNIX epoch seconds (REAL),
+ * matching `sessions.started_at`, `messages.timestamp`, and `pending_approvals`.
+ */
+export interface RetainedChannelAttachmentRow {
+  attachment_id: string
+  session_key: string
+  linked_user_id: string
+  provider_event_id: string
+  provider_attachment_id: string
+  storage_rel_path: string
+  sha256: string
+  byte_length: number
+  file_reference_json: string
+  width: number | null
+  height: number | null
+  visual_valid: 0 | 1
+  created_at: number
+  expires_at: number
+  status: 'ready' | 'expired' | 'deleted'
+}
+
+export interface InsertChannelAttachmentResult {
+  record: RetainedChannelAttachmentRow
+  deduplicated: boolean
+  replacedStorageRelPath?: string
+}
+
+export interface SweptChannelAttachmentRef {
+  attachment_id: string
+  storage_rel_path: string
+}
+
+export interface EndObsoleteApprovalSessionResult {
+  ended: boolean
+  sessionId: string | null
+}
+
+export interface RotateSessionOnIdentityChangeResult {
+  rotated: boolean
+  endedSessionId: string | null
+}
+
 // ─── In-memory shape returned by reconstruct helpers ──────────────────
 
 export interface RehydratedSnapshot {
@@ -343,7 +384,7 @@ export type WorkerOp =
     }
   | { kind: 'load_all_pending_approvals' }
   | { kind: 'sweep_expired'; nowEpoch: number; ttlSeconds: number }
-  | { kind: 'fts_search'; query: string; limit: number; userId?: string }
+  | { kind: 'fts_search'; query: string; limit: number; userId?: string; linkedUserId?: string }
   | {
       kind: 'fts_search_messages'
       query: string
@@ -351,6 +392,41 @@ export type WorkerOp =
       channelType?: string
       since?: string
       limit: number
+      linkedUserId?: string
+    }
+  | { kind: 'insert_channel_attachment'; payload: RetainedChannelAttachmentRow }
+  | {
+      kind: 'list_active_channel_attachments'
+      sessionKey: string
+      linkedUserId: string
+      nowEpoch: number
+    }
+  | {
+      kind: 'get_channel_attachment_for_owner'
+      attachmentId: string
+      sessionKey: string
+      linkedUserId: string
+      nowEpoch: number
+    }
+  | {
+      kind: 'sweep_expired_channel_attachments'
+      nowEpoch: number
+      limit?: number
+    }
+  | {
+      kind: 'end_obsolete_approval_session'
+      sessionId?: string
+      sessionKey?: string
+      requestId?: string
+      endedAt: number
+      endReason: string
+    }
+  | {
+      kind: 'rotate_session_on_identity_change'
+      sessionKey: string
+      expectedLinkedUserId?: string | null
+      endedAt: number
+      endReason: string
     }
   /** Deletes at most `limit` rows; the caller repeats until a batch deletes nothing. */
   | { kind: 'sweep_closed_sessions'; cutoffEpoch: number; limit: number }
@@ -415,6 +491,10 @@ export function isWriteOp(op: WorkerOp): boolean {
     case 'reap_awaiting_approval_sessions':
     case 'sweep_expired':
     case 'sweep_closed_sessions':
+    case 'insert_channel_attachment':
+    case 'sweep_expired_channel_attachments':
+    case 'end_obsolete_approval_session':
+    case 'rotate_session_on_identity_change':
       return true
     default:
       return false

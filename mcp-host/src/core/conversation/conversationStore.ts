@@ -1,4 +1,13 @@
-import type { ModelSelectionWriteOutcome, ReapedSession } from '../../db/worker/protocol'
+import type {
+  EndObsoleteApprovalSessionResult,
+  InsertChannelAttachmentResult,
+  ModelSelectionWriteOutcome,
+  ReapedSession,
+  RetainedChannelAttachmentRow,
+  RotateSessionOnIdentityChangeResult,
+  SweptChannelAttachmentRef,
+} from '../../db/worker/protocol'
+import { parseSessionKey } from '../../session/types'
 import type { ApprovalMode } from '../approval/approvalMode'
 import {
   type Conversation,
@@ -49,11 +58,18 @@ export interface GetOrCreateOptions {
    * session is loaded from the store or already cached.
    */
   approvalMode?: ApprovalMode
+  /**
+   * Migration 020 — live verified linked user ID for external channel sessions.
+   * Persisted onto `sessions.linked_user_id` when creating a session.
+   */
+  linkedUserId?: string | null
 }
 
 export interface PersistedSessionListing {
   sessionKey: string
   channelType?: string | null
+  userId?: string | null
+  channelId?: string | null
   approval: PendingApproval
   taskId: string
   sourceMessage?: Record<string, unknown>
@@ -309,7 +325,7 @@ export interface ConversationStore {
    *  commit the user message + state flip as ONE transaction and return a
    *  promise the caller MUST await (the durability barrier for retry
    *  semantics); the in-memory store stays a sync no-op. */
-  persistTurnStart(conv: Conversation, userInput: string): Promise<void> | void
+  persistTurnStart(conv: Conversation, userInput: string, autoTitle?: string): Promise<void> | void
   /** Called when a turn completes (assistant final response appended). D3:
    *  durable stores commit the assistant message + state flip +
    *  `active_task_id` clear as ONE transaction and return a promise the
@@ -391,6 +407,39 @@ export interface ConversationStore {
     requestId: string,
     decision: 'approve' | 'deny' | 'cancel'
   ): Promise<void>
+
+  /** Migration 020 — durable channel attachment and atomic identity rotation ops. */
+  insertChannelAttachment?(
+    row: RetainedChannelAttachmentRow
+  ): Promise<InsertChannelAttachmentResult>
+  listActiveChannelAttachments?(
+    sessionKey: string,
+    linkedUserId: string,
+    nowEpoch?: number
+  ): Promise<RetainedChannelAttachmentRow[]>
+  getChannelAttachmentForOwner?(
+    attachmentId: string,
+    sessionKey: string,
+    linkedUserId: string,
+    nowEpoch?: number
+  ): Promise<RetainedChannelAttachmentRow | null>
+  sweepExpiredChannelAttachments?(
+    nowEpoch?: number,
+    limit?: number
+  ): Promise<SweptChannelAttachmentRef[]>
+  endObsoleteApprovalSession?(params: {
+    sessionId?: string
+    sessionKey?: string
+    requestId?: string
+    endReason: string
+    endedAt?: number
+  }): Promise<EndObsoleteApprovalSessionResult>
+  rotateSessionOnIdentityChange?(params: {
+    sessionKey: string
+    expectedLinkedUserId?: string | null
+    endReason?: string
+    endedAt?: number
+  }): Promise<RotateSessionOnIdentityChangeResult>
 
   /** Optional shutdown drain. Implementations without a worker may no-op. */
   shutdown?(): Promise<void>
@@ -515,10 +564,17 @@ export class InMemoryConversationStore implements ConversationStore {
         if (!conv.activeTaskId) {
           throw new Error(`Pending approval ${conv.pending_approval.request_id} has no active task`)
         }
+        const parsed = parseSessionKey(sessionKey)
         out.push({
           sessionKey,
+          channelType: conv.channel_type ?? parsed?.channelType ?? null,
+          userId: conv.user_id ?? parsed?.userId ?? null,
+          channelId: parsed?.channelId ?? null,
           approval: conv.pending_approval,
           taskId: conv.activeTaskId,
+          ...(conv.pending_approval.sourceMessage
+            ? { sourceMessage: conv.pending_approval.sourceMessage }
+            : {}),
         })
       }
     }
@@ -528,7 +584,7 @@ export class InMemoryConversationStore implements ConversationStore {
   persistSessionCreate(_conv: Conversation, _opts: GetOrCreateOptions): void {
     /* no-op */
   }
-  persistTurnStart(_conv: Conversation, _userInput: string): void {
+  persistTurnStart(_conv: Conversation, _userInput: string, _autoTitle?: string): void {
     /* no-op */
   }
   persistTurnComplete(_conv: Conversation, _response: string): void {
@@ -605,5 +661,47 @@ export class InMemoryConversationStore implements ConversationStore {
     _decision: 'approve' | 'deny' | 'cancel'
   ): Promise<void> {
     /* no-op */
+  }
+
+  async endObsoleteApprovalSession(params: {
+    sessionId?: string
+    sessionKey?: string
+    requestId?: string
+    endReason: string
+    endedAt?: number
+  }): Promise<EndObsoleteApprovalSessionResult> {
+    if (params.sessionKey) {
+      const existing = this.map.get(params.sessionKey)
+      if (!existing) return { ended: false, sessionId: null }
+      this.map.delete(params.sessionKey)
+      return { ended: true, sessionId: existing.id }
+    }
+    if (params.sessionId) {
+      for (const [key, conv] of this.map) {
+        if (conv.id === params.sessionId) {
+          this.map.delete(key)
+          return { ended: true, sessionId: conv.id }
+        }
+      }
+    }
+    return { ended: false, sessionId: null }
+  }
+
+  async rotateSessionOnIdentityChange(params: {
+    sessionKey: string
+    expectedLinkedUserId?: string | null
+    endReason?: string
+    endedAt?: number
+  }): Promise<RotateSessionOnIdentityChangeResult> {
+    const existing = this.map.get(params.sessionKey)
+    if (!existing) return { rotated: false, endedSessionId: null }
+    if (
+      params.expectedLinkedUserId !== undefined &&
+      (existing.linked_user_id ?? null) === params.expectedLinkedUserId
+    ) {
+      return { rotated: false, endedSessionId: null }
+    }
+    this.map.delete(params.sessionKey)
+    return { rotated: true, endedSessionId: existing.id }
   }
 }

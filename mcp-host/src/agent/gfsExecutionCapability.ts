@@ -2,7 +2,7 @@ import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import type { GfsDownloadStore } from '../internalTools/gfsDownloadStore'
 import type { TaskSource } from '../queue/types'
 import type { IncomingMessage } from '../server/types'
-import { deriveUserKeyFromSource } from '../workspace/userKey'
+import { deriveLinkedUserKey, deriveUserKeyFromSource } from '../workspace/userKey'
 
 export interface GfsManagedWorkspaceExecution {
   /** Trusted task/caller identity for store admission; system tasks use the existing `_system` namespace. */
@@ -29,6 +29,10 @@ export function gfsStoreCallerIdentity(
   sourceMessage?: Pick<IncomingMessage, 'sender' | 'channelType'> | null
 ): string {
   return deriveUserKeyFromSource(sourceMessage)
+}
+
+export function gfsStoreCallerIdentityForLinkedUser(linkedUserId: string): string {
+  return deriveLinkedUserKey(linkedUserId)
 }
 
 export interface GfsExecutionCapabilityInput {

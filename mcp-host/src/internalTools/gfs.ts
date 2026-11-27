@@ -1037,14 +1037,22 @@ export const GFS_SAVE_ATTACHMENT_TOOL = 'clerum__gfs_save_attachment'
  */
 export function buildGfsAttachmentSaveTools(
   client: GfscWriteClient,
-  attachments: readonly Attachment[]
+  attachments: readonly Attachment[],
+  retained?: {
+    attachments: readonly Attachment[]
+    loadBytes: (
+      attachmentId: string
+    ) => Promise<
+      { ok: true; bytes: Buffer; fileReference: { name: string } } | { ok: false; code: string }
+    >
+  }
 ): InternalToolDefinition[] {
   return [
     {
       name: GFS_SAVE_ATTACHMENT_TOOL,
       description:
-        'Save a file or image attached to the current message into an existing gfs folder, byte for byte. ' +
-        'Pass the id of its attached_file or attached_image line. The new file is named as that line shows. ' +
+        'Save a file or image attached to or retained in the current conversation into an existing gfs folder, byte for byte. ' +
+        'Pass the id of its attached_file, retained_file, attached_image, or retained_image line. The new file is named as that line shows. ' +
         'If a file with that name already ' +
         'exists in the folder the save fails with conflict: tell the user and do not rename or replace ' +
         'their files unless they ask.',
@@ -1056,7 +1064,8 @@ export function buildGfsAttachmentSaveTools(
           parentResourceId: { type: 'string', description: 'Destination folder resource id.' },
           attachmentId: {
             type: 'string',
-            description: 'The id of an attached_file or attached_image line in the turn context.',
+            description:
+              'The id of an attached_file, retained_file, attached_image, or retained_image line in the turn context.',
           },
         },
       },
@@ -1071,30 +1080,49 @@ export function buildGfsAttachmentSaveTools(
             'clerum__gfs_save_attachment requires string drive and parentResourceId'
           )
         }
-        const attachment = attachments.find(candidate => candidate.id === attachmentId)
+        const inlineAttachment = attachments.find(candidate => candidate.id === attachmentId)
+        const retainedAttachment =
+          !inlineAttachment && typeof attachmentId === 'string'
+            ? retained?.attachments.find(candidate => candidate.id === attachmentId)
+            : undefined
+        const attachment = inlineAttachment ?? retainedAttachment
         if (!attachment) {
           return invalidArgs(
-            'attachment_not_found: no attachment with this id is part of the current message'
+            'attachment_not_found: no attachment with this id is part of the current conversation'
           )
         }
-        if (typeof attachment.dataBase64 !== 'string') {
+        let contentBase64: string
+        let bytes: number
+        let name: string | null = attachmentSaveName(attachment)
+        if (typeof attachment.dataBase64 === 'string') {
+          contentBase64 = attachment.dataBase64
+          bytes = Buffer.byteLength(attachment.dataBase64, 'base64')
+        } else if (retained?.loadBytes) {
+          const loaded = await retained.loadBytes(attachment.id)
+          if (!loaded.ok) {
+            return invalidArgs(
+              `${loaded.code}: retained attachment bytes could not be verified or are unavailable`
+            )
+          }
+          contentBase64 = loaded.bytes.toString('base64')
+          bytes = loaded.bytes.length
+          name = name ?? loaded.fileReference.name
+        } else {
           return invalidArgs(
             'bytes_unavailable_after_restart: ask the user to attach the file again in a new message'
           )
         }
-        const name = attachmentSaveName(attachment)
         if (name === null) {
           return invalidArgs(
             'attachment_name_missing: this attachment has no name to save it under'
           )
         }
-        const bytes = Buffer.byteLength(attachment.dataBase64, 'base64')
         // No local size check: gfsc bounds the write body with a per-deployment
         // GFS_MAX_WRITE_BODY_BYTES the Host cannot see, and answers 413, which
         // mutationFail reports as limit_exceeded.
         try {
           const resource = await client.createFileFromBytes(
-            { drive, parentResourceId, name, contentBase64: attachment.dataBase64 },
+            { drive, parentResourceId, name, contentBase64 },
             callOptions(context)
           )
           return ok({ attachmentId: attachment.id, name, bytes, resource })

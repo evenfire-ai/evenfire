@@ -41,6 +41,10 @@ export type MessageContentPart =
       /** Producer-measured image shape; used by provider-attempt policy without redecoding. */
       width?: number
       height?: number
+      /** Optional producer-attached display name for channel-retained demotion notices. */
+      filename?: string
+      /** Strict container framing check result from /ingest; only true images may reach providers. */
+      visualValid?: boolean
       /**
        * Optional so pre-#650 producers and provider translators keep compiling;
        * `codexSubscription` rejects an image part without a usable source
@@ -60,13 +64,13 @@ export interface ChatMessage {
    */
   contentParts?: MessageContentPart[]
   /**
-   * Issue #654 — set when the image parts were produced by a tool result, never
-   * by the user. A user who attaches an image to a model without affirmative
-   * image-input evidence gets a typed refusal; a screenshot the agent's own
-   * tool returned is withheld instead, so an unverified model can still finish
-   * a text task that happens to call a screenshot tool.
+   * Issue #654 / #1640 — distinguishes non-Desktop image origins:
+   * - `'tool_result'`: screenshots/images returned by tools (withheld on non-vision models).
+   * - `'channel_retained'`: images retained from Telegram/Slack/Teams in `ChannelAttachmentStore`
+   *   (demoted gracefully on non-vision models, failover, invalid framing, or visual-limit overflow).
+   * Absent for Desktop `rpc` user inline images, which retain `#654/#669` hard-refusal.
    */
-  imageOrigin?: 'tool_result'
+  imageOrigin?: 'tool_result' | 'channel_retained'
   tool_call_id?: string
   name?: string
   tool_calls?: ToolCall[] | null
@@ -217,10 +221,16 @@ export type ResumeSourceMessage = Pick<
   | 'fileReferenceResolutions'
   | 'locationReferenceResolutions'
   | 'authorityV2'
+  | 'channelAttachmentIds'
+  | 'attachmentIngestErrors'
 > & {
   /** Only the team scope survives; the channel's raw payload is not persisted. */
   metadata?: { teamId: string }
   attachments?: ResumeFileAttachment[]
+  /** Issue #1640 (X11) — originating verified linked user ID for warm/cold approval verification. */
+  linkedUserId?: string
+  /** Issue #1640 (X11) — minimal allowlisted provider identity for live re-verification on resume. */
+  providerIdentity?: HostIncomingMessage['providerIdentity']
 }
 
 // ─── Completion Types ───────────────────────────────────────
@@ -621,6 +631,11 @@ export interface Conversation {
    */
   channel_type?: string
   /**
+   * Migration 020 — live verified linked user ID for external channel sessions.
+   * Absent on Desktop `rpc` sessions and legacy pre-migration-020 rows.
+   */
+  linked_user_id?: string | null
+  /**
    * Last effective mode applied to this in-memory session. Unset until the
    * first sync. Not persisted.
    */
@@ -829,6 +844,7 @@ export type AgentEventType =
   | 'tool:approval_needed'
   | 'tool:approval_granted'
   | 'tool:approval_denied'
+  | 'tool:approval_revoked'
   | 'loop:iteration'
   | 'loop:completed'
   | 'llm:completed'

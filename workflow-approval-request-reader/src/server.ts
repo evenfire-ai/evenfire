@@ -39,6 +39,8 @@ import { isToolApprovalActionValue } from './toolApprovalAction.js'
 
 const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024
 const PROVIDER_EVENT_DEDUPE_TTL_MS = 10 * 60 * 1000
+const ATTACHMENTS_UPGRADING_NOTICE =
+  'File attachments are temporarily unavailable while the assistant service is upgrading. Please resend your message in a moment.'
 const log = readerLogger.child({ module: 'server' })
 type RequestStage =
   | 'route'
@@ -58,7 +60,9 @@ const TEAMS_WORKFLOW_APPROVAL_ACTION_RE =
 const TEAMS_COMPACT_WORKFLOW_APPROVAL_ACTION_RE =
   /^(?:a|d):[A-Za-z0-9_-]{22}:(?:~[0-9a-f]{16}|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)(?::[0-9a-f]{16})?$/i
 
-type SlackTargetContext = SlackTargetHandoffContext
+type SlackTargetContext = SlackTargetHandoffContext & {
+  botUserId?: string | null
+}
 type TeamsTargetContext = TeamsTargetHandoffContext & {
   appId: string
   appName?: string
@@ -286,8 +290,49 @@ function slackEventText(payload: unknown): string {
   return asString(asRecord(asRecord(payload).event).text)
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function slackAuthorizedBotUserId(target: SlackTargetContext, payload: unknown): string | null {
+  const body = asRecord(payload)
+  if (Array.isArray(body.authorizations)) {
+    for (const entry of body.authorizations) {
+      const auth = asRecord(entry)
+      const userId = asString(auth.user_id)
+      const teamId = asString(auth.team_id)
+      if (userId && (!teamId || teamId === target.providerWorkspaceId)) return userId
+    }
+    for (const entry of body.authorizations) {
+      const userId = asString(asRecord(entry).user_id)
+      if (userId) return userId
+    }
+  }
+  return asString(target.botUserId) || null
+}
+
 function slackEventStartsWithMention(payload: unknown): boolean {
-  return /^<@[A-Z0-9]+>(?:\s|$)/i.test(slackEventText(payload))
+  return /^<@[A-Z0-9]+(?:\|[^>]*)?>(?:\s|$)/i.test(slackEventText(payload))
+}
+
+function slackEventMentionsBot(target: SlackTargetContext, payload: unknown): boolean {
+  const botUserId = slackAuthorizedBotUserId(target, payload)
+  if (botUserId) {
+    return new RegExp(`<@${escapeRegExp(botUserId)}(?:\\|[^>]*)?>`, 'i').test(
+      slackEventText(payload)
+    )
+  }
+  return slackEventStartsWithMention(payload)
+}
+
+function slackWebhookDedupeKey(payload: unknown, fallbackEventId: string): string {
+  const body = asRecord(payload)
+  const envelopeEventId = asString(body.event_id)
+  if (asString(body.type) === 'event_callback' && envelopeEventId) {
+    const teamId = slackWorkspaceFromPayload(payload) || 'unknown'
+    return `slack:event:${teamId}:${envelopeEventId}`
+  }
+  return fallbackEventId
 }
 
 function slackEventIsInlineApprovalCommand(payload: unknown): boolean {
@@ -316,7 +361,7 @@ function slackCanUseEvent(
   if (channelId.startsWith('D')) return eventType === 'message' || eventType === 'app_mention'
   if (eventType === 'message' && slackEventIsInlineApprovalCommand(payload)) return true
   if (eventType === 'app_mention') return true
-  return eventType === 'message' && slackEventStartsWithMention(payload)
+  return eventType === 'message' && slackEventMentionsBot(target, payload)
 }
 
 function slackCanUseMessage(
@@ -339,7 +384,7 @@ function slackMessageShouldStripAcceptedMention(
     !channelId.startsWith('D') &&
     slackEventType(payload) === 'message' &&
     !slackEventIsInlineApprovalCommand(payload) &&
-    slackEventStartsWithMention(payload)
+    slackEventMentionsBot(target, payload)
   )
 }
 
@@ -351,7 +396,8 @@ function slackCanUseEnrollmentEvent(
   if (slackCanUseEvent(target, payload, channelId)) return true
   const eventType = slackEventType(payload)
   return (
-    eventType === 'app_mention' || (eventType === 'message' && slackEventStartsWithMention(payload))
+    eventType === 'app_mention' ||
+    (eventType === 'message' && slackEventMentionsBot(target, payload))
   )
 }
 
@@ -595,6 +641,7 @@ async function providerAuthorized(
         providerWorkspaceId: result.providerWorkspaceId,
         replyInThreads: result.replyInThreads === true,
         replyOnlyWhenMentioned: result.replyOnlyWhenMentioned === true,
+        ...(result.botUserId ? { botUserId: result.botUserId } : {}),
       },
     }
   }
@@ -885,36 +932,66 @@ export function createServer(cfg = config): http.Server {
         return
       }
       if (medium === 'slack' && auth.slackTarget) {
+        const slackTarget = auth.slackTarget
         const message = normalizeProviderMessage(medium, payload)
         if (message) {
-          if (!slackCanUseMessage(auth.slackTarget, payload, message.providerChannelId)) {
+          if (!slackCanUseMessage(slackTarget, payload, message.providerChannelId)) {
             writeJson(res, 200, { ok: true, ignored: true })
             return
           }
-          const handoffMessage = slackMessageShouldStripAcceptedMention(
-            auth.slackTarget,
-            payload,
-            message.providerChannelId
-          )
-            ? normalizeProviderMessage(medium, payload, { stripLeadingMention: true })
+          const botUserId = slackAuthorizedBotUserId(slackTarget, payload)
+          const shouldStripMention =
+            slackEventType(payload) === 'app_mention' ||
+            slackMessageShouldStripAcceptedMention(slackTarget, payload, message.providerChannelId)
+          const handoffMessage = shouldStripMention
+            ? normalizeProviderMessage(medium, payload, {
+                stripLeadingMention: true,
+                ...(botUserId ? { stripBotUserId: botUserId } : {}),
+              })
             : message
           if (!handoffMessage) {
             writeJson(res, 200, { ok: true, ignored: true })
             return
           }
-          if (!markProviderEventSeen(handoffMessage.providerEventId)) {
+          if (
+            !markProviderEventSeen(slackWebhookDedupeKey(payload, handoffMessage.providerEventId))
+          ) {
             writeJson(res, 200, { ok: true, ignored: true })
             return
           }
           stage = 'background_message'
-          void handoffSlackMessageToChannelReader(cfg, auth.slackTarget, handoffMessage)
-            .then(result => {
+          void handoffSlackMessageToChannelReader(cfg, slackTarget, handoffMessage)
+            .then(async result => {
               if (!result.ok) {
                 log.warn('slack message handoff failed', {
                   status: result.status,
                   error: result.error,
                   providerEventId: handoffMessage.providerEventId,
                 })
+                if (result.status === 400 && result.error === 'unsupported_handoff_kind') {
+                  try {
+                    const noticeResult = await sendSlackTargetMessage(cfg, {
+                      targetId: slackTarget.targetId,
+                      channelId: handoffMessage.providerChannelId,
+                      text: `<@${handoffMessage.providerUserId}> ${ATTACHMENTS_UPGRADING_NOTICE}`,
+                      threadTs: slackTarget.replyInThreads
+                        ? handoffMessage.threadTs || handoffMessage.providerMessageTs
+                        : undefined,
+                    })
+                    if (!noticeResult.ok) {
+                      log.warn('slack attachment upgrade notice failed', {
+                        providerEventId: handoffMessage.providerEventId,
+                        status: noticeResult.status,
+                        error: noticeResult.error,
+                      })
+                    }
+                  } catch (err) {
+                    log.warn('slack attachment upgrade notice threw', {
+                      providerEventId: handoffMessage.providerEventId,
+                      error: err instanceof Error ? err.name : 'unknown_error',
+                    })
+                  }
+                }
               }
             })
             .catch(err => {
@@ -925,13 +1002,18 @@ export function createServer(cfg = config): http.Server {
           writeJson(res, 200, { ok: true })
           return
         }
+        if (isSlackEventCallback(payload)) {
+          writeJson(res, 200, { ok: true, ignored: true })
+          return
+        }
       }
       if (medium === 'teams' && auth.teamsTarget) {
+        const teamsTarget = auth.teamsTarget
         const isWorkflowApprovalAction = teamsIsWorkflowApprovalAction(payload)
         const message = isWorkflowApprovalAction ? null : normalizeProviderMessage(medium, payload)
         if (message) {
           if (
-            !teamsCanUseMessage(auth.teamsTarget, payload) &&
+            !teamsCanUseMessage(teamsTarget, payload) &&
             !teamsIsWorkflowResultAction(payload) &&
             !teamsIsToolApprovalAction(payload)
           ) {
@@ -943,14 +1025,43 @@ export function createServer(cfg = config): http.Server {
             return
           }
           stage = 'background_message'
-          void handoffTeamsMessageToChannelReader(cfg, auth.teamsTarget, message)
-            .then(result => {
+          void handoffTeamsMessageToChannelReader(cfg, teamsTarget, message)
+            .then(async result => {
               if (!result.ok) {
                 log.warn('teams message handoff failed', {
                   status: result.status,
                   error: result.error,
                   providerEventId: message.providerEventId,
                 })
+                if (
+                  result.status === 400 &&
+                  result.error === 'unsupported_handoff_kind' &&
+                  message.serviceUrl
+                ) {
+                  try {
+                    const noticeResult = await sendTeamsTargetMessage(cfg, {
+                      targetId: teamsTarget.targetId,
+                      conversationId: message.providerChannelId,
+                      threadConversationId:
+                        message.providerConversationId ?? message.providerChannelId,
+                      replyToId: message.providerReplyToMessageId ?? message.providerMessageTs,
+                      serviceUrl: message.serviceUrl,
+                      text: ATTACHMENTS_UPGRADING_NOTICE,
+                    })
+                    if (!noticeResult.ok) {
+                      log.warn('teams attachment upgrade notice failed', {
+                        providerEventId: message.providerEventId,
+                        status: noticeResult.status,
+                        error: noticeResult.error,
+                      })
+                    }
+                  } catch (err) {
+                    log.warn('teams attachment upgrade notice threw', {
+                      providerEventId: message.providerEventId,
+                      error: err instanceof Error ? err.name : 'unknown_error',
+                    })
+                  }
+                }
               }
             })
             .catch(err => {

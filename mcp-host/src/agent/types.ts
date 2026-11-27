@@ -1,10 +1,12 @@
 /**
  * Types for the agent system.
  */
+import type { WorkflowCallerContext } from '../core/tools/workflowShared'
 import type { SingleTurnProvider } from '../llm'
 import type { FailoverEngine } from '../llm/failover/engine'
 import type { FallbackEntry, LlmPolicy } from '../llm/failover/types'
 import { Task } from '../queue/types'
+import type { IncomingMessage } from '../server/types'
 
 /**
  * R5 — per-task provider-fallback support injected into the agent (built in
@@ -86,6 +88,15 @@ export interface AgentConfig {
 
   // Timeout for approval responses (ms). 0 = no timeout.
   approvalTimeout: number
+
+  /**
+   * Optional live external-channel caller-context resolver injected via DI
+   * (defaults to `resolveProviderWorkflowCallerContext`).
+   */
+  channelCallerContextResolver?: (
+    message: IncomingMessage,
+    traceContext?: Task['traceContext']
+  ) => Promise<WorkflowCallerContext | null>
 }
 
 /**
@@ -166,6 +177,7 @@ export type AgentEventType =
   | 'tool:approval_needed'
   | 'tool:approval_granted'
   | 'tool:approval_denied'
+  | 'tool:approval_revoked'
   | 'cron:created'
   | 'cron:triggered'
   | 'cron:deleted'

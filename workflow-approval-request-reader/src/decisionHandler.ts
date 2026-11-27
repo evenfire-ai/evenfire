@@ -38,6 +38,42 @@ export type ReaderEnrollmentCommand = {
   serviceUrl?: string | null
 }
 
+export type ProviderAttachmentDownloadRef =
+  | {
+      provider: 'slack'
+      fileId: string
+      urlPrivateDownload?: string | null
+      urlPrivate?: string | null
+      fileAccess?: string | null
+      isExternal?: boolean
+    }
+  | {
+      provider: 'teams'
+      mode: 'file_download_info'
+      downloadUrl: string
+      uniqueId?: string | null
+    }
+  | {
+      provider: 'teams'
+      mode: 'inline_content'
+      contentUrl: string
+      serviceUrl: string
+    }
+
+export type ProviderAttachmentDescriptorV1 = {
+  providerAttachmentId: string
+  filename: string | null
+  declaredMediaType: string | null
+  reportedSizeBytes: number | null
+  downloadRef: ProviderAttachmentDownloadRef
+}
+
+export type ProviderAttachmentExtractionError = {
+  filename: string | null
+  code: string
+  message: string
+}
+
 export type ReaderMessageCommand = {
   content: string
   workflowRunId?: string
@@ -48,10 +84,15 @@ export type ReaderMessageCommand = {
   providerWorkspaceId: string
   providerChannelId: string
   providerConversationId?: string | null
+  providerThreadRootId?: string | null
   providerReplyToMessageId?: string | null
   providerEventId: string
   providerMessageTs: string
   threadTs?: string | null
+  eventKind?: 'event_callback' | 'block_actions'
+  slackEventType?: 'message' | 'app_mention'
+  attachments?: ProviderAttachmentDescriptorV1[]
+  attachmentErrors?: ProviderAttachmentExtractionError[]
   providerChannelType?: string | null
   serviceUrl?: string | null
 }
@@ -80,6 +121,7 @@ export type ReaderTeamsFileConsentCommand = {
 
 export type SlackMessageNormalizeOptions = {
   stripLeadingMention?: boolean
+  stripBotUserId?: string | null
 }
 
 const APPROVAL_COMMAND_RE =
@@ -196,6 +238,127 @@ function teamsReplyToMessageId(payload: unknown): string {
   )
 }
 
+function teamsThreadRootId(payload: unknown): string {
+  return teamsConversationMessageId(payload) || teamsActivityId(payload)
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:'
+  } catch {
+    return false
+  }
+}
+
+const TEAMS_FILE_TYPE_TO_MEDIA_TYPE: Record<string, string> = {
+  pdf: 'application/pdf',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  txt: 'text/plain',
+  md: 'text/markdown',
+  csv: 'text/csv',
+  json: 'application/json',
+  xml: 'application/xml',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  zip: 'application/zip',
+}
+
+function teamsDeclaredMediaTypeFromFileType(fileType: string): string | null {
+  const normalized = fileType.trim().replace(/^\.+/, '').toLowerCase()
+  if (!normalized) return null
+  if (normalized.includes('/')) return normalized
+  return TEAMS_FILE_TYPE_TO_MEDIA_TYPE[normalized] ?? null
+}
+
+function deterministicTeamsAttachmentId(activityId: string, index: number): string {
+  return `teams:${activityId}:${index}`
+}
+
+function extractTeamsAttachments(
+  payload: unknown,
+  activityId: string,
+  serviceUrl: string
+): {
+  attachments: ProviderAttachmentDescriptorV1[]
+  attachmentErrors: ProviderAttachmentExtractionError[]
+} {
+  const body = asRecord(payload)
+  if (asString(body.type) !== 'message') {
+    return { attachments: [], attachmentErrors: [] }
+  }
+  const rawAttachments = Array.isArray(body.attachments) ? body.attachments : []
+  const attachments: ProviderAttachmentDescriptorV1[] = []
+  const attachmentErrors: ProviderAttachmentExtractionError[] = []
+
+  for (let index = 0; index < rawAttachments.length; index += 1) {
+    const att = asRecord(rawAttachments[index])
+    const rawContentType = asString(att.contentType)
+    const baseContentType = rawContentType.split(';')[0].trim().toLowerCase()
+    if (baseContentType === 'text/html') continue
+
+    const filename = typeof att.name === 'string' && att.name.trim().length > 0 ? att.name : null
+
+    if (baseContentType === 'application/vnd.microsoft.teams.file.download.info') {
+      const content = asRecord(att.content)
+      const downloadUrl = asString(content.downloadUrl)
+      if (!downloadUrl || !isHttpUrl(downloadUrl)) {
+        attachmentErrors.push({
+          filename,
+          code: 'provider_scope_unsupported',
+          message: 'Microsoft Teams did not provide a downloadable file URL for this attachment.',
+        })
+        continue
+      }
+      const uniqueId = asString(content.uniqueId) || null
+      attachments.push({
+        providerAttachmentId: uniqueId || deterministicTeamsAttachmentId(activityId, index),
+        filename,
+        declaredMediaType: teamsDeclaredMediaTypeFromFileType(asString(content.fileType)),
+        reportedSizeBytes: null,
+        downloadRef: {
+          provider: 'teams',
+          mode: 'file_download_info',
+          downloadUrl,
+          uniqueId,
+        },
+      })
+      continue
+    }
+
+    const contentUrl = asString(att.contentUrl)
+    if (contentUrl && isHttpUrl(contentUrl)) {
+      attachments.push({
+        providerAttachmentId: deterministicTeamsAttachmentId(activityId, index),
+        filename,
+        declaredMediaType: rawContentType || null,
+        reportedSizeBytes: null,
+        downloadRef: {
+          provider: 'teams',
+          mode: 'inline_content',
+          contentUrl,
+          serviceUrl,
+        },
+      })
+      continue
+    }
+
+    attachmentErrors.push({
+      filename,
+      code: 'provider_scope_unsupported',
+      message: 'Microsoft Teams did not provide a downloadable content URL for this attachment.',
+    })
+  }
+
+  return { attachments, attachmentErrors }
+}
+
 function teamsServiceUrl(payload: unknown): string {
   return asString(asRecord(payload).serviceUrl)
 }
@@ -227,6 +390,7 @@ function teamsMessageIdentity(payload: unknown): {
   userId: string
   channelId: string
   conversationId: string
+  threadRootId: string
   replyToMessageId: string
   text: string
   activityId: string
@@ -243,6 +407,7 @@ function teamsMessageIdentity(payload: unknown): {
   const userId = teamsUserId(payload)
   const channelId = teamsProviderChannelId(payload)
   const conversationId = teamsConversationId(payload)
+  const threadRootId = teamsThreadRootId(payload)
   const replyToMessageId = teamsReplyToMessageId(payload)
   const actionValue = teamsActionValue(payload)
   const text =
@@ -271,6 +436,7 @@ function teamsMessageIdentity(payload: unknown): {
     userId,
     channelId,
     conversationId,
+    threadRootId,
     replyToMessageId,
     text,
     activityId,
@@ -282,21 +448,55 @@ function teamsMessageIdentity(payload: unknown): {
   }
 }
 
+function extractSlackAttachments(event: Record<string, unknown>): ProviderAttachmentDescriptorV1[] {
+  const rawFiles = Array.isArray(event.files) ? event.files : []
+  const attachments: ProviderAttachmentDescriptorV1[] = []
+  for (const rawFile of rawFiles) {
+    const file = asRecord(rawFile)
+    const fileId = asString(file.id)
+    if (!fileId) continue
+    const filename = typeof file.name === 'string' && file.name.trim().length > 0 ? file.name : null
+    const declaredMediaType = asString(file.mimetype) || null
+    const reportedSizeBytes =
+      typeof file.size === 'number' && Number.isFinite(file.size) && file.size >= 0
+        ? file.size
+        : null
+    attachments.push({
+      providerAttachmentId: fileId,
+      filename,
+      declaredMediaType,
+      reportedSizeBytes,
+      downloadRef: {
+        provider: 'slack',
+        fileId,
+        urlPrivateDownload: asString(file.url_private_download) || null,
+        urlPrivate: asString(file.url_private) || null,
+        fileAccess: asString(file.file_access) || null,
+        isExternal: Boolean(file.is_external),
+      },
+    })
+  }
+  return attachments
+}
+
 function slackMessageIdentity(payload: unknown): {
   teamId: string
   userId: string
   channelId: string
   text: string
   eventId: string
-  threadTs?: string | null
+  threadTs: string | null
   ts: string
+  eventType: 'message' | 'app_mention'
+  attachments: ProviderAttachmentDescriptorV1[]
 } | null {
   const body = asRecord(payload)
   if (asString(body.type) !== 'event_callback') return null
   const event = slackEvent(payload)
   const eventType = asString(event.type)
   if (eventType !== 'message' && eventType !== 'app_mention') return null
-  if (asString(event.subtype) || asString(event.bot_id)) return null
+  const subtype = asString(event.subtype)
+  if ((subtype && subtype !== 'file_share') || asString(event.bot_id)) return null
 
   const teamId = asString(body.team_id) || asString(event.team)
   const userId = asString(event.user)
@@ -304,7 +504,9 @@ function slackMessageIdentity(payload: unknown): {
   const text = asString(event.text)
   const ts = asString(event.ts)
   const eventId = asString(event.client_msg_id) || ts || asString(body.event_id)
-  if (!teamId || !userId || !channelId || !text || !eventId) return null
+  const attachments = extractSlackAttachments(event)
+  if (!teamId || !userId || !channelId || !eventId) return null
+  if (!text && attachments.length === 0) return null
   return {
     teamId,
     userId,
@@ -313,6 +515,8 @@ function slackMessageIdentity(payload: unknown): {
     eventId,
     ts,
     threadTs: asString(event.thread_ts) || null,
+    eventType,
+    attachments,
   }
 }
 
@@ -356,6 +560,7 @@ function slackDownloadActionIdentity(payload: unknown): ReaderMessageCommand | n
     providerEventId: `slack:${providerWorkspaceId}:${providerChannelId}:${providerEventPart}`,
     providerMessageTs,
     threadTs: asString(message.thread_ts) || asString(container.thread_ts) || null,
+    eventKind: 'block_actions',
   }
 }
 
@@ -392,11 +597,43 @@ function slackToolApprovalActionIdentity(payload: unknown): ReaderMessageCommand
     providerEventId: `slack:${providerWorkspaceId}:${providerChannelId}:${providerEventPart}`,
     providerMessageTs,
     threadTs: asString(message.thread_ts) || asString(container.thread_ts) || null,
+    eventKind: 'block_actions',
   }
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function slackPayloadAuthorizedBotUserId(payload: unknown): string | null {
+  const body = asRecord(payload)
+  const teamId = asString(body.team_id) || asString(slackEvent(payload).team)
+  if (!Array.isArray(body.authorizations)) return null
+  if (teamId) {
+    for (const entry of body.authorizations) {
+      const auth = asRecord(entry)
+      const userId = asString(auth.user_id)
+      const authTeamId = asString(auth.team_id)
+      if (userId && (!authTeamId || authTeamId === teamId)) return userId
+    }
+  }
+  for (const entry of body.authorizations) {
+    const userId = asString(asRecord(entry).user_id)
+    if (userId) return userId
+  }
+  return null
+}
+
 function stripLeadingSlackMention(text: string): string {
-  return text.replace(/^<@[A-Z0-9]+>\s*/i, '').trim()
+  return text.replace(/^<@[A-Z0-9]+(?:\|[^>]*)?>\s*/i, '').trim()
+}
+
+function stripSlackBotMention(text: string, botUserId: string): string {
+  return text
+    .replace(new RegExp(`<@${escapeRegExp(botUserId)}(?:\\|[^>]*)?>`, 'gi'), ' ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/^[ \t]+|[ \t]+$/gm, '')
+    .trim()
 }
 
 function slackMessageContent(
@@ -404,9 +641,13 @@ function slackMessageContent(
   text: string,
   options: SlackMessageNormalizeOptions = {}
 ): string {
-  return asString(slackEvent(payload).type) === 'app_mention' || options.stripLeadingMention
-    ? stripLeadingSlackMention(text)
-    : text.trim()
+  const shouldStrip =
+    asString(slackEvent(payload).type) === 'app_mention' ||
+    options.stripLeadingMention ||
+    Boolean(asString(options.stripBotUserId))
+  if (!shouldStrip) return text.trim()
+  const botUserId = asString(options.stripBotUserId) || slackPayloadAuthorizedBotUserId(payload)
+  return botUserId ? stripSlackBotMention(text, botUserId) : stripLeadingSlackMention(text)
 }
 
 function parseApprovalCommand(value: unknown): {
@@ -644,9 +885,13 @@ export function normalizeSlackMessage(
 
   const message = slackMessageIdentity(payload)
   if (!message) return null
-  if (/^(?:<@[A-Z0-9]+>\s*)?\/?verify\s+\d{6}$/i.test(message.text)) return null
+  if (message.text && /^(?:<@[A-Z0-9]+>\s*)?\/?verify\s+\d{6}$/i.test(message.text)) return null
   const content = slackMessageContent(payload, message.text, options)
-  if (!content) return null
+  const allowEmptyAppMentionForHydration =
+    message.eventType === 'app_mention' && message.text.trim().length > 0
+  if (!content && message.attachments.length === 0 && !allowEmptyAppMentionForHydration) {
+    return null
+  }
   return {
     medium: 'slack',
     content,
@@ -656,6 +901,9 @@ export function normalizeSlackMessage(
     providerEventId: `slack:${message.teamId}:${message.channelId}:${message.eventId}`,
     providerMessageTs: message.ts,
     threadTs: message.threadTs,
+    eventKind: 'event_callback',
+    slackEventType: message.eventType,
+    ...(message.attachments.length > 0 ? { attachments: message.attachments } : {}),
   }
 }
 
@@ -675,6 +923,7 @@ function teamsDownloadActionIdentity(payload: unknown): ReaderMessageCommand | n
     providerWorkspaceId: identity.tenantId,
     providerChannelId: identity.channelId,
     providerConversationId: identity.conversationId,
+    providerThreadRootId: identity.threadRootId,
     providerReplyToMessageId: identity.replyToMessageId,
     providerChannelType: identity.conversationType ?? null,
     providerEventId: teamsProviderEventId(identity),
@@ -691,8 +940,13 @@ export function normalizeTeamsMessage(payload: unknown): ReaderMessageCommand | 
   if (!identity) return null
   if (parseApprovalCommand(identity.text)) return null
   if (/^\/?verify\s+\d{6}$/i.test(identity.text)) return null
+  const { attachments, attachmentErrors } = extractTeamsAttachments(
+    payload,
+    identity.activityId,
+    identity.serviceUrl
+  )
   const content = identity.text.trim()
-  if (!content) return null
+  if (!content && attachments.length === 0 && attachmentErrors.length === 0) return null
   return {
     medium: 'teams',
     content,
@@ -700,11 +954,14 @@ export function normalizeTeamsMessage(payload: unknown): ReaderMessageCommand | 
     providerWorkspaceId: identity.tenantId,
     providerChannelId: identity.channelId,
     providerConversationId: identity.conversationId,
+    providerThreadRootId: identity.threadRootId,
     providerReplyToMessageId: identity.replyToMessageId,
     providerChannelType: identity.conversationType ?? null,
     providerEventId: teamsProviderEventId(identity),
     providerMessageTs: identity.activityId,
     serviceUrl: identity.serviceUrl,
+    ...(attachments.length > 0 ? { attachments } : {}),
+    ...(attachmentErrors.length > 0 ? { attachmentErrors } : {}),
   }
 }
 

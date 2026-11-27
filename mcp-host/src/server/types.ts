@@ -41,6 +41,45 @@ export interface ProviderDecisionIdentity extends ProviderIdentity {
   providerEventId: string
 }
 
+export interface ChannelAttachmentIngestError {
+  filename: string | null
+  code: string
+  message: string
+}
+
+export interface ChannelAttachmentIngestMetadataV1 {
+  channelType: 'telegram' | 'slack' | 'teams'
+  channelId: string
+  sender: string
+  sessionThreadId?: string
+  messageId: string
+  providerIdentity: ProviderIdentity
+  providerAttachmentId: string
+  filename: string | null
+  declaredMediaType: string | null
+}
+
+export type ChannelAttachmentReceiptV1 =
+  | {
+      ok: true
+      attachmentId: string
+      fileReference: FileReferenceV1
+      expiresAt: string
+      width?: number
+      height?: number
+      visualValid?: boolean
+      documentReadOverLimit?: boolean
+      deduplicated?: boolean
+    }
+  | {
+      ok: false
+      error: {
+        code: string
+        message: string
+        retryable: boolean
+      }
+    }
+
 export interface IncomingMessage {
   content: string
   channelType: 'telegram' | 'email' | 'slack' | 'teams' | 'rpc'
@@ -51,6 +90,22 @@ export interface IncomingMessage {
   hostRef: string
   threadId?: string
   attachments?: Attachment[]
+  /**
+   * Issue #1640 — Host-issued opaque IDs of inbound channel attachments
+   * persisted via `POST /v1/runtime/channel-attachments/ingest`.
+   * Rejected/stripped on `channelType === 'rpc'`.
+   */
+  channelAttachmentIds?: string[]
+  /**
+   * Issue #1640 — Per-file ingest/download errors surfaced to the user on the
+   * same turn. Rejected/stripped on `channelType === 'rpc'`.
+   */
+  attachmentIngestErrors?: ChannelAttachmentIngestError[]
+  /**
+   * Server-owned: live verified linked user ID resolved on external channel
+   * admission BEFORE `MessageQueue.admit`. Client input is always discarded.
+   */
+  admittedLinkedUserId?: string
   metadata?: Record<string, unknown>
   providerIdentity?: ProviderIdentity
   traceContext?: TraceContextV1 | null
@@ -113,7 +168,7 @@ export interface RuntimeCallerContext {
 
 export interface MessageResponse {
   success: boolean
-  status?: 'completed' | 'waiting_approval' | 'pending'
+  status?: 'completed' | 'waiting_approval' | 'pending' | 'cancelled'
   response?: string
   attachments?: Attachment[]
   error?: TaskError
@@ -331,9 +386,14 @@ export type ActivityStreamHandler = (onEvent: (event: HostActivityEvent) => void
 export type ActivityStreamCheckpointHandler = (
   binding: AuthorityBindingV2
 ) => Promise<'allowed' | 'denied' | 'unavailable'>
-export type ApprovalHandler = (
-  decision: ApprovalDecision
-) => Promise<{ success: boolean; error?: string; code?: 'denial_not_saved' }>
+export type ApprovalHandler = (decision: ApprovalDecision) => Promise<{
+  success: boolean
+  status?: number
+  cancelled?: boolean
+  retryable?: boolean
+  error?: string
+  code?: 'denial_not_saved'
+}>
 export interface ProviderWorkflowApprovalDecision {
   approvalRequestId: string
   decision: 'approve' | 'deny'
@@ -443,6 +503,16 @@ export type ProviderWorkflowResultRequestHandler = (
 export type ProviderMessageAuthorizationHandler = (
   input: ProviderMessageAuthorization
 ) => Promise<{ authorized: boolean; reason?: 'unresolved' | 'error' }>
+export interface ChannelAttachmentIngestResponse {
+  status: number
+  body: ChannelAttachmentReceiptV1
+}
+export type ChannelAttachmentIngestHandler = (input: {
+  metadata: ChannelAttachmentIngestMetadataV1
+  stream: NodeJS.ReadableStream
+  contentLength?: number
+  caller: RuntimeCallerContext
+}) => Promise<ChannelAttachmentIngestResponse>
 export type WorkflowApprovalNotificationClaimHandler = (
   input: WorkflowApprovalNotificationClaim
 ) => Promise<{ deliveries: WorkflowApprovalNotificationDelivery[] } | { error: string }>

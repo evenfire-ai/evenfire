@@ -248,7 +248,18 @@ export class DualConversationStore implements ConversationStore {
     // keeps divergence observability intact.
     const bySessionKey = new Map<string, PersistedSessionListing>()
     for (const entry of sqlList) bySessionKey.set(entry.sessionKey, entry)
-    for (const entry of memList) bySessionKey.set(entry.sessionKey, entry)
+    for (const entry of memList) {
+      const durable = bySessionKey.get(entry.sessionKey)
+      bySessionKey.set(entry.sessionKey, {
+        ...durable,
+        ...entry,
+        channelType: entry.channelType ?? durable?.channelType,
+        userId: entry.userId ?? durable?.userId,
+        channelId: entry.channelId ?? durable?.channelId,
+        sourceMessage: entry.sourceMessage ?? durable?.sourceMessage,
+        expiresAt: entry.expiresAt ?? durable?.expiresAt,
+      })
+    }
     return Array.from(bySessionKey.values())
   }
 
@@ -278,10 +289,10 @@ export class DualConversationStore implements ConversationStore {
     ])
   }
 
-  async persistTurnStart(conv: Conversation, userInput: string): Promise<void> {
+  async persistTurnStart(conv: Conversation, userInput: string, autoTitle?: string): Promise<void> {
     await Promise.all([
-      Promise.resolve(this.memory.persistTurnStart(conv, userInput)),
-      Promise.resolve(this.sqlite.persistTurnStart(conv, userInput)),
+      Promise.resolve(this.memory.persistTurnStart(conv, userInput, autoTitle)),
+      Promise.resolve(this.sqlite.persistTurnStart(conv, userInput, autoTitle)),
     ])
   }
 
@@ -371,6 +382,68 @@ export class DualConversationStore implements ConversationStore {
       this.memory.persistApprovalResolved(conv, requestId, decision),
       this.sqlite.persistApprovalResolved(conv, requestId, decision),
     ])
+  }
+
+  async insertChannelAttachment(
+    row: import('../../../db/worker/protocol').RetainedChannelAttachmentRow
+  ) {
+    if (!this.sqlite.insertChannelAttachment) {
+      throw new Error('SQLite store does not support insertChannelAttachment')
+    }
+    return this.sqlite.insertChannelAttachment(row)
+  }
+
+  async listActiveChannelAttachments(sessionKey: string, linkedUserId: string, nowEpoch?: number) {
+    return (
+      (await this.sqlite.listActiveChannelAttachments?.(sessionKey, linkedUserId, nowEpoch)) ?? []
+    )
+  }
+
+  async getChannelAttachmentForOwner(
+    attachmentId: string,
+    sessionKey: string,
+    linkedUserId: string,
+    nowEpoch?: number
+  ) {
+    return (
+      (await this.sqlite.getChannelAttachmentForOwner?.(
+        attachmentId,
+        sessionKey,
+        linkedUserId,
+        nowEpoch
+      )) ?? null
+    )
+  }
+
+  async sweepExpiredChannelAttachments(nowEpoch?: number, limit?: number) {
+    return (await this.sqlite.sweepExpiredChannelAttachments?.(nowEpoch, limit)) ?? []
+  }
+
+  async endObsoleteApprovalSession(params: {
+    sessionId?: string
+    sessionKey?: string
+    requestId?: string
+    endReason: string
+    endedAt?: number
+  }) {
+    await this.memory.endObsoleteApprovalSession?.(params)
+    if (this.sqlite.endObsoleteApprovalSession) {
+      return this.sqlite.endObsoleteApprovalSession(params)
+    }
+    return { ended: false, sessionId: null }
+  }
+
+  async rotateSessionOnIdentityChange(params: {
+    sessionKey: string
+    expectedLinkedUserId?: string | null
+    endReason?: string
+    endedAt?: number
+  }) {
+    await this.memory.rotateSessionOnIdentityChange?.(params)
+    if (this.sqlite.rotateSessionOnIdentityChange) {
+      return this.sqlite.rotateSessionOnIdentityChange(params)
+    }
+    return { rotated: false, endedSessionId: null }
   }
 
   async shutdown(): Promise<void> {

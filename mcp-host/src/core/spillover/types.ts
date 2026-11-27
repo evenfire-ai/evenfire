@@ -37,6 +37,9 @@ export interface SpilloverBlob {
   tool_call_id: string
   tool_name: string
   task_id: string
+  /** Issue #1640 (R68) — linked-user & session scope for channel spillover isolation. */
+  linked_user_id?: string | null
+  session_key?: string | null
   created_at_ms: number
   byte_size: number
   line_count: number
@@ -60,6 +63,9 @@ export interface MaybePersistArgs {
   /** Sanitized content — i.e. the same string the LLM would have received inline. */
   content: string
   isError: boolean
+  /** Issue #1640 (R68) — optional owner scope recorded on the persisted blob. */
+  linkedUserId?: string | null
+  sessionKey?: string | null
 }
 
 export interface SweepResult {

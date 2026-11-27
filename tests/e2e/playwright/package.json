@@ -1,6 +1,6 @@
 {
   "name": "clerum-playwright-tests",
-  "version": "0.1.108",
+  "version": "0.1.109",
   "private": true,
   "description": "Playwright E2E tests for Control UI and Desktop App",
   "scripts": {

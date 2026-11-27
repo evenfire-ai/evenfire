@@ -262,6 +262,13 @@ export class NativeToolRegistry implements ToolRegistry {
       ledger?: AttachmentReadLedger
       /** C15/C16 — effective context window the ledger derives its envelope from. */
       contextWindowTokens?: number
+      /** Issue #1640 (X10) — hydrated channel-retained attachments + SHA-256 byte loader. */
+      channelAttachments?: import('../../internalTools/channelAttachmentHydration').ChannelAttachmentToolContext
+      /** Issue #1640 (R68) — `(linkedUserId, sessionKey)` scope for spillover & FTS isolation. */
+      channelScope?: {
+        linkedUserId?: string
+        sessionKey?: string
+      }
     },
     spilloverStorage?: SpilloverStorage,
     sessionSearchService?: SessionSearchService,
@@ -367,8 +374,14 @@ export class NativeToolRegistry implements ToolRegistry {
             })
           : []),
         ...(gfsScopes.has('gfs.write') ? buildGfsWriteTools(gfsClient) : []),
-        ...(attachmentSaveAvailable(gfsScopes, sourceMessage?.attachments)
-          ? buildGfsAttachmentSaveTools(gfsClient, sourceMessage?.attachments ?? [])
+        ...(attachmentSaveAvailable(gfsScopes, sourceMessage?.attachments) ||
+        (gfsScopes.has('gfs.write') &&
+          (attachmentOptions?.channelAttachments?.attachments.length ?? 0) > 0)
+          ? buildGfsAttachmentSaveTools(
+              gfsClient,
+              sourceMessage?.attachments ?? [],
+              attachmentOptions?.channelAttachments
+            )
           : []),
         ...(gfsScopes.has('gfs.read') && gfsScopes.has('gfs.write')
           ? buildGfsCopyTools(gfsClient)
@@ -384,7 +397,17 @@ export class NativeToolRegistry implements ToolRegistry {
     // by `executeSingleTool`. Only registered when the host wires a real
     // `SpilloverStorage` (i.e. spillover feature is enabled).
     if (spilloverStorage) {
-      this.register(new SpilloverReadTool(spilloverStorage))
+      this.register(
+        new SpilloverReadTool(
+          spilloverStorage,
+          attachmentOptions?.channelScope
+            ? {
+                linkedUserId: attachmentOptions.channelScope.linkedUserId,
+                sessionKey: attachmentOptions.channelScope.sessionKey,
+              }
+            : undefined
+        )
+      )
     }
 
     // T3.1 — `clerum__session_search` lets the LLM recall past messages of
@@ -393,12 +416,23 @@ export class NativeToolRegistry implements ToolRegistry {
     // server-side. Cron-triggered turns without an origin message do not
     // get the tool — same gating as `CronManageTool`.
     if (sessionSearchService && sourceMessage) {
-      this.register(new SessionSearchTool(sessionSearchService, sourceMessage))
+      this.register(
+        new SessionSearchTool(
+          sessionSearchService,
+          sourceMessage,
+          attachmentOptions?.channelScope?.linkedUserId
+        )
+      )
     }
 
-    // #666 — `clerum__attachment_read` reads the `kind:'file'` attachments of
-    // the message that started this turn. Only registered when there is one.
-    if (sourceMessage?.attachments?.some(a => a.kind === 'file')) {
+    // #666 / #1640 — `clerum__attachment_read` reads the `kind:'file'`
+    // attachments of this turn OR retained in this session's channel attachment
+    // store. Only registered when there is at least one file attachment.
+    const retainedChannelAttachments = attachmentOptions?.channelAttachments?.attachments ?? []
+    const hasInlineFileAttachments =
+      sourceMessage?.attachments?.some(a => a.kind === 'file') === true
+    const hasRetainedFileAttachments = retainedChannelAttachments.some(a => a.kind === 'file')
+    if (sourceMessage && (hasInlineFileAttachments || hasRetainedFileAttachments)) {
       const maxBytes = config.attachmentTextReadMaxBytes
       if (maxBytes === undefined) {
         throw new Error(
@@ -419,12 +453,22 @@ export class NativeToolRegistry implements ToolRegistry {
       // ConfigStore secrets the loop's tool-output sanitizer applies.
       const redactor = new BasicSafety(attachmentOptions?.secretEntriesProvider)
       this.register(
-        new AttachmentReadTool(sourceMessage, maxBytes, { contextWindowTokens, ledger, redactor })
+        new AttachmentReadTool(sourceMessage, maxBytes, {
+          contextWindowTokens,
+          ledger,
+          redactor,
+          retainedAttachments: retainedChannelAttachments,
+          loadRetainedBytes: attachmentOptions?.channelAttachments?.loadBytes,
+        })
       )
-      // #656 — PDF and XLSX attachments are read by `clerum__document_read`,
-      // which draws from the same turn ledger.
+      // #656 / #1640 — PDF and XLSX attachments (inline or retained) are read
+      // by `clerum__document_read`, which draws from the same turn ledger.
+      const allFileAttachments = [
+        ...(sourceMessage.attachments ?? []),
+        ...retainedChannelAttachments,
+      ]
       if (
-        sourceMessage.attachments.some(
+        allFileAttachments.some(
           a =>
             a.kind === 'file' &&
             (a.fileReference?.reader === 'pdf' || a.fileReference?.reader === 'xlsx')
@@ -437,6 +481,8 @@ export class NativeToolRegistry implements ToolRegistry {
             redactor,
             runJob: runDocumentJob,
             limits: DEFAULT_DOCUMENT_READ_LIMITS,
+            retainedAttachments: retainedChannelAttachments,
+            loadRetainedBytes: attachmentOptions?.channelAttachments?.loadBytes,
           })
         )
       }

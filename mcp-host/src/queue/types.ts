@@ -98,6 +98,13 @@ export interface Task {
   responseCallback?: (payload: TaskResponsePayload) => Promise<void>
 
   /**
+   * Issue #1640 — live verified linked user ID resolved on external channel
+   * admission BEFORE `MessageQueue.admit`. Checked against live identity in
+   * `TaskExecutor.run()` so a queued User A task never executes as User B.
+   */
+  admittedLinkedUserId?: string
+
+  /**
    * P1 token budgets — the verdict from the pre-task budget check, persisted
    * here when `allowed` so the P2 per-task brake (max_task_amount) can read
    * `maxTaskTokens`/`maxTaskCost`/`price` without re-querying. Absent when the

@@ -9,6 +9,7 @@ const BOT_SCOPES = [
   'im:read',
   'mpim:read',
   'chat:write',
+  'files:read',
   'files:write',
   'users:read',
 ]

@@ -16,8 +16,16 @@ import { Tool } from '../interfaces'
 import { SpilloverStorage, clerumSpilloverReadsTotal } from '../spillover'
 import { ToolOutput } from '../types'
 
+export interface SpilloverReadScope {
+  linkedUserId?: string | null
+  sessionKey?: string | null
+}
+
 export class SpilloverReadTool implements Tool {
-  constructor(private readonly storage: SpilloverStorage) {}
+  constructor(
+    private readonly storage: SpilloverStorage,
+    private readonly scope?: SpilloverReadScope
+  ) {}
 
   name(): string {
     return 'clerum__spillover_read'
@@ -90,7 +98,7 @@ export class SpilloverReadTool implements Tool {
     }
 
     const blob = await this.storage.load(ref)
-    if (!blob) {
+    if (!blob || !this.blobMatchesScope(blob)) {
       return {
         content: `Error: spillover blob ${ref} not found or expired.`,
         duration_ms: Date.now() - start,
@@ -134,5 +142,25 @@ export class SpilloverReadTool implements Tool {
       duration_ms: Date.now() - start,
       is_error: false,
     }
+  }
+
+  private blobMatchesScope(blob: {
+    linked_user_id?: string | null
+    session_key?: string | null
+  }): boolean {
+    const scopeLinked = this.scope?.linkedUserId ?? null
+    const blobLinked = blob.linked_user_id ?? null
+    if (scopeLinked !== null || blobLinked !== null) {
+      if (scopeLinked !== blobLinked) return false
+    }
+    const scopeSession = this.scope?.sessionKey ?? null
+    const blobSession = blob.session_key ?? null
+    if (scopeSession !== null && blobSession !== null && scopeSession !== blobSession) {
+      return false
+    }
+    if (scopeLinked !== null && scopeSession !== null && blobSession !== scopeSession) {
+      return false
+    }
+    return true
   }
 }

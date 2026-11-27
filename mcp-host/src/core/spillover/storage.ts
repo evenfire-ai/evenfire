@@ -188,6 +188,8 @@ export class SpilloverStorage {
       tool_call_id: args.toolCallId,
       tool_name: args.toolName,
       task_id: args.taskId,
+      ...(args.linkedUserId !== undefined ? { linked_user_id: args.linkedUserId } : {}),
+      ...(args.sessionKey !== undefined ? { session_key: args.sessionKey } : {}),
       created_at_ms: Date.now(),
       byte_size: byteSize,
       line_count: lineCount,

@@ -1,4 +1,5 @@
 import type { PendingApproval, ToolResult } from '../core/types'
+import { channelRetainedImageParts, projectChannelRetainedMessages } from './channelImageProjection'
 import {
   gfsImageParts,
   gfsReference,
@@ -37,20 +38,27 @@ function projectResult(result: ToolResult): ToolResult {
   }
 }
 
-/** Preserve approval identity/order while removing transient GFS image payloads. */
+/** Preserve approval identity/order while removing transient GFS and channel-retained image payloads. */
 export function projectGfsApproval(approval: PendingApproval): PendingApproval {
-  const selected = new Set(gfsImageParts(approval.context_snapshot))
+  const selectedGfs = new Set(gfsImageParts(approval.context_snapshot))
+  const afterGfs = projectGfsMessages(
+    approval.context_snapshot,
+    selectedGfs,
+    'new_gfs_read_required_after_suspension'
+  )
+  const selectedChannel = new Set(channelRetainedImageParts(afterGfs))
+  const contextSnapshot = projectChannelRetainedMessages(
+    afterGfs,
+    selectedChannel,
+    'suspended_for_approval'
+  )
   return {
     request_id: approval.request_id,
     tool_name: approval.tool_name,
     tool_call_id: approval.tool_call_id,
     description: approval.description,
     parameters: approval.parameters,
-    context_snapshot: projectGfsMessages(
-      approval.context_snapshot,
-      selected,
-      'new_gfs_read_required_after_suspension'
-    ),
+    context_snapshot: contextSnapshot,
     ...(approval.completed_results
       ? { completed_results: approval.completed_results.map(projectResult) }
       : {}),
