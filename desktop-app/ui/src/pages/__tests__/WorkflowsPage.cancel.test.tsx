@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { WorkflowRunListItem } from '../../../../src/types'
 import {
   useWorkflowController,
@@ -33,7 +33,28 @@ const WORKFLOW = {
   triggerableByUser: true,
 }
 
+const WORKFLOW_B = {
+  namespace: 'sandbox-recipes',
+  name: 'e2e-cancel-scheduled',
+  status: 'Active',
+  createdAt: '2026-11-26T00:00:00Z',
+  triggerableByUser: true,
+}
+
 const RUN_ID = '7f0b4c1e-3a52-4d0e-9a51-1f6f0d1f2b3c'
+const RUN_ID_B = '2c9d81aa-6f1e-4b7c-8d3e-5a4b3c2d1e0f'
+const NEWER_RUN_ID = '9e8d7c6b-1a2b-4c3d-8e9f-0a1b2c3d4e5f'
+
+type CancelRun = (ns: string, name: string, runId: string) => Promise<void>
+
+function deferred() {
+  // The executor runs synchronously, so resolve is assigned before it is returned.
+  let resolve!: () => void
+  const promise = new Promise<void>(settle => {
+    resolve = settle
+  })
+  return { promise, resolve }
+}
 
 function makeRun(overrides: Partial<WorkflowRunListItem>): WorkflowRunListItem {
   return {
@@ -52,25 +73,54 @@ function makeRun(overrides: Partial<WorkflowRunListItem>): WorkflowRunListItem {
   }
 }
 
-function renderWithLatestRun(run: WorkflowRunListItem, cancelRun = vi.fn(async () => undefined)) {
-  useWorkflowControllerMock.mockReturnValue({
-    workflowsLoading: false,
-    workflowsError: null,
-    workflows: [WORKFLOW],
-    handleSelectWorkflow: vi.fn().mockResolvedValue(null),
-    handleTriggerWorkflow: vi.fn().mockResolvedValue(undefined),
-    cancelRun,
-  } as unknown as ReturnType<typeof useWorkflowController>)
-  useWorkflowRecentRunsMock.mockReturnValue({
+function makeRecentRuns(run: WorkflowRunListItem): ReturnType<typeof useWorkflowRecentRuns> {
+  return {
     latestRun: run,
     runCount: 1,
     loading: false,
     refreshing: false,
     error: null,
     refresh: vi.fn().mockResolvedValue(undefined),
-  })
+  }
+}
+
+function mockController(workflows: (typeof WORKFLOW)[], cancelRun: CancelRun) {
+  useWorkflowControllerMock.mockReturnValue({
+    workflowsLoading: false,
+    workflowsError: null,
+    workflows,
+    handleSelectWorkflow: vi.fn().mockResolvedValue(null),
+    handleTriggerWorkflow: vi.fn().mockResolvedValue(undefined),
+    cancelRun,
+  } as unknown as ReturnType<typeof useWorkflowController>)
+}
+
+function renderWithLatestRunAndRerender(
+  run: WorkflowRunListItem,
+  cancelRun: CancelRun = vi.fn(async () => undefined)
+) {
+  mockController([WORKFLOW], cancelRun)
+  useWorkflowRecentRunsMock.mockReturnValue(makeRecentRuns(run))
+  const { rerender } = render(<WorkflowsPage />)
+  return { table: within(screen.getByRole('table')), rerender }
+}
+
+function renderWithLatestRun(
+  run: WorkflowRunListItem,
+  cancelRun: CancelRun = vi.fn(async () => undefined)
+) {
+  return renderWithLatestRunAndRerender(run, cancelRun).table
+}
+
+// Two recipes, each with a running run the viewer may cancel.
+function renderTwoWorkflows(cancelRun: CancelRun) {
+  mockController([WORKFLOW, WORKFLOW_B], cancelRun)
+  useWorkflowRecentRunsMock.mockImplementation(wf =>
+    makeRecentRuns(
+      makeRun({ id: wf.name === WORKFLOW_B.name ? RUN_ID_B : RUN_ID, viewerCanCancel: true })
+    )
+  )
   render(<WorkflowsPage />)
-  return within(screen.getByRole('table'))
 }
 
 type Row = {
@@ -236,13 +286,97 @@ describe('WorkflowsPage cancel', () => {
     expect(button.getAttribute('title')).toBe(`Cancel this run. ${CANCEL_EFFECT}`)
   })
 
-  it('clicking Cancel calls cancelRun with the recipe and the latest run id', async () => {
-    const cancelRun = vi.fn(async () => undefined)
+  it('Cancel asks first and sends one request on confirm', async () => {
+    const call = deferred()
+    const cancelRun = vi.fn(() => call.promise)
     const table = renderWithLatestRun(makeRun({ viewerCanCancel: true }), cancelRun)
 
     fireEvent.click(table.getByRole('button', { name: 'Cancel run' }))
 
-    await waitFor(() => expect(cancelRun).toHaveBeenCalledTimes(1))
+    // Liveness witness: the dialog is found before asserting that nothing was sent.
+    const dialog = screen.getByRole('dialog', { name: 'Cancel run 7f0b4c1e?' })
+    expect(within(dialog).getByText(CANCEL_EFFECT)).toBeTruthy()
+    expect(cancelRun).not.toHaveBeenCalled()
+
+    const confirm = within(dialog).getByRole('button', { name: 'Cancel run' })
+    fireEvent.click(confirm)
+    fireEvent.click(confirm)
+
+    expect(cancelRun).toHaveBeenCalledTimes(1)
+    expect(cancelRun).toHaveBeenCalledWith(WORKFLOW.namespace, WORKFLOW.name, RUN_ID)
+    // While the request is pending the dialog stays and refuses dismissal.
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Keep running' }))
+    expect(screen.getByRole('dialog', { name: 'Cancel run 7f0b4c1e?' })).toBe(dialog)
+
+    await act(async () => {
+      call.resolve()
+      await call.promise
+    })
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(cancelRun).toHaveBeenCalledTimes(1)
+  })
+
+  it('Keep running sends nothing', () => {
+    const cancelRun = vi.fn(async () => undefined)
+    const table = renderWithLatestRun(makeRun({ viewerCanCancel: true }), cancelRun)
+
+    fireEvent.click(table.getByRole('button', { name: 'Cancel run' }))
+    // Liveness witness: the dialog was shown first.
+    const dialog = screen.getByRole('dialog', { name: 'Cancel run 7f0b4c1e?' })
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Keep running' }))
+
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(cancelRun).not.toHaveBeenCalled()
+  })
+
+  it("a second row cannot replace the dialog's run", async () => {
+    const cancelRun = vi.fn(async () => undefined)
+    renderTwoWorkflows(cancelRun)
+    const rows = within(screen.getByRole('table')).getAllByRole('row')
+    const rowA = rows[1]
+    const rowB = rows[2]
+    if (!rowA || !rowB) throw new Error('expected two workflow rows')
+
+    fireEvent.click(within(rowA).getByRole('button', { name: 'Cancel run' }))
+    const dialog = screen.getByRole('dialog', { name: 'Cancel run 7f0b4c1e?' })
+
+    fireEvent.click(within(rowB).getByRole('button', { name: 'Cancel run' }))
+    expect(screen.getAllByRole('dialog')).toHaveLength(1)
+    expect(screen.getByRole('dialog', { name: 'Cancel run 7f0b4c1e?' })).toBe(dialog)
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel run' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(cancelRun).toHaveBeenCalledTimes(1)
+    expect(cancelRun).toHaveBeenCalledWith(WORKFLOW.namespace, WORKFLOW.name, RUN_ID)
+  })
+
+  it('the dialog keeps the run it was opened for', async () => {
+    const cancelRun = vi.fn(async () => undefined)
+    const { table, rerender } = renderWithLatestRunAndRerender(
+      makeRun({ viewerCanCancel: true }),
+      cancelRun
+    )
+
+    fireEvent.click(table.getByRole('button', { name: 'Cancel run' }))
+    screen.getByRole('dialog', { name: 'Cancel run 7f0b4c1e?' })
+
+    // A newer run becomes the latest while the dialog is open.
+    useWorkflowRecentRunsMock.mockReturnValue(
+      makeRecentRuns(makeRun({ id: NEWER_RUN_ID, viewerCanCancel: true }))
+    )
+    rerender(<WorkflowsPage />)
+    expect(useWorkflowRecentRunsMock).toHaveLastReturnedWith(
+      expect.objectContaining({ latestRun: expect.objectContaining({ id: NEWER_RUN_ID }) })
+    )
+
+    // The title still names the first run, and confirming cancels that run.
+    const dialog = screen.getByRole('dialog', { name: 'Cancel run 7f0b4c1e?' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel run' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(cancelRun).toHaveBeenCalledTimes(1)
     expect(cancelRun).toHaveBeenCalledWith(WORKFLOW.namespace, WORKFLOW.name, RUN_ID)
   })
 })
