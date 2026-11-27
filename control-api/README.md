@@ -351,11 +351,17 @@ route answers 503 `oidc_configuration_unavailable`, and each request logs
 `oidc_configuration_unavailable` with the names of the settings at fault,
 never their values. Profile UI then shows only the password form, and
 password sign-in keeps working. `CONTROL_API_OIDC_ACCOUNT_CREATION` in the
-list can also mean that `enabled` has no required claim value, or that
-`any_issuer_account` has one: set a claim value, or use `any_issuer_account`
-if every person the issuer signs in should get an account. An unknown
-`CONTROL_API_OIDC_*` name fails the same way, even with no registration set.
-That includes the removed `CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS` and
+list means a value other than exactly `enabled` or `any_issuer_account`, any
+value on Entra ID, `enabled` with no required claim value, or
+`any_issuer_account` beside one. Set a claim value, or use
+`any_issuer_account` if every person the issuer signs in should get an
+account. On `accounts.google.com`, `any_issuer_account` is always refused:
+use `enabled` with the `hd` claim there. An empty
+`CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE` is refused, and the list names it.
+It still counts as a value, so `any_issuer_account` beside it is refused as
+well. An unknown `CONTROL_API_OIDC_*` name fails the same way, even with no
+registration set. That includes the removed
+`CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS` and
 `CONTROL_API_OIDC_REQUIRED_ROLE`, which the required claim and account
 creation settings replace. While `CONTROL_API_OIDC_MEMBER_SIGN_IN` is set, a
 configuration that fails to load still counts as member sign-in on when a
