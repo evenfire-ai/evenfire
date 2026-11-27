@@ -9,10 +9,16 @@ import { Button, IconButton, MenuItem, NavItem as NavItemControl } from '@compon
 import { useGfsActionHost } from '@components/GfsActionHost/context'
 import { ChatStateBadge } from '@components/agents/ChatStateBadge'
 import { DESKTOP_ROUTES, SIDEBAR_SESSION_PREVIEW_LIMIT } from '@constants/navigation'
+import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { useConfirmedChatDelete } from '@hooks/useConfirmedChatDelete'
 import { formatDesktopAppVersionTooltip, useDesktopAppInfo } from '@hooks/useDesktopAppInfo'
 import { useInlineRename } from '@hooks/useInlineRename'
+import {
+  agentDisplayLabels,
+  sessionDisplayLabels,
+  sessionPresentationKey,
+} from '@lib/agentDisplayLabels'
 import type { NavItem } from '@/uiTypes'
 import { FileExplorerTree } from './FileExplorerTree'
 import {
@@ -58,6 +64,9 @@ export function SidebarNav({
   const { activeChatId, latestChatSessions, latestChatSessionsLoading, sessionStateByChatKey } =
     useChatListContext()
   const { handleRenameChatForAgent: onRenameChatForAgent } = useAgentChatActionsContext()
+  // A session row is labelled with the catalog display name; an agent the
+  // catalog has no name for keeps its identifier, as on the other surfaces.
+  const { agentDisplayByName } = useAgentsDataController()
   const { selectedAgent, handleSelectChatAgent: onSelectChatAgent } = useNavigationContext()
   const gfsDialogShown = useGfsActionHost()?.dialogShown ?? false
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false)
@@ -245,6 +254,23 @@ export function SidebarNav({
 
   const dataMenuActive = dataRouteItems.some(item => item.id === navItem)
   const settingsMenuActive = navItem === DESKTOP_ROUTES.settings || dataMenuActive
+  const sessionAgentLabels = useMemo(
+    () =>
+      agentDisplayLabels(
+        [
+          ...Object.keys(agentDisplayByName),
+          ...latestChatSessions.map(session => session.agentRef),
+        ],
+        agentDisplayByName
+      ),
+    [agentDisplayByName, latestChatSessions]
+  )
+
+  const sessionLabels = useMemo(
+    () => sessionDisplayLabels(latestChatSessions, sessionAgentLabels),
+    [latestChatSessions, sessionAgentLabels]
+  )
+
   const visibleLatestChatSessions = useMemo(
     () => latestChatSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT),
     [latestChatSessions]
@@ -463,6 +489,10 @@ export function SidebarNav({
                       <>
                         <div className="nav-latest-sessions__list">
                           {visibleLatestChatSessions.map(session => {
+                            const presentation =
+                              sessionLabels[sessionPresentationKey(session.agentRef, session.id)]!
+                            const identityLabel = presentation.secondary
+                            const sessionLabel = presentation.label
                             const sessionKey = `${session.agentRef}${SESSION_KEY_SEPARATOR}${session.id}`
                             const isActive =
                               navItem === DESKTOP_ROUTES.chat &&
@@ -478,7 +508,7 @@ export function SidebarNav({
                                 data-chat-id={session.id}
                                 aria-current={isActive ? 'true' : undefined}
                                 className={`nav-latest-session${isActive ? ' active' : ''}`}
-                                title={isCollapsed ? session.title : undefined}
+                                title={isCollapsed ? sessionLabel : undefined}
                               >
                                 {isRenaming ? (
                                   <div className="nav-latest-session__main nav-latest-session__main--editing">
@@ -497,7 +527,7 @@ export function SidebarNav({
                                   <button
                                     type="button"
                                     className="nav-latest-session__main"
-                                    aria-label={`Open ${session.title}`}
+                                    aria-label={`Open ${sessionLabel}`}
                                     onClick={() => {
                                       onSelectChatAgent(session.agentRef, {
                                         selectLatest: false,
@@ -513,8 +543,11 @@ export function SidebarNav({
                                       <span className="nav-latest-session__title">
                                         {session.title}
                                       </span>
-                                      <span className="nav-latest-session__agent">
-                                        {session.agentRef}
+                                      <span
+                                        className="nav-latest-session__agent"
+                                        title={identityLabel}
+                                      >
+                                        {identityLabel}
                                       </span>
                                     </span>
                                   </button>
@@ -538,7 +571,7 @@ export function SidebarNav({
                                       renameTriggerRef.current = element
                                   }}
                                   className="nav-latest-session__menu-button"
-                                  label={`Session options for ${session.title}`}
+                                  label={`Session options for ${sessionLabel}`}
                                   aria-haspopup="menu"
                                   aria-expanded={isMenuOpen}
                                   onClick={event => {

@@ -89,9 +89,15 @@ async function mountStorageDelete(target = 'chat-2', withOtherAgent = false) {
   await waitFor(() => expect(screen.getByText('chat-1 real history')).toBeTruthy())
   await waitFor(() => expect(app.getVm().sessionStateByChatId['chat-1']?.syncing).toBe(false))
   await waitFor(() => expect(app.getVm().latestChatSessions).toHaveLength(withOtherAgent ? 4 : 3))
-  const row = app.getVm().latestChatSessions.findIndex(chat => chat.id === target)
-  const title = app.getVm().latestChatSessions[row]!.title
-  fireEvent.click(screen.getAllByRole('button', { name: `Session options for ${title}` })[row]!)
+  const row = screen
+    .getAllByTestId('latest-session-row')
+    .find(
+      item =>
+        item.getAttribute('data-agent-ref') === 'agent-x' &&
+        item.getAttribute('data-chat-id') === target
+    )
+  expect(row).toBeDefined()
+  fireEvent.click(within(row!).getByRole('button', { name: /^Session options for / }))
   fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
   await screen.findByRole('dialog', { name: 'Delete session?' })
   return { app, clerum, handle }

@@ -16,6 +16,7 @@ import {
   COMPOSER_MAX_FILE_BYTES,
   COMPOSER_MAX_IMAGE_BYTES,
 } from '../../ui/src/constants/attachments'
+import { startAgentChatFromFleet } from './helpers/agentNavigation.js'
 import {
   FIXTURE_RESPONSE_KIND,
   IMAGE_CAPABILITY_FIXTURE_MODELS,
@@ -28,6 +29,7 @@ import {
 } from './helpers/imageCapabilityEvidence'
 import { buildImageFixture, encodePng } from './helpers/qaRecorderImageFixture'
 import { openResourcesNavItem } from './navigationHelpers'
+import { openAgentsPage as openIdentityAgentsPage } from './navigationHelpers.js'
 import {
   EXTERNAL_REST_API_BASE_URL,
   assertAllowedTarget,
@@ -98,19 +100,12 @@ async function startBlankChat(page: Page) {
 }
 
 /**
- * Land on the exact configured agent through the visible Switch chat agent
- * menu, and trust the composer only once the switch control reports it.
+ * Select the exact configured fleet identity and verify the catalog display name
+ * on the new-chat selector before trusting the composer.
  */
 async function openConfiguredAgentChat(page: Page, hostRef: string) {
-  const escaped = hostRef.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  await page.getByTestId('nav-chat').click()
-  const switchAgent = page.getByRole('button', { name: 'Switch chat agent' })
-  await expect(switchAgent).toBeVisible({ timeout: 30_000 })
-  await switchAgent.click()
-  const agentMenuItem = page.getByRole('menuitem', { name: new RegExp(`^${escaped}$`, 'i') })
-  await expect(agentMenuItem).toHaveCount(1)
-  await agentMenuItem.click()
-  await expect(switchAgent).toContainText(new RegExp(escaped, 'i'))
+  await openIdentityAgentsPage(page)
+  await startAgentChatFromFleet(page, hostRef)
 }
 
 /** Selects the model through the visible popover and asserts the chip reports it. */

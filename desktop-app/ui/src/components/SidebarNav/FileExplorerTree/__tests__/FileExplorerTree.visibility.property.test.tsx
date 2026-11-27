@@ -261,51 +261,66 @@ const commandArbs = [
   fc.constant(new RemountCommand()),
 ]
 
+async function runScenario(commands: Iterable<AsyncCommand<Model, Real>>) {
+  cleanup()
+  const model: Model = {
+    roots: new Set(RIDS),
+    names: initialNames(),
+    expanded: new Set(),
+    failing: false,
+  }
+  const server: Model = {
+    roots: new Set(RIDS),
+    names: initialNames(),
+    expanded: new Set(),
+    failing: false,
+  }
+  installServer(server)
+  const published: string[][] = []
+  const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+  activeClient = queryClient
+  let generation = 0
+  const view = (key: number) => (
+    <QueryClientProvider client={queryClient}>
+      <FileExplorerTree
+        key={key}
+        onOpenFolder={vi.fn()}
+        onOpenPreview={vi.fn()}
+        pushToast={vi.fn()}
+        onVisibleExpandedFoldersChange={uris => published.push(uris)}
+      />
+    </QueryClientProvider>
+  )
+  const { rerender } = render(view(generation))
+  const real: Real = {
+    server,
+    published,
+    remount: () => {
+      generation += 1
+      rerender(view(generation))
+    },
+  }
+  await settleAndCheck(model, real)
+  await fc.asyncModelRun(() => ({ model, real }), commands)
+  queryClient.clear()
+}
+
 describe('FileExplorerTree — published expanded folders match the rendered forest', () => {
+  it('refreshes cached children after collapsing, renaming, and expanding a folder', async () => {
+    await runScenario([
+      new ExpandCommand('b'),
+      new RemoveRootCommand('c'),
+      new RemountCommand(),
+      new ReorderRootsCommand([3, 0, 1, 2]),
+      new ExpandCommand('b'),
+      new ExpandCommand('c'),
+    ])
+  })
+
   it('holds V1, S1, S2 and O1 at rest after any sequence of tree and server events', async () => {
     await fc.assert(
       fc.asyncProperty(fc.commands(commandArbs, { maxCommands: 18 }), async commands => {
-        cleanup()
-        const model: Model = {
-          roots: new Set(RIDS),
-          names: initialNames(),
-          expanded: new Set(),
-          failing: false,
-        }
-        const server: Model = {
-          roots: new Set(RIDS),
-          names: initialNames(),
-          expanded: new Set(),
-          failing: false,
-        }
-        installServer(server)
-        const published: string[][] = []
-        const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
-        activeClient = queryClient
-        let generation = 0
-        const view = (key: number) => (
-          <QueryClientProvider client={queryClient}>
-            <FileExplorerTree
-              key={key}
-              onOpenFolder={vi.fn()}
-              onOpenPreview={vi.fn()}
-              pushToast={vi.fn()}
-              onVisibleExpandedFoldersChange={uris => published.push(uris)}
-            />
-          </QueryClientProvider>
-        )
-        const { rerender } = render(view(generation))
-        const real: Real = {
-          server,
-          published,
-          remount: () => {
-            generation += 1
-            rerender(view(generation))
-          },
-        }
-        await settleAndCheck(model, real)
-        await fc.asyncModelRun(() => ({ model, real }), commands)
-        queryClient.clear()
+        await runScenario(commands)
       }),
       { numRuns: 100 }
     )
