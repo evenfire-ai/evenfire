@@ -432,6 +432,61 @@ describe('OIDC member sign-in configuration', () => {
     }
   )
 
+  // Each setting at fault is named, and only those: an empty claim value is
+  // still a value, and a claim name alone is the name rule's fault.
+  it.each([
+    [
+      'enabled with no claim value',
+      { CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled' },
+      ['ACCOUNT_CREATION'],
+    ],
+    [
+      'enabled with an empty claim value',
+      { ...requiredClaim(''), CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled' },
+      ['REQUIRED_CLAIM_VALUE'],
+    ],
+    [
+      'enabled with a claim name alone',
+      {
+        CONTROL_API_OIDC_REQUIRED_CLAIM_NAME: 'groups',
+        CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
+      },
+      ['ACCOUNT_CREATION', 'REQUIRED_CLAIM_NAME'],
+    ],
+    [
+      'any_issuer_account with a claim name alone',
+      {
+        CONTROL_API_OIDC_REQUIRED_CLAIM_NAME: 'groups',
+        CONTROL_API_OIDC_ACCOUNT_CREATION: 'any_issuer_account',
+      },
+      ['REQUIRED_CLAIM_NAME'],
+    ],
+    [
+      'any_issuer_account with a claim value',
+      { ...requiredClaim(CLAIM_VALUE), CONTROL_API_OIDC_ACCOUNT_CREATION: 'any_issuer_account' },
+      ['ACCOUNT_CREATION'],
+    ],
+    [
+      'any_issuer_account with an empty claim value',
+      { ...requiredClaim(''), CONTROL_API_OIDC_ACCOUNT_CREATION: 'any_issuer_account' },
+      ['ACCOUNT_CREATION', 'REQUIRED_CLAIM_VALUE'],
+    ],
+    [
+      'enabled with no claim on accounts.google.com',
+      {
+        CONTROL_API_OIDC_ISSUER: 'https://accounts.google.com',
+        CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
+      },
+      ['ACCOUNT_CREATION', 'REQUIRED_CLAIM_NAME'],
+    ],
+  ])('names exactly the fields at fault for %s', (_label, environment, fields) => {
+    expect(refusal({ ...OIDC_ENV, ...environment })).toBe(
+      `Invalid OIDC provider configuration field(s): ${fields
+        .map(field => `CONTROL_API_OIDC_${field}`)
+        .join(', ')}`
+    )
+  })
+
   it('requires the tenant pin for an Entra issuer', () => {
     const { CONTROL_API_OIDC_TENANT_ID: _omitted, ...withoutTenant } = ENTRA_ENV
     expect(refusal(withoutTenant)).toContain('CONTROL_API_OIDC_TENANT_ID')
