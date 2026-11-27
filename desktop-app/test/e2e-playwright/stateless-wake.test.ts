@@ -23,6 +23,8 @@
 // behaviour is tracked by #827 (with #1109).
 import { type ElectronApplication, type Page, test as base } from '@playwright/test'
 import { expect, launchFreshElectron, loginAs } from './fixtures.js'
+import { agentDisplayName } from './helpers/agentIdentity.js'
+import { startAgentChatFromFleet } from './helpers/agentNavigation.js'
 import { fleetRowHostRefs } from './helpers/fleetRowHostRefs.js'
 import { openAgentsPage } from './navigationHelpers.js'
 
@@ -136,10 +138,9 @@ const statelessAgentRow = (appPage: import('@playwright/test').Page) =>
 
 async function openStatelessAgent(appPage: import('@playwright/test').Page): Promise<void> {
   await openAgentsPage(appPage)
-  const chatInput = appPage.getByTestId('chat-input')
   const agentLink = statelessAgentRow(appPage)
   const emptyState = appPage.locator('text=No agents available')
-  await expect(agentLink.first().or(emptyState)).toBeVisible({ timeout: 20_000 })
+  await expect(agentLink.or(emptyState)).toBeVisible({ timeout: 20_000 })
   if (await emptyState.isVisible()) {
     throw new Error(
       `[stateless-wake] No agents available for the E2E user — the stateless host "${HOST_REF}" ` +
@@ -147,26 +148,13 @@ async function openStatelessAgent(appPage: import('@playwright/test').Page): Pro
     )
   }
 
-  const agentRow = agentLink.first()
+  const agentRow = agentLink
   await expect(
     agentRow,
     `[stateless-wake] Expected authorized agent row for "${HOST_REF}" in Desktop Agents.`
   ).toBeVisible({ timeout: 20_000 })
 
-  await agentRow.getByRole('button', { name: `More actions for ${HOST_REF}` }).click()
-  const actionsMenu = appPage.getByRole('menu')
-  await expect(actionsMenu).toBeVisible({ timeout: 10_000 })
-  const newChatAction = actionsMenu
-    .getByRole('button', { name: /^New chat$/ })
-    .or(actionsMenu.getByRole('menuitem', { name: /^New chat$/ }))
-  await expect(newChatAction).toBeVisible({ timeout: 10_000 })
-  await newChatAction.click()
-
-  await chatInput.waitFor({ state: 'visible', timeout: 30_000 })
-  await expect(appPage.getByRole('button', { name: /^Switch chat agent$/ })).toContainText(
-    HOST_REF,
-    { timeout: 30_000 }
-  )
+  await startAgentChatFromFleet(appPage, HOST_REF)
 }
 
 // The bash phase establishes the FIRST suspended-host precondition before
@@ -243,7 +231,7 @@ test('Scenario 0 — authenticated catalog prewarms every visible agent before s
       timeout: 20_000,
     })
     await expect(
-      statelessAgentRow(appPage).first(),
+      statelessAgentRow(appPage),
       `[stateless-wake] Expected authorized agent row for "${HOST_REF}" before any stateless chat interaction.`
     ).toBeVisible({ timeout: 20_000 })
     const names = await visibleAgentHostRefs(appPage)
@@ -726,7 +714,7 @@ async function expectSessionVisible(
 }
 
 // Click a listed session and confirm it became the active chat: its row is the
-// active one, the conversation breadcrumb names HOST_REF, and its title still
+// active one, the conversation breadcrumb shows the catalog name, and its title still
 // maps to the same chat identity. The "Switch chat agent" selector is not used:
 // the renderer shows it only on the new-chat landing (no active chat).
 async function openExistingSession(
@@ -744,7 +732,7 @@ async function openExistingSession(
       .getByRole('button', { name: `Open ${title}`, exact: true })
   ).toBeVisible({ timeout: 30_000 })
   await expect(appPage.getByRole('navigation', { name: 'Chat breadcrumb' })).toContainText(
-    HOST_REF,
+    await agentDisplayName(appPage, HOST_REF),
     { timeout: 30_000 }
   )
   expect(await chatIdForTitle(appPage, title), `"${title}" must keep its chat identity`).toBe(

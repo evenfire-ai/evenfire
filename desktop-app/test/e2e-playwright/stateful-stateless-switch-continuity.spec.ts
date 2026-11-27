@@ -37,6 +37,8 @@ import { execFile } from 'node:child_process'
 import { realpathSync } from 'node:fs'
 import nodePath from 'node:path'
 import { promisify } from 'node:util'
+import { fleetAgentActions } from './helpers/agentIdentity.js'
+import { startAgentChatFromFleet } from './helpers/agentNavigation.js'
 import { assertBranchProfileContext } from './helpers/branchProfileContext'
 import {
   DESKTOP_APP_ROOT,
@@ -381,19 +383,7 @@ function assertPod(pod: any, stateless: boolean): PodStorage {
 
 async function newChatFromAgentsPage(page: Page, hostName: string): Promise<void> {
   await openAgentsPage(page)
-  await page.getByRole('button', { name: `More actions for ${hostName}`, exact: true }).click()
-  const menu = page.getByRole('menu')
-  await expect(menu).toBeVisible({ timeout: 15_000 })
-  const newChat = menu
-    .getByRole('button', { name: /^New chat$/ })
-    .or(menu.getByRole('menuitem', { name: /^New chat$/ }))
-  await newChat.click()
-  await expect(page.getByRole('textbox', { name: 'Agent message composer' })).toBeVisible({
-    timeout: 30_000,
-  })
-  await expect(page.getByRole('button', { name: /^Switch chat agent$/ })).toContainText(hostName, {
-    timeout: 30_000,
-  })
+  await startAgentChatFromFleet(page, hostName)
 }
 
 async function sendMarker(page: Page, marker: string): Promise<void> {

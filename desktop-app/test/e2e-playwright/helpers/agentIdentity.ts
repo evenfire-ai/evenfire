@@ -8,6 +8,12 @@ export function fleetAgentSelector(ref: string): string {
 export async function agentDisplayName(page: Page, ref: string): Promise<string> {
   return page.evaluate(async agentRef => {
     const catalog = await window.clerum.access.refreshCatalog()
-    return catalog.agentDisplayByName?.[agentRef] ?? agentRef
+    const names = catalog.agentDisplayByName
+    return names && Object.hasOwn(names, agentRef) ? names[agentRef]! : agentRef
   }, ref)
+}
+
+/** Action identity is scoped to an exact resource; its label is presentation only. */
+export function fleetAgentActions(page: Page, ref: string) {
+  return page.locator(fleetAgentSelector(ref)).getByRole('button', { name: /^More actions for / })
 }
