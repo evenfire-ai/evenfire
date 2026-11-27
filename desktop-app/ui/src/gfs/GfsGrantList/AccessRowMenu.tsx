@@ -112,7 +112,7 @@ export function AccessRowMenu({
         ? createPortal(
             <div
               aria-label={`Actions for ${label}`}
-              className="da-gfs-resource-menu__panel da-gfs-access-row-menu__panel"
+              className="da-gfs-resource-menu__panel"
               ref={menuRef}
               role="menu"
               style={position ?? { left: 0, top: 0, visibility: 'hidden' }}
