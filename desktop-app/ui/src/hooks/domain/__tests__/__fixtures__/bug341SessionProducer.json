@@ -1,0 +1,130 @@
+{
+  "agent-x": {
+    "items": [
+      {
+        "agent": "agent-x",
+        "chatId": "catalog-probe",
+        "turnCount": 1,
+        "messageCount": 2,
+        "lastActivityAt": "2000-01-01T00:00:00.000Z",
+        "state": "idle",
+        "approvalMode": "manual",
+        "modeCeiling": "manual",
+        "channelCap": "manual",
+        "effectiveApprovalMode": "manual",
+        "shellClassifierAvailable": false
+      },
+      {
+        "agent": "agent-x",
+        "chatId": "chat-a",
+        "turnCount": 1,
+        "messageCount": 2,
+        "lastActivityAt": "2000-01-01T00:00:00.000Z",
+        "state": "idle",
+        "approvalMode": "manual",
+        "modeCeiling": "manual",
+        "channelCap": "manual",
+        "effectiveApprovalMode": "manual",
+        "shellClassifierAvailable": false
+      }
+    ]
+  },
+  "agent-y": {
+    "items": [
+      {
+        "agent": "agent-y",
+        "chatId": "chat-a",
+        "turnCount": 1,
+        "messageCount": 2,
+        "lastActivityAt": "2000-01-01T00:00:00.000Z",
+        "state": "idle",
+        "approvalMode": "manual",
+        "modeCeiling": "manual",
+        "channelCap": "manual",
+        "effectiveApprovalMode": "manual",
+        "shellClassifierAvailable": false
+      }
+    ]
+  },
+  "history": {
+    "agent": "agent-x",
+    "chatId": "chat-a",
+    "state": "idle",
+    "approvalMode": "manual",
+    "modeCeiling": "manual",
+    "channelCap": "manual",
+    "effectiveApprovalMode": "manual",
+    "shellClassifierAvailable": false,
+    "totalTurns": 1,
+    "oldestTurnNumber": 1,
+    "latestTurnNumber": 1,
+    "hasMoreBefore": false,
+    "hasMoreAfter": false,
+    "turns": [
+      {
+        "number": 1,
+        "user_input": "fixture request",
+        "response": "fixture response",
+        "started_at": "2000-01-01T00:00:00.000Z",
+        "completed_at": "2000-01-01T00:00:00.000Z"
+      }
+    ]
+  },
+  "empty": {
+    "items": []
+  },
+  "live": {
+    "agent": "agent-x",
+    "chatId": "chat-a",
+    "state": "processing",
+    "activeTaskId": "fixture-completion",
+    "approvalMode": "manual",
+    "modeCeiling": "manual",
+    "channelCap": "manual",
+    "effectiveApprovalMode": "manual",
+    "shellClassifierAvailable": false,
+    "totalTurns": 2,
+    "oldestTurnNumber": 1,
+    "latestTurnNumber": 2,
+    "hasMoreBefore": false,
+    "hasMoreAfter": false,
+    "turns": [
+      {
+        "number": 1,
+        "user_input": "fixture request",
+        "response": "fixture response",
+        "started_at": "2000-01-01T00:00:00.000Z",
+        "completed_at": "2000-01-01T00:00:00.000Z"
+      },
+      {
+        "number": 2,
+        "user_input": "live task",
+        "started_at": "2000-01-01T00:00:00.000Z"
+      }
+    ]
+  },
+  "idle": {
+    "agent": "agent-x",
+    "chatId": "chat-b",
+    "state": "idle",
+    "approvalMode": "manual",
+    "modeCeiling": "manual",
+    "channelCap": "manual",
+    "effectiveApprovalMode": "manual",
+    "shellClassifierAvailable": false,
+    "totalTurns": 1,
+    "oldestTurnNumber": 1,
+    "latestTurnNumber": 1,
+    "hasMoreBefore": false,
+    "hasMoreAfter": false,
+    "turns": [
+      {
+        "number": 1,
+        "user_input": "other request",
+        "response": "other reply",
+        "started_at": "2000-01-01T00:00:00.000Z",
+        "completed_at": "2000-01-01T00:00:00.000Z"
+      }
+    ]
+  }
+}

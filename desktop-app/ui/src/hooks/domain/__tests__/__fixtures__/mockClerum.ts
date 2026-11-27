@@ -143,16 +143,15 @@ export function installMockClerum(): MockClerum {
       store.removeMessages(agentRef, chatId, messageIds)
     ),
     replaceMessages: vi.fn(async () => undefined),
-    markUnreadTerminal: vi.fn(async () => undefined),
-    clearUnreadTerminal: vi.fn(async () => undefined),
+    markUnreadTerminal: vi.fn((agentRef: string, chatId: string) =>
+      store.markUnreadTerminal(agentRef, chatId)
+    ),
+    clearUnreadTerminal: vi.fn((agentRef: string, chatId: string) =>
+      store.clearUnreadTerminal(agentRef, chatId)
+    ),
     getLastActive: vi.fn(async () => null),
     setLastActive: vi.fn(async () => undefined),
-    getIndex: vi.fn(async () => ({
-      version: 1,
-      lastActiveChatId: null,
-      onboardingDismissed: false,
-      chats: [],
-    })),
+    getIndex: vi.fn((agentRef: string) => store.getIndex(agentRef)),
     reconcileServerSessions: vi.fn(async () => 0),
     dismissOnboarding: vi.fn(async () => undefined),
   }

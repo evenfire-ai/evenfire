@@ -1,4 +1,12 @@
-import { type MutableRefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  type MutableRefObject,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext'
 import { byUpdatedDesc, mergeByUpdatedDesc, mergeCatalogPage } from '@lib/catalogMerge'
 import { agentChatPlaceholder, remotePlaceholder } from '@lib/chatTitle'
@@ -114,6 +122,54 @@ export interface LatestSidebarChatEntry extends SidebarChatEntry {
   agentRef: string
 }
 
+type LatestChatState = {
+  rows: LatestSidebarChatEntry[]
+  committedPosition: number
+  /** Accepted successor samples that can still supersede an open acknowledgment. */
+  successorSamplesByAcknowledgment: ReadonlyMap<number, number>
+}
+
+type LatestAcknowledgment = {
+  id: number
+  key: string
+  agentRef: string
+  chatId: string
+  ownerScope: string
+  ownerGeneration: number
+  hostEpoch: number
+  issueOrder: number
+  pendingClearCount: number
+  registrationClosed: boolean
+  firstClearFulfilledOrder?: number
+  firstClearObserved: boolean
+}
+
+type LatestBatchAcknowledgment = {
+  id: number
+  key: string
+  issueOrder: number
+  markOrderAtStart?: number
+  clearFulfilledOrder?: number
+}
+
+type LatestPublicationWindow = {
+  id: number
+  ownerScope: string
+  ownerGeneration: number
+  startOrder: number
+  hostEpochByAgent: Map<string, number>
+  active: boolean
+  asyncSettled: boolean
+  lastPosition: number
+  localMembershipKnown: boolean
+  localRows: Set<string>
+  sampledUnreadByKey: Map<string, boolean | undefined>
+  markOrderByKey: Map<string, number>
+  acknowledgments: Map<number, LatestBatchAcknowledgment>
+}
+
+type ObserveUnreadClear = (operation: Promise<void>) => void
+
 /** The pending selection requested for an agent before its chats have loaded. */
 export type PendingChatSelection =
   | { mode: 'latest'; chatId: null }
@@ -136,7 +192,11 @@ export interface ChatListControllerHost {
   clearPendingSelection: (agentRef: string, preserveSpecificChatId?: string) => void
   clearActiveChat: () => void
   scrollChatToBottom: () => void
-  dispatchSession: (chatKey: string, event: SessionFsmEvent) => void
+  dispatchSession: (
+    chatKey: string,
+    event: SessionFsmEvent,
+    observeUnreadClear?: ObserveUnreadClear
+  ) => void
   clearComposerDraft: (chatId: string) => void
   getActiveChatId: () => string | null
   /** True while a chat switch is unconfirmed: its history is loading, or a remembered transcript is shown before its last-active write settles. */
@@ -355,14 +415,35 @@ export function useChatListController({
   onHostAccessRevoked,
   onHostAuthorityUncertain,
 }: UseChatListControllerParams) {
+  // Keep the visible owner current before React evaluates any queued Latest
+  // state updater during this render. Stale windows must observe a scope change
+  // even when their updater is being replayed in the same render.
+  const currentAuthorityScopeRef = useRef(`${isAuthenticated}:${scopeKey}`)
+  currentAuthorityScopeRef.current = `${isAuthenticated}:${scopeKey}`
   // Per-agent list for the SELECTED agent (the sidebar's chat list).
   const [chatList, setChatList] = useState<SidebarChatEntry[]>([])
   const [chatListLoading, setChatListLoading] = useState(false)
   const [chatListMoreLoading, setChatListMoreLoading] = useState(false)
   const [chatListHasMoreRemoteSessions, setChatListHasMoreRemoteSessions] = useState(false)
   // Cross-agent "Latest sessions" list (badges live in the FSM, seeded below).
-  const [latestChatSessions, setLatestChatSessions] = useState<LatestSidebarChatEntry[]>([])
+  const [latestChatState, setLatestChatState] = useState<LatestChatState>({
+    rows: [],
+    committedPosition: 0,
+    successorSamplesByAcknowledgment: new Map(),
+  })
+  const latestChatSessions = latestChatState.rows
+  const latestChatStateRef = useRef(latestChatState)
   const [latestChatSessionsLoading, setLatestChatSessionsLoading] = useState(false)
+  const latestPublicationPositionRef = useRef(0)
+  const latestEventOrderRef = useRef(0)
+  const latestWindowIdRef = useRef(0)
+  const latestAcknowledgmentIdRef = useRef(0)
+  const latestWindowsRef = useRef(new Map<number, LatestPublicationWindow>())
+  const latestAcknowledgmentsByKeyRef = useRef(new Map<string, LatestAcknowledgment[]>())
+  const latestMarkOrderByKeyRef = useRef(new Map<string, number>())
+  const deletedChatIdsByAgentRef = useRef(new Map<string, Set<string>>())
+  const requestGenerationRef = useRef(0)
+  const authorityScopeGenerationRef = useRef(0)
   const catalogOfflineByAgentRef = useRef(new Set<string>())
   const catalogOfflineToastShownRef = useRef(false)
   const catalogOfflineToastQueuedRef = useRef(false)
@@ -375,14 +456,341 @@ export function useChatListController({
   const suppressAutoSelectionSequenceRef = useRef(0)
   const chatListNextCursorByAgentRef = useRef<Record<string, string | null | undefined>>({})
   const chatListLoadingMoreByAgentRef = useRef<Set<string>>(new Set())
-  const deletedChatIdsByAgentRef = useRef(new Map<string, Set<string>>())
-  const requestGenerationRef = useRef(0)
-  const authorityScopeGenerationRef = useRef(0)
   const agentNamesRef = useRef(agentNames)
   agentNamesRef.current = agentNames
   const agentNamesKey = agentNames.join('\n')
-  const currentAuthorityScopeRef = useRef(`${isAuthenticated}:${scopeKey}`)
-  currentAuthorityScopeRef.current = `${isAuthenticated}:${scopeKey}`
+
+  const setLatestChatSessions = useCallback(
+    (
+      update:
+        | LatestSidebarChatEntry[]
+        | ((previous: LatestSidebarChatEntry[]) => LatestSidebarChatEntry[])
+    ) => {
+      setLatestChatState(previous => {
+        const rows = typeof update === 'function' ? update(previous.rows) : update
+        return rows === previous.rows ? previous : { ...previous, rows }
+      })
+    },
+    []
+  )
+
+  const latestWindowIsCurrent = useCallback(
+    (window: LatestPublicationWindow) =>
+      window.active &&
+      authorityScopeGenerationRef.current === window.ownerGeneration &&
+      currentAuthorityScopeRef.current === window.ownerScope,
+    []
+  )
+
+  const latestWindowAgentIsCurrent = useCallback(
+    (window: LatestPublicationWindow, agentRef: string, chatId?: string) =>
+      latestWindowIsCurrent(window) &&
+      getHostAuthorityEpoch(agentRef) === window.hostEpochByAgent.get(agentRef) &&
+      !isHostAccessBlocked(agentRef) &&
+      (chatId === undefined || !deletedChatIdsByAgentRef.current.get(agentRef)?.has(chatId)),
+    [getHostAuthorityEpoch, isHostAccessBlocked, latestWindowIsCurrent]
+  )
+
+  const reserveLatestPublicationPosition = useCallback((window: LatestPublicationWindow) => {
+    const position = ++latestPublicationPositionRef.current
+    window.lastPosition = position
+    return position
+  }, [])
+
+  const enqueueLatestPublication = useCallback(
+    (
+      window: LatestPublicationWindow,
+      position: number,
+      update: (previous: LatestSidebarChatEntry[]) => LatestSidebarChatEntry[],
+      guardedAgent?: { agentRef: string; chatId?: string },
+      successorAcknowledgmentIds: readonly number[] = []
+    ) => {
+      setLatestChatState(previous => {
+        if (!latestWindowIsCurrent(window)) return previous
+        if (
+          guardedAgent !== undefined &&
+          !latestWindowAgentIsCurrent(window, guardedAgent.agentRef, guardedAgent.chatId)
+        ) {
+          return { ...previous, committedPosition: position }
+        }
+        let successorSamplesByAcknowledgment = previous.successorSamplesByAcknowledgment
+        if (successorAcknowledgmentIds.length) {
+          const next = new Map(successorSamplesByAcknowledgment)
+          for (const acknowledgmentId of successorAcknowledgmentIds) {
+            next.set(acknowledgmentId, position)
+          }
+          successorSamplesByAcknowledgment = next
+        }
+        return {
+          rows: update(previous.rows),
+          committedPosition: position,
+          successorSamplesByAcknowledgment,
+        }
+      })
+    },
+    [latestWindowAgentIsCurrent, latestWindowIsCurrent]
+  )
+
+  const cleanupLatestAcknowledgment = useCallback((acknowledgment: LatestAcknowledgment) => {
+    const acknowledgments = latestAcknowledgmentsByKeyRef.current.get(acknowledgment.key)
+    if (!acknowledgments) return
+    const activeWindows = [...latestWindowsRef.current.values()].filter(window => window.active)
+    const remaining = acknowledgments.filter(item => {
+      if (!item.registrationClosed || item.pendingClearCount > 0) return true
+      if (activeWindows.some(window => window.acknowledgments.has(item.id))) return true
+      return (
+        item.firstClearObserved &&
+        acknowledgments.some(
+          earlier =>
+            earlier.issueOrder < item.issueOrder &&
+            (!earlier.registrationClosed || earlier.pendingClearCount > 0)
+        )
+      )
+    })
+    if (remaining.length === acknowledgments.length) return
+    if (remaining.length) {
+      latestAcknowledgmentsByKeyRef.current.set(acknowledgment.key, remaining)
+    } else {
+      latestAcknowledgmentsByKeyRef.current.delete(acknowledgment.key)
+      latestMarkOrderByKeyRef.current.delete(acknowledgment.key)
+    }
+    setLatestChatState(previous => {
+      const retainedIds = new Set(remaining.map(item => item.id))
+      if (
+        ![...previous.successorSamplesByAcknowledgment.keys()].some(
+          id => acknowledgments.some(item => item.id === id) && !retainedIds.has(id)
+        )
+      ) {
+        return previous
+      }
+      const successorSamplesByAcknowledgment = new Map(previous.successorSamplesByAcknowledgment)
+      for (const item of acknowledgments) {
+        if (!retainedIds.has(item.id)) successorSamplesByAcknowledgment.delete(item.id)
+      }
+      return { ...previous, successorSamplesByAcknowledgment }
+    })
+  }, [])
+
+  const latestAcknowledgmentOwnerIsCurrent = useCallback(
+    (acknowledgment: LatestAcknowledgment) =>
+      currentAuthorityScopeRef.current === acknowledgment.ownerScope &&
+      authorityScopeGenerationRef.current === acknowledgment.ownerGeneration &&
+      getHostAuthorityEpoch(acknowledgment.agentRef) === acknowledgment.hostEpoch &&
+      !isHostAccessBlocked(acknowledgment.agentRef) &&
+      !deletedChatIdsByAgentRef.current.get(acknowledgment.agentRef)?.has(acknowledgment.chatId),
+    [getHostAuthorityEpoch, isHostAccessBlocked]
+  )
+
+  const applyLatestAcknowledgment = useCallback(
+    (acknowledgment: LatestAcknowledgment) => {
+      const hasNewerSuccessfulAcknowledgment = (
+        latestAcknowledgmentsByKeyRef.current.get(acknowledgment.key) ?? []
+      ).some(
+        candidate =>
+          candidate.id !== acknowledgment.id &&
+          candidate.issueOrder > acknowledgment.issueOrder &&
+          candidate.firstClearObserved
+      )
+      const ownerIsCurrent = latestAcknowledgmentOwnerIsCurrent(acknowledgment)
+      setLatestChatState(previous => {
+        const successorSamplePosition = previous.successorSamplesByAcknowledgment.get(
+          acknowledgment.id
+        )
+        const newerSampleAlreadyPublished =
+          successorSamplePosition !== undefined &&
+          previous.committedPosition >= successorSamplePosition
+        const nextSuccessorSamples = new Map(previous.successorSamplesByAcknowledgment)
+        nextSuccessorSamples.delete(acknowledgment.id)
+        const shouldProject =
+          ownerIsCurrent &&
+          latestAcknowledgmentOwnerIsCurrent(acknowledgment) &&
+          !hasNewerSuccessfulAcknowledgment &&
+          !newerSampleAlreadyPublished
+        let rows = previous.rows
+        if (shouldProject) {
+          let changed = false
+          rows = previous.rows.map(row => {
+            if (
+              row.agentRef !== acknowledgment.agentRef ||
+              row.id !== acknowledgment.chatId ||
+              row.unreadTerminal !== true
+            ) {
+              return row
+            }
+            changed = true
+            return { ...row, unreadTerminal: false }
+          })
+          if (!changed) rows = previous.rows
+        }
+        if (
+          rows === previous.rows &&
+          nextSuccessorSamples.size === previous.successorSamplesByAcknowledgment.size
+        ) {
+          return previous
+        }
+        return {
+          ...previous,
+          rows,
+          successorSamplesByAcknowledgment: nextSuccessorSamples,
+        }
+      })
+    },
+    [latestAcknowledgmentOwnerIsCurrent]
+  )
+
+  const attachLatestAcknowledgment = useCallback(
+    (window: LatestPublicationWindow, acknowledgment: LatestAcknowledgment) => {
+      if (
+        !window.active ||
+        window.acknowledgments.has(acknowledgment.id) ||
+        window.ownerScope !== acknowledgment.ownerScope ||
+        window.ownerGeneration !== acknowledgment.ownerGeneration ||
+        window.hostEpochByAgent.get(acknowledgment.agentRef) !== acknowledgment.hostEpoch ||
+        (acknowledgment.firstClearFulfilledOrder !== undefined &&
+          window.startOrder >= acknowledgment.firstClearFulfilledOrder)
+      ) {
+        return
+      }
+      const markOrderAtStart =
+        window.startOrder > acknowledgment.issueOrder
+          ? latestMarkOrderByKeyRef.current.get(acknowledgment.key)
+          : undefined
+      window.acknowledgments.set(acknowledgment.id, {
+        id: acknowledgment.id,
+        key: acknowledgment.key,
+        issueOrder: acknowledgment.issueOrder,
+        markOrderAtStart,
+        clearFulfilledOrder: acknowledgment.firstClearFulfilledOrder,
+      })
+    },
+    []
+  )
+
+  const retireLatestPublicationWindow = useCallback(
+    (window: LatestPublicationWindow) => {
+      if (!window.active) return
+      window.active = false
+      latestWindowsRef.current.delete(window.id)
+      for (const acknowledgmentId of window.acknowledgments.keys()) {
+        for (const acknowledgments of latestAcknowledgmentsByKeyRef.current.values()) {
+          const acknowledgment = acknowledgments.find(item => item.id === acknowledgmentId)
+          if (acknowledgment) cleanupLatestAcknowledgment(acknowledgment)
+        }
+      }
+    },
+    [cleanupLatestAcknowledgment]
+  )
+
+  const maybeRetireLatestPublicationWindow = useCallback(
+    (window: LatestPublicationWindow) => {
+      if (
+        window.active &&
+        window.asyncSettled &&
+        latestChatStateRef.current.committedPosition >= window.lastPosition
+      ) {
+        retireLatestPublicationWindow(window)
+      }
+    },
+    [retireLatestPublicationWindow]
+  )
+
+  const beginLatestUnreadAcknowledgment = useCallback(
+    (agentRef: string, chatId: string) => {
+      const key = makeTaskKey(agentRef, chatId)
+      const acknowledgment: LatestAcknowledgment = {
+        id: ++latestAcknowledgmentIdRef.current,
+        key,
+        agentRef,
+        chatId,
+        ownerScope: currentAuthorityScopeRef.current,
+        ownerGeneration: authorityScopeGenerationRef.current,
+        hostEpoch: getHostAuthorityEpoch(agentRef),
+        issueOrder: ++latestEventOrderRef.current,
+        pendingClearCount: 0,
+        registrationClosed: false,
+        firstClearObserved: false,
+      }
+      const acknowledgments = latestAcknowledgmentsByKeyRef.current.get(key) ?? []
+      acknowledgments.push(acknowledgment)
+      latestAcknowledgmentsByKeyRef.current.set(key, acknowledgments)
+      for (const window of latestWindowsRef.current.values()) {
+        attachLatestAcknowledgment(window, acknowledgment)
+      }
+
+      const observeUnreadClear: ObserveUnreadClear = operation => {
+        acknowledgment.pendingClearCount += 1
+        void operation.then(
+          () => {
+            if (!acknowledgment.firstClearObserved) {
+              acknowledgment.firstClearObserved = true
+              acknowledgment.firstClearFulfilledOrder = ++latestEventOrderRef.current
+              for (const window of latestWindowsRef.current.values()) {
+                const batchAcknowledgment = window.acknowledgments.get(acknowledgment.id)
+                if (batchAcknowledgment) {
+                  batchAcknowledgment.clearFulfilledOrder = acknowledgment.firstClearFulfilledOrder
+                }
+              }
+              applyLatestAcknowledgment(acknowledgment)
+            }
+            acknowledgment.pendingClearCount -= 1
+            cleanupLatestAcknowledgment(acknowledgment)
+          },
+          error => {
+            acknowledgment.pendingClearCount -= 1
+            cleanupLatestAcknowledgment(acknowledgment)
+            throw error
+          }
+        )
+      }
+      const close = () => {
+        acknowledgment.registrationClosed = true
+        cleanupLatestAcknowledgment(acknowledgment)
+      }
+      return { observeUnreadClear, close }
+    },
+    [
+      applyLatestAcknowledgment,
+      attachLatestAcknowledgment,
+      cleanupLatestAcknowledgment,
+      getHostAuthorityEpoch,
+    ]
+  )
+
+  const markUnreadInLatestWindow = useCallback(
+    (agentRef: string, chatId: string) => {
+      const key = makeTaskKey(agentRef, chatId)
+      const order = ++latestEventOrderRef.current
+      const acknowledgmentRecords = latestAcknowledgmentsByKeyRef.current.get(key) ?? []
+      if (acknowledgmentRecords.length) latestMarkOrderByKeyRef.current.set(key, order)
+      for (const window of latestWindowsRef.current.values()) {
+        if (
+          !window.active ||
+          !latestWindowAgentIsCurrent(window, agentRef, chatId) ||
+          ![...window.acknowledgments.values()].some(ack => ack.issueOrder < order)
+        ) {
+          continue
+        }
+        window.markOrderByKey.set(key, order)
+        if (!window.localMembershipKnown || !window.localRows.has(key)) continue
+        const position = reserveLatestPublicationPosition(window)
+        enqueueLatestPublication(
+          window,
+          position,
+          rows =>
+            rows.map(row =>
+              row.agentRef === agentRef && row.id === chatId && row.unreadTerminal !== true
+                ? { ...row, unreadTerminal: true }
+                : row
+            ),
+          { agentRef, chatId },
+          [...window.acknowledgments.values()]
+            .filter(acknowledgment => acknowledgment.issueOrder < order)
+            .map(acknowledgment => acknowledgment.id)
+        )
+      }
+    },
+    [enqueueLatestPublication, latestWindowAgentIsCurrent, reserveLatestPublicationPosition]
+  )
 
   // Spec 15 §2.5 (B21) — pending-rename queue. A user rename is optimistic-local
   // first, then synced by RPC; while unconfirmed the local title wins over the
@@ -1657,6 +2065,13 @@ export function useChatListController({
     if (released) setLatestReloadRevision(revision => revision + 1)
   }, [agentNamesKey, hostAuthorityRevision, isHostAccessBlocked])
 
+  useLayoutEffect(() => {
+    latestChatStateRef.current = latestChatState
+    for (const window of latestWindowsRef.current.values()) {
+      maybeRetireLatestPublicationWindow(window)
+    }
+  }, [latestChatState, maybeRetireLatestPublicationWindow])
+
   // ─── Cross-agent latest-sessions loader (seeds badges via SERVER_SNAPSHOT) ───
 
   useEffect(() => {
@@ -1673,6 +2088,27 @@ export function useChatListController({
     const hostAuthorityEpochByAgent = new Map(
       requestedAgentNames.map(agentRef => [agentRef, getHostAuthorityEpoch(agentRef)])
     )
+    const window: LatestPublicationWindow = {
+      id: ++latestWindowIdRef.current,
+      ownerScope: authorityScopeAtRequest,
+      ownerGeneration: authorityScopeGeneration,
+      startOrder: ++latestEventOrderRef.current,
+      hostEpochByAgent: hostAuthorityEpochByAgent,
+      active: true,
+      asyncSettled: false,
+      lastPosition: latestChatStateRef.current.committedPosition,
+      localMembershipKnown: false,
+      localRows: new Set(),
+      sampledUnreadByKey: new Map(),
+      markOrderByKey: new Map(),
+      acknowledgments: new Map(),
+    }
+    latestWindowsRef.current.set(window.id, window)
+    for (const acknowledgments of latestAcknowledgmentsByKeyRef.current.values()) {
+      for (const acknowledgment of acknowledgments) {
+        attachLatestAcknowledgment(window, acknowledgment)
+      }
+    }
     setLatestChatSessionsLoading(true)
     ;(async () => {
       try {
@@ -1721,15 +2157,63 @@ export function useChatListController({
           for (const chatId of group.deletedChatIds) deleted.add(chatId)
           deletedChatIdsByAgentRef.current.set(group.agentRef, deleted)
         }
-        setLatestChatSessions(
-          localGroups
-            .flatMap(group => group.entries)
-            .filter(
-              chat =>
-                !isHostAccessBlocked(chat.agentRef) &&
-                !deletedChatIdsByAgentRef.current.get(chat.agentRef)?.has(chat.id)
-            )
-            .sort(byUpdatedDesc)
+        const localRows = localGroups
+          .flatMap(group => group.entries)
+          .filter(
+            chat =>
+              !isHostAccessBlocked(chat.agentRef) &&
+              !deletedChatIdsByAgentRef.current.get(chat.agentRef)?.has(chat.id)
+          )
+          .sort(byUpdatedDesc)
+        window.localMembershipKnown = true
+        window.localRows = new Set(localRows.map(row => makeTaskKey(row.agentRef, row.id)))
+        window.sampledUnreadByKey = new Map(
+          localRows.map(row => [makeTaskKey(row.agentRef, row.id), row.unreadTerminal])
+        )
+        const successorAcknowledgmentIds = [...window.acknowledgments.values()]
+          .filter(
+            acknowledgment =>
+              window.localRows.has(acknowledgment.key) &&
+              acknowledgment.markOrderAtStart !== undefined &&
+              acknowledgment.markOrderAtStart > acknowledgment.issueOrder &&
+              acknowledgment.clearFulfilledOrder === undefined
+          )
+          .map(acknowledgment => acknowledgment.id)
+        const adjustedLocalRows = localRows.map(row => {
+          const key = makeTaskKey(row.agentRef, row.id)
+          const acknowledgments = [...window.acknowledgments.values()].filter(
+            acknowledgment =>
+              acknowledgment.key === key &&
+              acknowledgment.issueOrder > (acknowledgment.markOrderAtStart ?? 0)
+          )
+          const latestSuccessfulAcknowledgment = acknowledgments
+            .filter(acknowledgment => acknowledgment.clearFulfilledOrder !== undefined)
+            .sort((left, right) => right.issueOrder - left.issueOrder)[0]
+          const latestInWindowMark = window.markOrderByKey.get(key) ?? 0
+          let unreadTerminal = row.unreadTerminal
+          if (
+            latestSuccessfulAcknowledgment &&
+            latestInWindowMark <= latestSuccessfulAcknowledgment.issueOrder &&
+            unreadTerminal === true
+          ) {
+            unreadTerminal = false
+          }
+          if (
+            latestInWindowMark > 0 &&
+            latestInWindowMark > (latestSuccessfulAcknowledgment?.issueOrder ?? 0) &&
+            acknowledgments.some(acknowledgment => acknowledgment.issueOrder < latestInWindowMark)
+          ) {
+            unreadTerminal = true
+          }
+          return unreadTerminal === row.unreadTerminal ? row : { ...row, unreadTerminal }
+        })
+        const localPosition = reserveLatestPublicationPosition(window)
+        enqueueLatestPublication(
+          window,
+          localPosition,
+          () => adjustedLocalRows,
+          undefined,
+          successorAcknowledgmentIds
         )
         setLatestChatSessionsLoading(false)
 
@@ -1787,41 +2271,47 @@ export function useChatListController({
             // Hardening: tombstones are read again inside the updater. The filter
             // above already dropped them from `sessions`, and no test deletes a
             // chat between that filter and this updater.
-            setLatestChatSessions(previous => {
-              if (!requestStillCurrent()) return previous
-              const deleted = deletedChatIdsByAgentRef.current.get(agentRef)
-              const cached = previous.filter(
-                item => item.agentRef === agentRef && !deleted?.has(item.id)
-              )
-              // §2.2 precedence (cases A-F) lives in `mergeCatalogPage`; merge
-              // only this Host's entries so another Host's arrival preserves them.
-              const merged = mergeCatalogPage<LatestSidebarChatEntry, LatestCatalogSession>({
-                cached,
-                sessions: sessions.filter(session => !deleted?.has(session.chatId)),
-                entryKey: item => `${item.agentRef}:${item.id}`,
-                sessionKey: session => `${session.agentRef}:${session.chatId}`,
-                entryPendingRename: item =>
-                  catalogTitleRenameState(item.agentRef, item.id, issueSeq),
-                sessionPendingRename: session =>
-                  catalogTitleRenameState(session.agentRef, session.chatId, issueSeq),
-                placeholderFor: remotePlaceholder,
-                serverOnlyEntry: (session, title) => ({
-                  id: session.chatId,
-                  title,
-                  createdAt: session.lastActivityAt,
-                  updatedAt: session.lastActivityAt,
-                  messageCount: knownServerMessageCount(session),
-                  remote: true,
-                  agentRef: session.agentRef,
-                }),
-              })
-              // Every writer keeps `previous` sorted, so the other Hosts' rows
-              // stay sorted after the filter and one linear merge suffices.
-              return mergeByUpdatedDesc(
-                merged,
-                previous.filter(item => item.agentRef !== agentRef)
-              )
-            })
+            const position = reserveLatestPublicationPosition(window)
+            enqueueLatestPublication(
+              window,
+              position,
+              previous => {
+                if (!requestStillCurrent()) return previous
+                const deleted = deletedChatIdsByAgentRef.current.get(agentRef)
+                const cached = previous.filter(
+                  item => item.agentRef === agentRef && !deleted?.has(item.id)
+                )
+                // §2.2 precedence (cases A-F) lives in `mergeCatalogPage`; merge
+                // only this Host's entries so another Host's arrival preserves them.
+                const merged = mergeCatalogPage<LatestSidebarChatEntry, LatestCatalogSession>({
+                  cached,
+                  sessions: sessions.filter(session => !deleted?.has(session.chatId)),
+                  entryKey: item => `${item.agentRef}:${item.id}`,
+                  sessionKey: session => `${session.agentRef}:${session.chatId}`,
+                  entryPendingRename: item =>
+                    catalogTitleRenameState(item.agentRef, item.id, issueSeq),
+                  sessionPendingRename: session =>
+                    catalogTitleRenameState(session.agentRef, session.chatId, issueSeq),
+                  placeholderFor: remotePlaceholder,
+                  serverOnlyEntry: (session, title) => ({
+                    id: session.chatId,
+                    title,
+                    createdAt: session.lastActivityAt,
+                    updatedAt: session.lastActivityAt,
+                    messageCount: knownServerMessageCount(session),
+                    remote: true,
+                    agentRef: session.agentRef,
+                  }),
+                })
+                // Every writer keeps `previous` sorted, so the other Hosts' rows
+                // stay sorted after the filter and one linear merge suffices.
+                return mergeByUpdatedDesc(
+                  merged,
+                  previous.filter(item => item.agentRef !== agentRef)
+                )
+              },
+              { agentRef }
+            )
 
             // A Host the user never selects keeps its titles across restarts too.
             if (requestStillCurrent()) persistServerSessions(agentRef, sessions, issueSeq)
@@ -1843,14 +2333,17 @@ export function useChatListController({
           })
         )
       } finally {
+        window.asyncSettled = true
         if (!cancelled) {
           setLatestChatSessionsLoading(false)
         }
+        maybeRetireLatestPublicationWindow(window)
       }
     })()
 
     return () => {
       cancelled = true
+      retireLatestPublicationWindow(window)
     }
   }, [
     agentNamesKey,
@@ -1866,6 +2359,11 @@ export function useChatListController({
     latestReloadRevision,
     persistServerSessions,
     catalogTitleRenameState,
+    attachLatestAcknowledgment,
+    enqueueLatestPublication,
+    maybeRetireLatestPublicationWindow,
+    reserveLatestPublicationPosition,
+    retireLatestPublicationWindow,
   ])
 
   // Stable across renders whose inputs did not change, so consumers keyed on the
@@ -1902,6 +2400,8 @@ export function useChatListController({
     // Narrow chatList ops (parent flows).
     markUnreadInList,
     clearUnreadInList,
+    beginLatestUnreadAcknowledgment,
+    markUnreadInLatestWindow,
     upsertProvisionalEntry,
     applyEntryTitle,
     applyLatestTitle,
