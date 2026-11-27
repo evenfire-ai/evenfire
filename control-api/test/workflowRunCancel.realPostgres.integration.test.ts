@@ -1181,11 +1181,10 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
       expect((await readRun(runId)).cancel_requested_at).toBeInstanceOf(Date)
     }
 
-    // R24g (cron run with no team) and R24l (admin-UI run): 404 for every
-    // external caller, so no permitted caller exists. Witness substitution
-    // approved by the coordinator (C1-C5-r5.md:380, :384): the row is
-    // unchanged, the cancel's locked read returned the run, and the same caller
-    // cancels a sibling run it may cancel.
+    // A cron run with no team and an admin-UI run: 404 for every external
+    // caller, so no permitted caller exists. The witness is therefore indirect:
+    // the row is unchanged, the cancel's locked read returned the run, and the
+    // same caller cancels a sibling run it may cancel.
     const lockReads: Array<{ runId: unknown; rowCount: number | null }> = []
     const lockRecorder: QueryHook = {
       after: (text, values, result) => {
