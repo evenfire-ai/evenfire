@@ -107,4 +107,34 @@ describe('token-leak redaction', () => {
     expect(lines[2]).toContain('"status":"allowed"')
     for (const line of lines) expect(line).not.toContain(assertion)
   })
+
+  it('removes the invitation link token from a logged field, a nested object and a request body', () => {
+    for (const path of ['invitationToken', '*.invitationToken', 'body.invitationToken']) {
+      expect(TOKEN_LEAK_REDACT_PATHS).toContain(path)
+      expect(REQUIRED_REDACT_PATHS).toContain(path)
+    }
+    const lines: string[] = []
+    const sink = new Writable({
+      write(chunk, _encoding, done) {
+        lines.push(String(chunk))
+        done()
+      },
+    })
+    const logger = pino({ redact: { paths: [...TOKEN_LEAK_REDACT_PATHS], remove: true } }, sink)
+    const invitationToken = 'fixture-invitation-flow-token.Zq8~'
+
+    logger.info({ invitationToken, attempt: 'plain' }, 'field')
+    logger.info({ start: { invitationToken, issuer: 'fixture-issuer' } }, 'nested')
+    logger.info({ body: { invitationToken, browserBinding: 'fixture-binding' } }, 'body')
+
+    // Witness: every record was written, with its non-secret fields intact.
+    expect(lines).toHaveLength(3)
+    expect(lines[0]).toContain('"attempt":"plain"')
+    expect(lines[1]).toContain('"issuer":"fixture-issuer"')
+    expect(lines[2]).toContain('"browserBinding":"fixture-binding"')
+    for (const line of lines) {
+      expect(line).not.toContain(invitationToken)
+      expect(line).not.toContain('invitationToken')
+    }
+  })
 })
