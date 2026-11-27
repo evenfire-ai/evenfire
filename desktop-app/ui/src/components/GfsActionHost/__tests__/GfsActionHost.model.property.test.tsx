@@ -1143,7 +1143,7 @@ const ACTION_BITS: Record<string, string> = {
   'Upload file': 'write',
 }
 
-/** Inert: natively disabled, or greyed out with the reason it cannot run. */
+/** Inert: `aria-disabled` (with or without a reason), or natively disabled. */
 function isInert(item: HTMLButtonElement): boolean {
   return item.disabled || item.getAttribute('aria-disabled') === 'true'
 }

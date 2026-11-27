@@ -141,14 +141,17 @@ function menuItem(menu: HTMLElement, name: string) {
 }
 
 /**
- * How an item is offered: left out, runnable, greyed out with a reason
- * (`aria-disabled`), or natively disabled while a change is in flight.
+ * How an item is offered: left out, runnable, greyed out with a reason, or
+ * held back without one while a change is in flight. Both inert states are
+ * `aria-disabled`; only the tooltip tells them apart.
  */
 function itemState(menu: HTMLElement, name: string) {
   const item = menuItem(menu, name)
   if (!item) return 'absent'
-  if (item.getAttribute('aria-disabled') === 'true') return 'unavailable'
-  return item.disabled ? 'busy' : 'enabled'
+  if (item.getAttribute('aria-disabled') === 'true') {
+    return item.hasAttribute('title') ? 'unavailable' : 'busy'
+  }
+  return item.disabled ? 'disabled' : 'enabled'
 }
 
 beforeEach(() => {

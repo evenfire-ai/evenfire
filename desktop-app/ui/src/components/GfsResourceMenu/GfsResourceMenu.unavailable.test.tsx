@@ -6,13 +6,13 @@
  * action model and the real menu.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { filesRowActionOptions, sidebarRowActionOptions } from '@lib/gfsResourceActionSurfaces'
 import type { GfsResourceAction } from '@lib/gfsResourceActions'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
 import { gfsRowActionAvailability } from '@lib/gfsRowActionAvailability'
 import type { GfsRowListing } from '@lib/gfsRowActionAvailability.types'
-import { expectUnavailable, isMenuItemEnabled } from '../../test/gfsMenuItemState'
+import { expectInert, expectUnavailable, isMenuItemEnabled } from '../../test/gfsMenuItemState'
 import { GfsResourceMenu } from './index'
 
 const URI = 'gfs://main/0123456789abcdef0123456789abcdef'
@@ -71,7 +71,7 @@ function filesRowActions(row: Row, handlers = rowHandlers()) {
   )
 }
 
-function sidebarRowActions(row: Row, handlers = rowHandlers()) {
+function sidebarRowActions(row: Row, handlers = rowHandlers(), mutating = false) {
   return getGfsMenuActions(
     buildGfsResourceActions(
       sidebarRowActionOptions({
@@ -82,7 +82,7 @@ function sidebarRowActions(row: Row, handlers = rowHandlers()) {
         parentResourceId: row.parentResourceId,
         availability: availabilityOf(row),
         hostAvailable: true,
-        mutating: false,
+        mutating,
         handlers,
       })
     )
@@ -312,24 +312,80 @@ describe('GfsResourceMenu: unavailable actions', () => {
     for (const reason of reasons) expect(reason).not.toMatch(/…|\.\.\.| to isn't/)
   })
 
-  it('keeps an item held back only by an in-flight change natively disabled, without a reason', () => {
+  it('keeps an item held back only by an in-flight change focusable and inert, without a reason', () => {
+    const rename = vi.fn()
     const actions = buildGfsResourceActions({
       kind: 'file',
       uri: URI,
       moveApplicable: false,
       previewable: false,
-      handlers: { rename: vi.fn(), delete: vi.fn() },
+      handlers: { rename, delete: vi.fn() },
       canRename: true,
       canDelete: false,
       mutating: true,
     })
     const { menu } = openTriggerMenu(actions, 'report.txt')
-    const rename = item(menu, 'Rename') as HTMLButtonElement
-    expect(rename.disabled).toBe(true)
-    expect(rename.getAttribute('aria-disabled')).toBeNull()
-    expect(rename.getAttribute('title')).toBeNull()
+    const renameItem = item(menu, 'Rename')
+    expectInert(renameItem)
+    renameItem.focus()
+    expect(document.activeElement).toBe(renameItem)
+    fireEvent.click(renameItem)
+    fireEvent.keyDown(renameItem, { key: 'Enter' })
+    fireEvent.keyDown(renameItem, { key: ' ' })
+    expect(rename).not.toHaveBeenCalled()
+    expect(screen.getByRole('menu', { name: 'Actions for report.txt' })).toBe(menu)
     // Refused as well: the permission reason wins.
     expectUnavailable(item(menu, 'Delete'), "Delete isn't available")
+  })
+
+  describe('a focused item whose permission settles while a change is in flight', () => {
+    const row: Row = {
+      kind: 'file',
+      name: 'notes.md',
+      parentResourceId: 'parent-1',
+      listing: 'folder',
+      held: ['read'],
+      parentHeld: ['read'],
+    }
+    const writable: Row = { ...row, held: ['read', 'write'], parentHeld: ['read', 'write'] }
+
+    it.each([
+      { from: 'refused bits', before: row, status: 'ok' as const },
+      { from: 'pending bits', before: writable, status: 'pending' as const },
+      { from: 'failed bits', before: writable, status: 'error' as const },
+    ])('keeps focus on the same inert node when Rename leaves $from', ({ before, status }) => {
+      const handlers = rowHandlers()
+      const view = render(
+        <GfsResourceMenu
+          actions={sidebarRowActions(before, handlers, true)}
+          anchor={{ x: 10, y: 10 }}
+          permissionStatus={status}
+          resourceName="notes.md"
+        />
+      )
+      const menu = screen.getByRole('menu', { name: 'Actions for notes.md' })
+      const renameItem = item(menu, 'Rename')
+      expectUnavailable(renameItem, "Rename isn't available")
+      act(() => renameItem.focus())
+      expect(document.activeElement).toBe(renameItem)
+
+      view.rerender(
+        <GfsResourceMenu
+          actions={sidebarRowActions(writable, handlers, true)}
+          anchor={{ x: 10, y: 10 }}
+          permissionStatus="ok"
+          resourceName="notes.md"
+        />
+      )
+
+      expect(item(menu, 'Rename')).toBe(renameItem)
+      expectInert(renameItem)
+      expect(document.activeElement).toBe(renameItem)
+      fireEvent.click(renameItem)
+      fireEvent.keyDown(renameItem, { key: 'Enter' })
+      expect(handlers.rename).not.toHaveBeenCalled()
+      expect(screen.getByRole('menu', { name: 'Actions for notes.md' })).toBe(menu)
+    })
   })
 
   it('refuses a picked file while Replace is greyed out', () => {

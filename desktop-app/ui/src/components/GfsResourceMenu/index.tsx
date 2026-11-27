@@ -44,15 +44,17 @@ function menuAction(
 }
 
 /**
- * An item disabled for a reason stays focusable and announces that reason, so
- * it is `aria-disabled` and the click guard keeps it inert. One disabled only
- * while a change is in flight has nothing to explain and stays natively
- * disabled.
+ * A disabled item is `aria-disabled`, never natively `disabled`, and the click
+ * guard keeps it inert; only one disabled for a reason carries a tooltip.
+ * Native `disabled` would make Chromium blur the item when it flips into that
+ * state while focused (a permission arriving, or any upload or change starting
+ * page-wide), dropping focus to the body and leaving the menu unreachable by
+ * keyboard.
  */
 function disabledItemProps(action: GfsResourceMenuAction) {
-  if (!action.disabled) return { disabled: false }
+  if (!action.disabled) return {}
   if (action.disabledReason) return { 'aria-disabled': true, title: action.disabledReason }
-  return { disabled: true }
+  return { 'aria-disabled': true }
 }
 
 function isMenuAction(action: GfsResourceMenuAction | null): action is GfsResourceMenuAction {
@@ -362,8 +364,8 @@ export function GfsResourceMenu({
   // compact sidebar drawer listens on document). Capturing on document lets
   // the menu consume that Escape before any bubble listener, and only while
   // focus is in the menu, so a closed menu leaves Escape to the drawer. A
-  // click on a disabled item or the panel padding drops focus to body; that
-  // Escape still belongs to the open menu.
+  // click on the panel padding drops focus to body; that Escape still belongs
+  // to the open menu.
   useEffect(() => {
     if (!open || !anchorMode) return
     const handleEscapeCapture = (event: KeyboardEvent) => {

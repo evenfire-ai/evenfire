@@ -119,7 +119,7 @@ function stubAffordances(resolveHeld: (resourceId: string) => Promise<GfsHeldAff
   vi.stubGlobal('clerum', { gfs: { affordances: produce } })
 }
 
-/** Inert either natively or, when it explains why, through `aria-disabled`. */
+/** Runnable: neither natively disabled nor `aria-disabled`. */
 function itemEnabled(menu: HTMLElement, name: string): boolean {
   const item = within(menu).getByRole('menuitem', { name }) as HTMLButtonElement
   return !item.disabled && item.getAttribute('aria-disabled') !== 'true'

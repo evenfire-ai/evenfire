@@ -833,7 +833,7 @@ describe('App sidebar GFS resource menu', () => {
 
     const press = (keys: string) => userEvent.setup().keyboard(keys)
     const shareOf = (menu: HTMLElement) => within(menu).getByRole('menuitem', { name: 'Share' })
-    // Greyed-out items with a reason stay focusable, so they count here.
+    // Greyed-out items stay focusable, so they count here.
     const focusableItems = (menu: HTMLElement) =>
       Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)'))
     const submenuFor = (name: string) =>
@@ -1348,8 +1348,9 @@ describe('App sidebar GFS resource menu', () => {
       }
       return {
         enabled: levels(action => !action.disabled),
-        // Only an item disabled without a reason is natively disabled and skipped.
-        focusable: levels(action => !action.disabled || Boolean(action.disabledReason)),
+        // A greyed-out item is aria-disabled, never natively disabled, so every
+        // offered item stays reachable by keyboard.
+        focusable: levels(() => true),
       }
     }
 
