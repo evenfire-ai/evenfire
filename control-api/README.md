@@ -292,21 +292,27 @@ Settings:
 - `CONTROL_API_OIDC_MEMBER_SIGN_IN=enabled` turns member sign-in on. It also
   needs `CONTROL_API_OIDC_UNRELEASED=acknowledged`.
 - `CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE`: the value a top-level ID token
-  claim must hold: 1–256 characters, no control characters, and no leading or
-  trailing whitespace (inner spaces are allowed). The claim matches when it is
+  claim must hold: 1–256 characters, no control or format characters, and no
+  leading or trailing whitespace (inner spaces are allowed). A format
+  character such as U+200B is invisible and would match no token. The claim
+  matches when it is
   a string exactly equal to the value, or an array of strings with one element
   exactly equal to it. Anything else does not match, including a missing
   claim, a prefix or substring, and an array with a non-string element. A
   claim value the sign-in cannot read, such as an array of more than 32 items
   or a string over 512 characters, refuses sign-in too, and so does an
   unreadable `roles` claim, whichever claim is required.
-- `CONTROL_API_OIDC_REQUIRED_CLAIM_NAME`: the claim's name, `roles` when
-  unset. A name without a value is refused, and so is a name that is an OIDC
-  protocol claim (`iss`, `sub`, `aud`, `exp`, `iat`, `nbf`, `jti`, `nonce`,
-  `azp`, `auth_time`, `at_hash`, `c_hash`, `s_hash`, `sid`), a claim
+- `CONTROL_API_OIDC_REQUIRED_CLAIM_NAME`: the claim's name. It is `roles`
+  when a value is set and the name is omitted. Omitting both settings adds no
+  claim check. A name without a value is refused, and so is a name that is an
+  OIDC protocol claim (`iss`, `sub`, `aud`, `exp`, `iat`, `nbf`, `jti`,
+  `nonce`, `azp`, `auth_time`, `at_hash`, `c_hash`, `s_hash`, `sid`), a claim
   eligibility already reads (`tid`, `idp`, `acct`, `email`, `email_verified`,
-  `xms_edov`), empty, over 128 characters, or has control characters or
-  leading or trailing whitespace.
+  `xms_edov`), empty, over 128 characters, or has control characters, format
+  characters, or leading or trailing whitespace. Use a claim only an
+  identity-provider admin can set, such as an app role, a group, or
+  `app_metadata`. Do not use a profile claim the person can edit, such as
+  `name`, `nickname`, `preferred_username`, or `given_name`.
 - `CONTROL_API_OIDC_ACCOUNT_CREATION=enabled`: a first sign-in that finds no
   account creates one. Set it only when the issuer signs in only your
   company's people. Without it, a non-Entra issuer signs in only existing
