@@ -266,11 +266,12 @@ describe('FilePreviewPage permission-derived actions', () => {
     expect(await screen.findByAltText('Preview of diagram.png')).toBeTruthy()
     await screen.findByRole('button', { name: 'Options for diagram.png' })
     const readOnlyMenu = openMenu()
-    for (const label of ['Rename', 'Move to', 'Delete']) {
-      expectUnavailable(
-        within(readOnlyMenu).getByRole('menuitem', { name: label }),
-        `${label} isn't available`
-      )
+    for (const [label, reason] of [
+      ['Rename', "Rename isn't available"],
+      ['Move to', "Move isn't available"],
+      ['Delete', "Delete isn't available"],
+    ] as const) {
+      expectUnavailable(within(readOnlyMenu).getByRole('menuitem', { name: label }), reason)
     }
     fireEvent.click(within(readOnlyMenu).getByRole('menuitem', { name: 'Share' }))
     const readOnlyShareMenu = screen.getByRole('menu', {
@@ -326,7 +327,7 @@ describe('FilePreviewPage permission-derived actions', () => {
     )
     expectUnavailable(
       within(ownerMenu).getByRole('menuitem', { name: 'Move to' }),
-      "Move to isn't available"
+      "Move isn't available"
     )
     fireEvent.click(within(ownerMenu).getByRole('menuitem', { name: 'Share' }))
     const ownerShareMenu = screen.getByRole('menu', { name: 'Share options for diagram.png' })

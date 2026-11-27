@@ -434,10 +434,32 @@ describe('FilePreviewPage move permission contract', () => {
   })
 
   it.each([
-    { target: 'resource', status: 403, hidden: ['Rename', 'Delete'] },
-    { target: 'resource', status: 404, hidden: ['Rename', 'Delete'] },
-    { target: 'source parent', status: 403, hidden: ['Move to'] },
-    { target: 'source parent', status: 404, hidden: ['Move to'] },
+    {
+      target: 'resource',
+      status: 403,
+      hidden: [
+        ['Rename', "Rename isn't available"],
+        ['Delete', "Delete isn't available"],
+      ] as const,
+    },
+    {
+      target: 'resource',
+      status: 404,
+      hidden: [
+        ['Rename', "Rename isn't available"],
+        ['Delete', "Delete isn't available"],
+      ] as const,
+    },
+    {
+      target: 'source parent',
+      status: 403,
+      hidden: [['Move to', "Move isn't available"]] as const,
+    },
+    {
+      target: 'source parent',
+      status: 404,
+      hidden: [['Move to', "Move isn't available"]] as const,
+    },
   ])(
     'disables cached $target actions after an explicit HTTP $status denial',
     async ({ target, status, hidden }) => {
@@ -482,11 +504,8 @@ describe('FilePreviewPage move permission contract', () => {
 
         await waitFor(() => {
           const refreshedMenu = screen.getByRole('menu', { name: 'Actions for diagram.png' })
-          for (const action of hidden) {
-            expectUnavailable(
-              within(refreshedMenu).getByRole('menuitem', { name: action }),
-              `${action} isn't available`
-            )
+          for (const [action, reason] of hidden) {
+            expectUnavailable(within(refreshedMenu).getByRole('menuitem', { name: action }), reason)
           }
           if (target === 'resource') {
             expect(
@@ -522,7 +541,7 @@ describe('FilePreviewPage move permission contract', () => {
 
     expectUnavailable(
       within(menu).getByRole('menuitem', { name: 'Move to' }),
-      "Move to isn't available"
+      "Move isn't available"
     )
   })
 
@@ -540,7 +559,7 @@ describe('FilePreviewPage move permission contract', () => {
 
     expectUnavailable(
       within(menu).getByRole('menuitem', { name: 'Move to' }),
-      "Move to isn't available"
+      "Move isn't available"
     )
   })
 
@@ -613,7 +632,7 @@ describe('FilePreviewPage move permission contract', () => {
     await waitFor(() =>
       expectUnavailable(
         within(menu).getByRole('menuitem', { name: 'Move to' }),
-        "Move to isn't available"
+        "Move isn't available"
       )
     )
   })
@@ -632,7 +651,7 @@ describe('FilePreviewPage move permission contract', () => {
     const menu = await openPreviewActions()
     expectUnavailable(
       within(menu).getByRole('menuitem', { name: 'Move to' }),
-      "Move to isn't available"
+      "Move isn't available"
     )
 
     await act(async () => finishSourceCheck(fullAccess))
@@ -691,7 +710,7 @@ describe('FilePreviewPage move permission contract', () => {
       expect(affordances).toHaveBeenCalledWith(parentId, 'main')
       expectUnavailable(
         within(menu).getByRole('menuitem', { name: 'Move to' }),
-        "Move to isn't available"
+        "Move isn't available"
       )
       fireEvent.click(within(menu).getByRole('menuitem', { name: 'Move to' }))
       expect(screen.queryByRole('dialog')).toBeNull()

@@ -58,7 +58,11 @@ describe('withPermissionGate', () => {
     expect(
       withPermissionGate<GatedAction>({ disabled: false, label: 'Move to' }, 'move', 'error')
         .disabledReason
-    ).toBe("Move to isn't available")
+    ).toBe("Move isn't available")
+    expect(
+      withPermissionGate<GatedAction>({ disabled: false, label: 'Move to…' }, 'move', 'pending')
+        .disabledReason
+    ).toBe("Move isn't available")
     // Disabled only by an in-flight change, it had nothing to explain yet.
     expect(
       withPermissionGate<GatedAction>({ disabled: true, label: 'Rename' }, 'rename', 'pending')

@@ -411,7 +411,7 @@ describe('FilesPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
     })
 
-    expectUnavailable(screen.getByRole('menuitem', { name: 'Move to' }), "Move to isn't available")
+    expectUnavailable(screen.getByRole('menuitem', { name: 'Move to' }), "Move isn't available")
   })
 
   it('offers Move when a read-only shared file has source-parent write and delete rights', async () => {
@@ -478,7 +478,7 @@ describe('FilesPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for Current folder' }))
     })
 
-    expectUnavailable(screen.getByRole('menuitem', { name: 'Move to' }), "Move to isn't available")
+    expectUnavailable(screen.getByRole('menuitem', { name: 'Move to' }), "Move isn't available")
   })
 
   it('renders unavailable automatic discovery as an info notice, not a technical error', () => {

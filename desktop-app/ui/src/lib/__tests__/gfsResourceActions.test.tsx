@@ -3,7 +3,10 @@ import { isValidElement } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, within } from '@testing-library/react'
 import { GfsResourceTitlebarActions } from '@components/GfsResourceTitlebarActions'
+import { unavailableReason } from '@constants/gfsActionCopy'
 import { buildGfsResourceActions, getGfsMenuActions } from '../gfsResourceActions'
+import type { GfsResourceActionId } from '../gfsResourceActions'
+import { withPermissionGate } from '../gfsResourceMenuPermissionGate'
 
 const handler = () => vi.fn()
 const allHandlers = () => ({
@@ -231,7 +234,7 @@ describe('GFS resource action model', () => {
     ).toEqual([
       ['share', true, "Share isn't available"],
       ['rename', true, "Rename isn't available"],
-      ['move', true, "Move to isn't available"],
+      ['move', true, "Move isn't available"],
       ['new-folder', true, "New folder isn't available"],
       ['upload-file', true, "Upload file isn't available"],
       ['download-zip', true, "Download as zip isn't available"],
@@ -240,6 +243,29 @@ describe('GFS resource action model', () => {
     expect(byId['copy-link']).toMatchObject({ disabled: false })
     expect(byId['open-folder']).toMatchObject({ disabled: false })
     expect(byId['copy-link']?.disabledReason).toBeUndefined()
+  })
+
+  it('names every refused action by what it does, never by its menu prompt', () => {
+    const refused = (['directory', 'file'] as const).flatMap(kind =>
+      buildGfsResourceActions({
+        kind,
+        uri: resourceUri,
+        handlers: allHandlers(),
+        moveApplicable: true,
+        previewable: true,
+        readable: true,
+        canOpenFolder: true,
+      })
+    )
+    const gated = refused.map(action => withPermissionGate(action, action.id, 'error'))
+    const reasons = [...refused, ...gated].map(action => action.disabledReason).filter(Boolean)
+    for (const id of Object.keys(allHandlers()) as GfsResourceActionId[]) {
+      reasons.push(unavailableReason(id))
+    }
+    expect(refused.find(action => action.id === 'move')?.disabledReason).toBe(
+      "Move isn't available"
+    )
+    for (const reason of reasons) expect(reason).not.toMatch(/…|\.\.\.| to isn't/)
   })
 
   it('never reaches the handler of a disabled action', () => {

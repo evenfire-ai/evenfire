@@ -30,7 +30,7 @@ export function withPermissionGate<A extends GfsPermissionGatedMenuAction>(
   return {
     ...action,
     disabled: true,
-    disabledReason: action.disabledReason ?? unavailableReason(action.label),
+    disabledReason: action.disabledReason ?? unavailableReason(actionId),
     ...(action.run ? { run: noop } : {}),
   }
 }

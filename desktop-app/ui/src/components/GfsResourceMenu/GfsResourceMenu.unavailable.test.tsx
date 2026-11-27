@@ -135,8 +135,14 @@ describe('GfsResourceMenu: unavailable actions', () => {
       'Download as zip',
       'Delete',
     ])
-    for (const label of ['Rename', 'Move to', 'New folder', 'Upload file', 'Delete']) {
-      expectUnavailable(item(menu, label), `${label} isn't available`)
+    for (const [label, reason] of [
+      ['Rename', "Rename isn't available"],
+      ['Move to', "Move isn't available"],
+      ['New folder', "New folder isn't available"],
+      ['Upload file', "Upload file isn't available"],
+      ['Delete', "Delete isn't available"],
+    ] as const) {
+      expectUnavailable(item(menu, label), reason)
     }
     expect(isMenuItemEnabled(item(menu, 'Open folder'))).toBe(true)
     expect(isMenuItemEnabled(item(menu, 'Download as zip'))).toBe(true)
@@ -227,7 +233,7 @@ describe('GfsResourceMenu: unavailable actions', () => {
       allowed.view.unmount()
 
       const refused = openTriggerMenu(actionsFor(root('parent-1', ['read'])), 'report.txt')
-      expectUnavailable(item(refused.menu, 'Move to'), "Move to isn't available")
+      expectUnavailable(item(refused.menu, 'Move to'), "Move isn't available")
       refused.view.unmount()
 
       const orphan = openTriggerMenu(actionsFor(root(null, null)), 'report.txt')
@@ -276,6 +282,34 @@ describe('GfsResourceMenu: unavailable actions', () => {
     expect(within(menu).getAllByRole('menuitem')).toEqual(pendingNodes)
     expectUnavailable(item(menu, 'Rename'), "Rename isn't available")
     expect(isMenuItemEnabled(item(menu, 'Preview'))).toBe(true)
+  })
+
+  it('names Move by its action, not its prompt, on the legacy menu while the bits fail', () => {
+    render(
+      <GfsResourceMenu
+        anchor={{ x: 10, y: 10 }}
+        permissionStatus="error"
+        resourceName="notes.md"
+        onManage={vi.fn()}
+        onCopyLink={vi.fn()}
+        onCreateFolder={vi.fn()}
+        onRename={vi.fn()}
+        onMove={vi.fn()}
+        onDownloadZip={vi.fn()}
+        onReplace={vi.fn()}
+        onDelete={vi.fn()}
+      />
+    )
+    const menu = screen.getByRole('menu', { name: 'Actions for notes.md' })
+    expectUnavailable(item(menu, 'Move to…'), "Move isn't available")
+    fireEvent.click(item(menu, 'Share'))
+    const flyout = screen.getByRole('menu', { name: 'Share options for notes.md' })
+    const reasons = [menu, flyout]
+      .flatMap(surface => within(surface).getAllByRole('menuitem'))
+      .map(entry => entry.getAttribute('title'))
+      .filter((reason): reason is string => Boolean(reason))
+    expect(reasons.length).toBeGreaterThan(1)
+    for (const reason of reasons) expect(reason).not.toMatch(/…|\.\.\.| to isn't/)
   })
 
   it('keeps an item held back only by an in-flight change natively disabled, without a reason', () => {

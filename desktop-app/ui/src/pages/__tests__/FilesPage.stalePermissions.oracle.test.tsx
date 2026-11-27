@@ -1310,7 +1310,7 @@ describe('FilesPage stale permission action oracle', () => {
       const menu = screen.getByRole('menu', { name: 'Actions for report.txt' })
       expectUnavailable(
         within(menu).getByRole('menuitem', { name: 'Move to' }),
-        "Move to isn't available"
+        "Move isn't available"
       )
     } finally {
       client.clear()
@@ -1518,7 +1518,7 @@ describe('FilesPage stale permission action oracle', () => {
       const menu = screen.getByRole('menu', { name: 'Actions for Shared A.txt' })
       expectUnavailable(
         within(menu).getByRole('menuitem', { name: 'Move to' }),
-        "Move to isn't available"
+        "Move isn't available"
       )
       expect(moveResource).not.toHaveBeenCalled()
 

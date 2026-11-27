@@ -251,7 +251,7 @@ export function buildGfsResourceActions(options: GfsResourceActionOptions): GfsR
       ? undefined
       : definition.read && options.readable === false
         ? readAccessReason(options.kind)
-        : unavailableReason(definition.label)
+        : unavailableReason(definition.id)
     return [
       {
         id: definition.id,
