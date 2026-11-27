@@ -268,13 +268,10 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   }
   const rootBreadcrumbItem: PageBreadcrumbItem =
     mode === 'chat' && selectedAgent
-      ? isChatScrollNavMode
-        ? { label: selectedAgentDisplay || 'Agent', onClick: backToNewConversation }
-        : {
-            label: rootBreadcrumbLabel,
-            onClick: backToNewConversation,
-            className: 'page-breadcrumb-link--plain-action',
-          }
+      ? {
+          label: isChatScrollNavMode ? selectedAgentDisplay || 'Agent' : rootBreadcrumbLabel,
+          onClick: backToNewConversation,
+        }
       : { label: rootBreadcrumbLabel }
   const routeSubtitle =
     selectedAgentRoute === 'mcp-servers'

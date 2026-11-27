@@ -3,14 +3,20 @@ import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
-import { IconButton, MenuItem } from '@components/Common'
-import { ConfirmDialog } from '@components/ConfirmDialog'
+import { useNotificationsContext } from '@contexts/NotificationsContext'
+import { ChatDeleteConfirmation } from '@components/ChatDeleteConfirmation'
+import { IconButton, MenuItem, TextInput } from '@components/Common'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useClickOutside } from '@hooks/useClickOutside'
-import type {
-  ConversationActionsProps,
-  PendingConversationDelete,
-} from './ConversationActions.types'
+import { useConfirmedChatDelete } from '@hooks/useConfirmedChatDelete'
+import { useFlyoutPosition } from '@hooks/useFlyoutPosition'
+import { useInlineRename } from '@hooks/useInlineRename'
+import type { ConversationActionsProps } from './ConversationActions.types'
+
+const RENAME_REJECTED_MESSAGE = 'Could not rename the conversation.'
+
+const menuItemsOf = (menu: HTMLElement | null) =>
+  Array.from(menu?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])
 
 /**
  * The chat breadcrumb's current item inside an open conversation: its title and
@@ -21,119 +27,102 @@ import type {
  * confirmation act on the `chatId` and name the `title` of the moment they
  * opened, so switching to another conversation has to remount this and drop
  * them.
- *
- * The delete confirmation portals to `<body>`. The chat header is translated
- * away while the user scrolls the thread, and a transformed ancestor becomes
- * the containing block of a `position: fixed` dialog — which would then never
- * cover the app.
  */
 export function ConversationActions({ agentRef, chatId, title }: ConversationActionsProps) {
   const { handleNavSelect } = useNavigationContext()
-  const { captureChatDeleteFence, handleDeleteChatForAgent, handleRenameChatForAgent } =
-    useAgentChatActionsContext()
+  const { handleRenameChatForAgent } = useAgentChatActionsContext()
+  const { pushToast } = useNotificationsContext()
   const [menuOpen, setMenuOpen] = useState(false)
-  const [renaming, setRenaming] = useState(false)
-  const [renameValue, setRenameValue] = useState('')
-  const renameClosedRef = useRef(true)
-  const renameInputRef = useRef<HTMLInputElement | null>(null)
-  const [pendingDelete, setPendingDelete] = useState<PendingConversationDelete | null>(null)
   const menuRef = useRef<HTMLSpanElement | null>(null)
   const menuTriggerRef = useRef<HTMLButtonElement | null>(null)
+  // Set when the menu was opened from the keyboard, to move focus into it once
+  // it is on screen.
+  const focusMenuItemRef = useRef<'first' | 'last' | null>(null)
+  // Portaled and confined to the chat drawer (to the viewport outside it), the
+  // way the agent selector's menu is: the drawer clips whatever passes its edge.
+  const menuFlyoutPosition = useFlyoutPosition({
+    anchorRef: menuTriggerRef,
+    flyoutRef: menuRef,
+    open: menuOpen,
+    placement: 'below',
+  })
+  const deleteConfirmation = useConfirmedChatDelete()
+  const rename = useInlineRename({
+    onRename: (_key, nextTitle) => handleRenameChatForAgent(agentRef, chatId, nextTitle),
+    onRejected: () => pushToast(RENAME_REJECTED_MESSAGE, 'error'),
+    returnFocusToRef: menuTriggerRef,
+  })
+  const editing = rename.editingKey !== null
 
-  useClickOutside(menuRef, menuOpen, () => setMenuOpen(false))
+  // The menu is portaled: a press on the trigger or inside the panel is inside.
+  useClickOutside([menuTriggerRef, menuRef], menuOpen, () => setMenuOpen(false))
 
   useEffect(() => {
-    if (!renaming) return
-    renameInputRef.current?.focus()
-    renameInputRef.current?.select()
-  }, [renaming])
+    if (!menuOpen || !focusMenuItemRef.current) return
+    const target = focusMenuItemRef.current
+    focusMenuItemRef.current = null
+    const items = menuItemsOf(menuRef.current)
+    ;(target === 'first' ? items[0] : items[items.length - 1])?.focus()
+  }, [menuOpen])
 
   const startRename = () => {
     setMenuOpen(false)
-    renameClosedRef.current = false
-    setRenameValue(title)
-    setRenaming(true)
+    rename.start(chatId, title)
   }
 
-  const stopRename = () => {
-    renameClosedRef.current = true
-    setRenaming(false)
-  }
-
-  // Enter and blur save, Escape only closes. Once editing is closed a later
-  // blur is a no-op, so Escape can never save.
-  const commitRename = () => {
-    if (renameClosedRef.current) return
-    const nextTitle = renameValue.trim()
-    stopRename()
-    if (!nextTitle || nextTitle === title) return
-    void handleRenameChatForAgent(agentRef, chatId, nextTitle)
-  }
-
-  const handleRenameKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'Enter') {
-      event.preventDefault()
-      commitRename()
-    }
+  // One handler for the trigger and the portaled panel: React events bubble
+  // from a portal to its React parent.
+  const handleMenuKeyDown = (event: ReactKeyboardEvent<HTMLSpanElement>) => {
     if (event.key === 'Escape') {
+      if (!menuOpen) return
       event.preventDefault()
       event.stopPropagation()
-      stopRename()
+      setMenuOpen(false)
+      menuTriggerRef.current?.focus()
+      return
     }
-  }
-
-  // The fence is captured before the confirmation, so a confirmed delete is
-  // bound to the access the user held when they asked for it.
-  const requestDelete = async () => {
-    setMenuOpen(false)
-    try {
-      const deletion = await captureChatDeleteFence(agentRef)
-      setPendingDelete({ chatId, title, deletion })
-    } catch {
-      // captureChatDeleteFence reports the failure through the shared chat toast.
+    // Leaving by keyboard closes the menu; focus then moves on by itself.
+    if (event.key === 'Tab') {
+      setMenuOpen(false)
+      return
     }
-  }
-
-  const confirmDelete = async (target: PendingConversationDelete) => {
-    try {
-      await handleDeleteChatForAgent(agentRef, target.chatId, target.deletion)
-    } finally {
-      setPendingDelete(null)
-    }
-  }
-
-  const handleMenuKeyDown = (event: ReactKeyboardEvent<HTMLSpanElement>) => {
-    if (event.key !== 'Escape' || !menuOpen) return
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
     event.preventDefault()
-    event.stopPropagation()
-    setMenuOpen(false)
-    menuTriggerRef.current?.focus()
+    if (!menuOpen) {
+      focusMenuItemRef.current = event.key === 'ArrowDown' ? 'first' : 'last'
+      setMenuOpen(true)
+      return
+    }
+    const items = menuItemsOf(menuRef.current)
+    const current = items.findIndex(item => item === document.activeElement)
+    if (current < 0) {
+      ;(event.key === 'ArrowDown' ? items[0] : items[items.length - 1])?.focus()
+    } else {
+      const step = event.key === 'ArrowDown' ? 1 : -1
+      items[(current + step + items.length) % items.length]?.focus()
+    }
   }
 
   return (
     <>
       <span className="agent-workspace-conversation-actions">
-        {renaming ? (
-          <input
+        {editing ? (
+          <TextInput
             aria-label="Rename conversation"
             className="agent-workspace-conversation-rename-input"
-            onBlur={commitRename}
-            onChange={event => setRenameValue(event.currentTarget.value)}
-            onKeyDown={handleRenameKeyDown}
-            ref={renameInputRef}
-            value={renameValue}
+            onBlur={rename.onBlur}
+            onChange={rename.onChange}
+            onKeyDown={rename.onKeyDown}
+            ref={rename.inputRef}
+            value={rename.value}
           />
         ) : (
           <span className="agent-workspace-conversation-title" title={title}>
             {title}
           </span>
         )}
-        <span
-          className="agent-workspace-conversation-menu"
-          onKeyDown={handleMenuKeyDown}
-          ref={menuRef}
-        >
-          {!renaming && (
+        <span className="agent-workspace-conversation-menu" onKeyDown={handleMenuKeyDown}>
+          {!editing && (
             <IconButton
               aria-expanded={menuOpen}
               aria-haspopup="menu"
@@ -152,54 +141,57 @@ export function ConversationActions({ agentRef, chatId, title }: ConversationAct
               </svg>
             </IconButton>
           )}
-          {menuOpen && (
-            <span className="agent-workspace-conversation-menu-panel" role="menu">
-              <MenuItem
-                className="agent-workspace-conversation-menu-item"
-                onClick={startRename}
-                role="menuitem"
-              >
-                Rename
-              </MenuItem>
-              <MenuItem
-                className="agent-workspace-conversation-menu-item"
-                onClick={() => {
-                  setMenuOpen(false)
-                  handleNavSelect(DESKTOP_ROUTES.agents)
+          {menuOpen &&
+            createPortal(
+              <span
+                aria-label={`Conversation actions for ${title}`}
+                className="agent-workspace-conversation-menu-panel"
+                ref={menuRef}
+                role="menu"
+                style={{
+                  left: menuFlyoutPosition?.left ?? 0,
+                  top: menuFlyoutPosition?.top ?? 0,
+                  // Hidden at the origin until the first layout pass sets a real
+                  // rect, so it never flashes in the top-left corner.
+                  visibility: menuFlyoutPosition ? undefined : 'hidden',
                 }}
-                role="menuitem"
               >
-                Agent details
-              </MenuItem>
-              <MenuItem
-                className="agent-workspace-conversation-menu-item"
-                color="danger"
-                onClick={() => void requestDelete()}
-                role="menuitem"
-              >
-                Delete conversation
-              </MenuItem>
-            </span>
-          )}
+                <MenuItem
+                  className="agent-workspace-conversation-menu-item"
+                  onClick={startRename}
+                  role="menuitem"
+                >
+                  Rename
+                </MenuItem>
+                <MenuItem
+                  className="agent-workspace-conversation-menu-item"
+                  onClick={() => {
+                    setMenuOpen(false)
+                    handleNavSelect(DESKTOP_ROUTES.agents)
+                  }}
+                  role="menuitem"
+                >
+                  Agent details
+                </MenuItem>
+                <MenuItem
+                  className="agent-workspace-conversation-menu-item"
+                  color="danger"
+                  onClick={() => void deleteConfirmation.request({ agentRef, chatId, title })}
+                  role="menuitem"
+                >
+                  Delete conversation
+                </MenuItem>
+              </span>,
+              document.body
+            )}
         </span>
       </span>
-      {pendingDelete
-        ? createPortal(
-            <ConfirmDialog
-              body={
-                <>
-                  Delete <strong>{pendingDelete.title}</strong>? Messages cannot be recovered.
-                </>
-              }
-              confirmLabel="Delete"
-              onCancel={() => setPendingDelete(null)}
-              onConfirm={() => confirmDelete(pendingDelete)}
-              title="Delete conversation?"
-              tone="danger"
-            />,
-            document.body
-          )
-        : null}
+      <ChatDeleteConfirmation
+        onCancel={deleteConfirmation.cancel}
+        onConfirm={deleteConfirmation.confirm}
+        pending={deleteConfirmation.pending}
+        title="Delete conversation?"
+      />
     </>
   )
 }

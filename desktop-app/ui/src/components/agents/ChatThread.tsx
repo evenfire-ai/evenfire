@@ -8,10 +8,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import {
-  type QueuedChatDelete,
-  useAgentChatActionsContext,
-} from '@contexts/AgentChatActionsContext'
+import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
 import { useChatLinkActivation } from '@contexts/ChatLinkActivationContext'
 import { useChatListContext } from '@contexts/ChatListContext'
@@ -19,8 +16,8 @@ import { useChatThreadStateContext } from '@contexts/ChatThreadStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
+import { ChatDeleteConfirmation } from '@components/ChatDeleteConfirmation'
 import { Button, IconButton, MenuItem } from '@components/Common'
-import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { MessageArtifactActions } from '@components/MessageArtifactActions'
@@ -33,6 +30,8 @@ import {
   SESSION_PREVIEW_LIMIT,
 } from '@constants/agents'
 import { HTML_PREVIEW_INLINE_MAX_BYTES } from '@constants/htmlPreview'
+import { useConfirmedChatDelete } from '@hooks/useConfirmedChatDelete'
+import { useInlineRename } from '@hooks/useInlineRename'
 import type { AccessCatalog, ChatMessageAttachment } from '../../../../src/types'
 import { estimateBase64DecodedLength } from '../../lib/base64Size'
 import { chatMessageDomId } from '../../lib/chatLocalSearch'
@@ -331,8 +330,6 @@ export function ChatThread({
     chatEndRef,
     handleSelectChat: onSelectChat,
     handleRenameChat: onRenameChat,
-    captureChatDeleteFence,
-    handleDeleteChat: onDeleteChat,
     handleAddComposerImageAttachments: onAddComposerImageAttachments,
     handleAddComposerReferenceAttachments: onAddComposerReferenceAttachments,
   } = useAgentChatActionsContext()
@@ -341,19 +338,13 @@ export function ChatThread({
   const [copiedMessageKey, setCopiedMessageKey] = useState<string | null>(null)
   const [showAllSessions, setShowAllSessions] = useState(false)
   const [sessionMenuChatId, setSessionMenuChatId] = useState<string | null>(null)
-  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null)
-  const [sessionRenameValue, setSessionRenameValue] = useState('')
-  const [pendingDeleteSession, setPendingDeleteSession] = useState<{
-    agentRef: string
-    id: string
-    title: string
-    deletion: QueuedChatDelete
-  } | null>(null)
+  const deleteConfirmation = useConfirmedChatDelete()
+  const rename = useInlineRename({
+    onRename: (chatId, nextTitle) => onRenameChat(chatId, nextTitle),
+    onRejected: () => pushToast('Could not rename the session.', 'error'),
+  })
   const dedicatedSessionsRef = useRef<HTMLDivElement | null>(null)
-  const sessionRenameInputRef = useRef<HTMLInputElement | null>(null)
   const chatThreadRef = useRef<HTMLDivElement | null>(null)
-  const sessionRenameClosedRef = useRef(false)
-  const chatListRef = useRef(chatList)
   const copyResetTimeoutRef = useRef<number | null>(null)
 
   const groupedWithKeys = useMemo(
@@ -398,10 +389,6 @@ export function ChatThread({
   const isDedicatedAgentView = !activeChatId
 
   useEffect(() => {
-    chatListRef.current = chatList
-  }, [chatList])
-
-  useEffect(() => {
     const chatThread = chatThreadRef.current
     if (!chatThread || !activeChatId) {
       onScrollPositionChange?.(false)
@@ -418,13 +405,6 @@ export function ChatThread({
     chatThread.addEventListener('scroll', updateScrollPosition, { passive: true })
     return () => chatThread.removeEventListener('scroll', updateScrollPosition)
   }, [activeChatId, chatMessagesLoading, groupedWithKeys, onScrollPositionChange])
-
-  useEffect(() => {
-    if (renamingSessionId && sessionRenameInputRef.current) {
-      sessionRenameInputRef.current.focus()
-      sessionRenameInputRef.current.select()
-    }
-  }, [renamingSessionId])
 
   useEffect(() => {
     return () => {
@@ -445,14 +425,12 @@ export function ChatThread({
     if (sessionMenuChatId && !chatList.some(chat => chat.id === sessionMenuChatId)) {
       setSessionMenuChatId(null)
     }
-    if (renamingSessionId && !chatList.some(chat => chat.id === renamingSessionId)) {
-      setRenamingSessionId(null)
-      setSessionRenameValue('')
-    }
+    if (rename.editingKey && !chatList.some(chat => chat.id === rename.editingKey)) rename.cancel()
   }, [
     chatList,
     chatListHasMoreRemoteSessions,
-    renamingSessionId,
+    rename.cancel,
+    rename.editingKey,
     sessionMenuChatId,
     showAllSessions,
   ])
@@ -477,55 +455,22 @@ export function ChatThread({
     }
   }, [sessionMenuChatId])
 
-  const startSessionRename = useCallback((chatId: string, currentTitle: string) => {
-    sessionRenameClosedRef.current = false
-    setRenamingSessionId(chatId)
-    setSessionRenameValue(currentTitle)
-    setSessionMenuChatId(null)
-  }, [])
-
-  const cancelSessionRename = useCallback(() => {
-    sessionRenameClosedRef.current = true
-    setRenamingSessionId(null)
-    setSessionRenameValue('')
-  }, [])
-
-  const commitSessionRename = useCallback(() => {
-    if (sessionRenameClosedRef.current) return
-    if (!renamingSessionId) return
-    sessionRenameClosedRef.current = true
-    const nextTitle = sessionRenameValue.trim()
-    const currentTitle =
-      chatListRef.current.find(chat => chat.id === renamingSessionId)?.title || ''
-    if (nextTitle && nextTitle !== currentTitle) {
-      void onRenameChat(renamingSessionId, nextTitle)
-    }
-    cancelSessionRename()
-  }, [cancelSessionRename, onRenameChat, renamingSessionId, sessionRenameValue])
-
-  const deleteSession = useCallback(
-    async (chatId: string, chatTitle: string) => {
+  const startSessionRename = useCallback(
+    (chatId: string, currentTitle: string) => {
       setSessionMenuChatId(null)
-      if (!selectedAgent) return
-      try {
-        const deletion = await captureChatDeleteFence(selectedAgent)
-        setPendingDeleteSession({ agentRef: selectedAgent, id: chatId, title: chatTitle, deletion })
-      } catch {
-        // Capture reports the scope/authority failure through the normal chat toast path.
-      }
+      rename.start(chatId, currentTitle)
     },
-    [captureChatDeleteFence, selectedAgent]
+    [rename.start]
   )
 
-  const confirmDeleteSession = useCallback(() => {
-    if (!pendingDeleteSession) return
-    if (selectedAgent !== pendingDeleteSession.agentRef) {
-      setPendingDeleteSession(null)
-      return
-    }
-    void onDeleteChat(pendingDeleteSession.id, pendingDeleteSession.deletion)
-    setPendingDeleteSession(null)
-  }, [onDeleteChat, pendingDeleteSession, selectedAgent])
+  const deleteSession = useCallback(
+    (chatId: string, chatTitle: string) => {
+      setSessionMenuChatId(null)
+      if (!selectedAgent) return
+      void deleteConfirmation.request({ agentRef: selectedAgent, chatId, title: chatTitle })
+    },
+    [deleteConfirmation.request, selectedAgent]
+  )
 
   const handleCopyMessage = useCallback(async (messageKey: string, content: string) => {
     try {
@@ -1090,7 +1035,7 @@ export function ChatThread({
             <div className="agent-dedicated-sessions-list" ref={dedicatedSessionsRef}>
               {visibleChats.map(chat => {
                 const isMenuOpen = sessionMenuChatId === chat.id
-                const isRenaming = renamingSessionId === chat.id
+                const isRenaming = rename.editingKey === chat.id
                 return (
                   <div
                     key={chat.id}
@@ -1115,22 +1060,13 @@ export function ChatThread({
                       </span>
                       {isRenaming ? (
                         <input
-                          ref={sessionRenameInputRef}
+                          ref={rename.inputRef}
                           className="agent-dedicated-session-rename-input"
                           aria-label="Rename session"
-                          value={sessionRenameValue}
-                          onChange={event => setSessionRenameValue(event.target.value)}
-                          onKeyDown={event => {
-                            if (event.key === 'Enter') {
-                              event.preventDefault()
-                              commitSessionRename()
-                            }
-                            if (event.key === 'Escape') {
-                              event.preventDefault()
-                              cancelSessionRename()
-                            }
-                          }}
-                          onBlur={commitSessionRename}
+                          value={rename.value}
+                          onChange={rename.onChange}
+                          onKeyDown={rename.onKeyDown}
+                          onBlur={rename.onBlur}
                           maxLength={100}
                         />
                       ) : (
@@ -1248,20 +1184,12 @@ export function ChatThread({
           )}
         </section>
       )}
-      {pendingDeleteSession ? (
-        <ConfirmDialog
-          title="Delete session?"
-          body={
-            <p>
-              Delete <strong>{pendingDeleteSession.title}</strong>? Messages cannot be recovered.
-            </p>
-          }
-          confirmLabel="Delete"
-          tone="danger"
-          onCancel={() => setPendingDeleteSession(null)}
-          onConfirm={confirmDeleteSession}
-        />
-      ) : null}
+      <ChatDeleteConfirmation
+        onCancel={deleteConfirmation.cancel}
+        onConfirm={deleteConfirmation.confirm}
+        pending={deleteConfirmation.pending}
+        title="Delete session?"
+      />
       <div ref={chatEndRef} />
     </div>
   )

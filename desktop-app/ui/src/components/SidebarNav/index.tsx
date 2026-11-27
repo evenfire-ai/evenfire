@@ -1,19 +1,18 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import {
-  type QueuedChatDelete,
-  useAgentChatActionsContext,
-} from '@contexts/AgentChatActionsContext'
+import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { useAuthContext } from '@contexts/AuthContext'
 import { useChatListContext } from '@contexts/ChatListContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
+import { ChatDeleteConfirmation } from '@components/ChatDeleteConfirmation'
 import { Button, IconButton, MenuItem, NavItem as NavItemControl } from '@components/Common'
-import { ConfirmDialog } from '@components/ConfirmDialog'
 import { useGfsActionHost } from '@components/GfsActionHost/context'
 import { ChatStateBadge } from '@components/agents/ChatStateBadge'
 import { DESKTOP_ROUTES, SIDEBAR_SESSION_PREVIEW_LIMIT } from '@constants/navigation'
 import { useClickOutside } from '@hooks/useClickOutside'
+import { useConfirmedChatDelete } from '@hooks/useConfirmedChatDelete'
 import { formatDesktopAppVersionTooltip, useDesktopAppInfo } from '@hooks/useDesktopAppInfo'
+import { useInlineRename } from '@hooks/useInlineRename'
 import type { NavItem } from '@/uiTypes'
 import { FileExplorerTree } from './FileExplorerTree'
 import {
@@ -58,11 +57,7 @@ export function SidebarNav({
   const { busy, me, handleLogout: onLogout } = useAuthContext()
   const { activeChatId, latestChatSessions, latestChatSessionsLoading, sessionStateByChatKey } =
     useChatListContext()
-  const {
-    captureChatDeleteFence,
-    handleRenameChatForAgent: onRenameChatForAgent,
-    handleDeleteChatForAgent: onDeleteChatForAgent,
-  } = useAgentChatActionsContext()
+  const { handleRenameChatForAgent: onRenameChatForAgent } = useAgentChatActionsContext()
   const { selectedAgent, handleSelectChatAgent: onSelectChatAgent } = useNavigationContext()
   const gfsDialogShown = useGfsActionHost()?.dialogShown ?? false
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false)
@@ -72,14 +67,14 @@ export function SidebarNav({
   // fetch, so it stays inert until the user reaches for the file tree.
   const [filesExplorerOpen, setFilesExplorerOpen] = useState(false)
   const [sessionMenuId, setSessionMenuId] = useState<string | null>(null)
-  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null)
-  const [sessionRenameValue, setSessionRenameValue] = useState('')
-  const [pendingDeleteSession, setPendingDeleteSession] = useState<{
-    agentRef: string
-    chatId: string
-    title: string
-    deletion: QueuedChatDelete
-  } | null>(null)
+  const deleteConfirmation = useConfirmedChatDelete()
+  const rename = useInlineRename({
+    onRename: (key, nextTitle) => {
+      const [agentRef = '', chatId = ''] = key.split(SESSION_KEY_SEPARATOR)
+      return onRenameChatForAgent(agentRef, chatId, nextTitle)
+    },
+    onRejected: () => pushToast('Could not rename the session.', 'error'),
+  })
   const lastToggleRequestIdRef = useRef(0)
   const desktopAppInfo = useDesktopAppInfo()
   const desktopVersionTooltip = formatDesktopAppVersionTooltip(desktopAppInfo)
@@ -87,7 +82,6 @@ export function SidebarNav({
   const settingsMenuRef = useRef<HTMLDivElement | null>(null)
   const settingsTriggerRef = useRef<HTMLButtonElement | null>(null)
   const sessionsRef = useRef<HTMLDivElement | null>(null)
-  const renameInputRef = useRef<HTMLInputElement | null>(null)
   const updateSettingsMenuOpen = React.useCallback(
     (open: boolean) => {
       setSettingsMenuOpen(open)
@@ -114,23 +108,14 @@ export function SidebarNav({
     previousCompactModeRef.current = compactMode
   }, [compactMenuOpen, compactMode, updateSettingsMenuOpen])
 
-  const requestDeleteSession = React.useCallback(
-    async (session: { agentRef: string; id: string; title: string }) => {
-      setSessionMenuId(null)
-      try {
-        const deletion = await captureChatDeleteFence(session.agentRef)
-        setPendingDeleteSession({
-          agentRef: session.agentRef,
-          chatId: session.id,
-          title: session.title,
-          deletion,
-        })
-      } catch {
-        // captureChatDeleteFence reports the failure through the shared chat toast.
-      }
-    },
-    [captureChatDeleteFence, pushToast]
-  )
+  const requestDeleteSession = (session: { agentRef: string; id: string; title: string }) => {
+    setSessionMenuId(null)
+    void deleteConfirmation.request({
+      agentRef: session.agentRef,
+      chatId: session.id,
+      title: session.title,
+    })
+  }
 
   useClickOutside(settingsMenuRef, settingsMenuOpen, () => {
     updateSettingsMenuOpen(false)
@@ -276,32 +261,8 @@ export function SidebarNav({
 
   const startSessionRename = (session: (typeof latestChatSessions)[number]) => {
     setSessionMenuId(null)
-    setRenamingSessionId(`${session.agentRef}${SESSION_KEY_SEPARATOR}${session.id}`)
-    setSessionRenameValue(session.title)
+    rename.start(`${session.agentRef}${SESSION_KEY_SEPARATOR}${session.id}`, session.title)
   }
-
-  const cancelSessionRename = () => {
-    setRenamingSessionId(null)
-    setSessionRenameValue('')
-  }
-
-  const commitSessionRename = async () => {
-    if (!renamingSessionId) return
-    const [agentRef, chatId] = renamingSessionId.split(SESSION_KEY_SEPARATOR)
-    const nextTitle = sessionRenameValue.trim()
-    const session = latestChatSessions.find(
-      item => item.agentRef === agentRef && item.id === chatId
-    )
-    cancelSessionRename()
-    if (!agentRef || !chatId || !nextTitle || nextTitle === session?.title) return
-    await onRenameChatForAgent(agentRef, chatId, nextTitle)
-  }
-
-  useEffect(() => {
-    if (!renamingSessionId || !renameInputRef.current) return
-    renameInputRef.current.focus()
-    renameInputRef.current.select()
-  }, [renamingSessionId])
 
   const handleLogoClick = () => {
     handleSelect(DESKTOP_ROUTES.chat)
@@ -498,7 +459,7 @@ export function SidebarNav({
                               selectedAgent === session.agentRef &&
                               activeChatId === session.id
                             const isMenuOpen = sessionMenuId === sessionKey
-                            const isRenaming = renamingSessionId === sessionKey
+                            const isRenaming = rename.editingKey === sessionKey
                             return (
                               <div
                                 key={sessionKey}
@@ -512,25 +473,14 @@ export function SidebarNav({
                                 {isRenaming ? (
                                   <div className="nav-latest-session__main nav-latest-session__main--editing">
                                     <input
-                                      ref={renameInputRef}
+                                      ref={rename.inputRef}
                                       className="nav-latest-session__rename-input"
                                       aria-label="Rename session"
-                                      value={sessionRenameValue}
-                                      onChange={event => setSessionRenameValue(event.target.value)}
+                                      value={rename.value}
+                                      onChange={rename.onChange}
                                       onClick={event => event.stopPropagation()}
-                                      onBlur={() => {
-                                        void commitSessionRename()
-                                      }}
-                                      onKeyDown={event => {
-                                        if (event.key === 'Enter') {
-                                          event.preventDefault()
-                                          void commitSessionRename()
-                                        }
-                                        if (event.key === 'Escape') {
-                                          event.preventDefault()
-                                          cancelSessionRename()
-                                        }
-                                      }}
+                                      onBlur={rename.onBlur}
+                                      onKeyDown={rename.onKeyDown}
                                     />
                                   </div>
                                 ) : (
@@ -831,27 +781,12 @@ export function SidebarNav({
           </div>
         </div>
       </aside>
-      {pendingDeleteSession ? (
-        <ConfirmDialog
-          title="Delete session?"
-          body={
-            <>
-              Delete <strong>{pendingDeleteSession.title}</strong>? Messages cannot be recovered.
-            </>
-          }
-          confirmLabel="Delete"
-          tone="danger"
-          onCancel={() => setPendingDeleteSession(null)}
-          onConfirm={() => {
-            void onDeleteChatForAgent(
-              pendingDeleteSession.agentRef,
-              pendingDeleteSession.chatId,
-              pendingDeleteSession.deletion
-            )
-            setPendingDeleteSession(null)
-          }}
-        />
-      ) : null}
+      <ChatDeleteConfirmation
+        onCancel={deleteConfirmation.cancel}
+        onConfirm={deleteConfirmation.confirm}
+        pending={deleteConfirmation.pending}
+        title="Delete session?"
+      />
     </>
   )
 }

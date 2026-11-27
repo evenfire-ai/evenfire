@@ -4505,16 +4505,21 @@ body.sidebar-resizing {
   gap: var(--space-1);
 }
 
+/* Bounded by its crumb, so inside a narrow rail the title shrinks (with an
+ * ellipsis) instead of pushing the actions trigger past the clipped edge. */
 .agent-workspace-conversation-actions {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
   min-width: 0;
+  max-width: 100%;
 }
 
-/* A long title truncates so the actions menu stays reachable inside the
- * breadcrumb; the full title remains in the crumb's `title` attribute. */
+/* A long title truncates so the actions trigger stays reachable; the full title
+ * remains in the crumb's `title` attribute. It can also shrink inside a crumb
+ * that is narrower than its content (the chat drawer rules below). */
 .agent-workspace-conversation-title {
+  flex: 0 1 auto;
   min-width: 0;
   max-width: 32ch;
   overflow: hidden;
@@ -4522,9 +4527,11 @@ body.sidebar-resizing {
   white-space: nowrap;
 }
 
-/* Inline title editor (Rename): the crumb's own type, in a field as tall as the
- * actions trigger so the header row does not jump. */
-.agent-workspace-conversation-rename-input {
+/* Inline title editor (Rename): the crumb's own type on the shared text input,
+ * in a field as tall as the actions trigger so the header row does not jump.
+ * The compound selector outspecifies the input's own `.ui-control` rule, which
+ * is declared later in this file. */
+.ui-control.agent-workspace-conversation-rename-input {
   width: 32ch;
   min-width: 0;
   min-height: 28px;
@@ -4539,17 +4546,15 @@ body.sidebar-resizing {
   padding: 0 var(--space-1-5);
 }
 
-.agent-workspace-conversation-rename-input:focus-visible {
+.ui-control.agent-workspace-conversation-rename-input:focus-visible {
   outline: 2px solid rgba(var(--focus-rgb), 0.42);
   outline-offset: 1px;
 }
 
 .agent-workspace-conversation-menu {
-  position: relative;
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
-  z-index: calc(var(--layer-dropdown) + 90);
 }
 
 .agent-workspace-conversation-menu-trigger.ui-icon-button {
@@ -4570,10 +4575,12 @@ body.sidebar-resizing {
   fill: currentColor;
 }
 
+/* Portaled to <body> and placed by `useFlyoutPosition`, which confines it to
+ * the chat drawer (to the viewport outside it): the drawer clips whatever
+ * passes its edge, so a panel anchored to the trigger would be cut off
+ * whenever the title is long. */
 .agent-workspace-conversation-menu-panel {
-  position: absolute;
-  left: 0;
-  top: calc(100% + var(--space-1));
+  position: fixed;
   width: max-content;
   min-width: 170px;
   display: grid;
@@ -4583,7 +4590,7 @@ body.sidebar-resizing {
   background: var(--bg-elev-2);
   box-shadow: 0 16px 28px rgba(var(--overlay-rgb), 0.36);
   padding: var(--space-1);
-  z-index: calc(var(--layer-dropdown) + 100);
+  z-index: calc(var(--layer-dropdown) + 1100);
 }
 
 .agent-workspace-conversation-menu-item {
@@ -9183,11 +9190,6 @@ button.page-breadcrumb-link:hover:enabled {
   text-decoration: underline;
 }
 
-button.page-breadcrumb-link--plain-action:hover:enabled {
-  color: var(--text-dim);
-  text-decoration: none;
-}
-
 .page-breadcrumb-link.is-current {
   color: var(--text);
 }
@@ -13770,6 +13772,25 @@ pre {
 }
 
 .chat-drawer .agent-workspace-greeting-row .agent-title-selector-trigger {
+  min-width: 0;
+}
+
+/* The breadcrumb uses the rail's full width in the drawer. It has no window
+ * controls to keep clear of (the full-screen route reserves that space with its
+ * right padding), and its crumbs may wrap and shrink, so a long title never
+ * pushes the conversation's actions trigger past the drawer's clipped edge. */
+.chat-drawer .agent-workspace-shell .page-breadcrumb {
+  max-width: 100%;
+  min-width: 0;
+  padding-right: 0;
+}
+
+.chat-drawer .page-breadcrumb-item {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-drawer .page-breadcrumb-link {
   min-width: 0;
 }
 
