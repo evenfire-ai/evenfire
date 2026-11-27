@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
+import { MenuItem } from '@components/Common'
 import { buildGfsResourceActions } from '@lib/gfsResourceActions'
 import { GfsResourceMenu } from './index'
 
@@ -51,6 +52,39 @@ type FocusIndicator = {
   outline: string
   labelOpacity: string
   iconOpacity: string
+}
+
+type ItemState = { background: string; opacity: string; labelOpacity: string; iconOpacity: string }
+
+// Both menus mount fixed at the same anchor; laying them out in flow lets the
+// pointer reach either one. Nothing here touches the rules under test.
+const IN_FLOW_MENUS =
+  '[role="menu"] { position: static !important; visibility: visible !important; }'
+
+function readItemState(selector: string): ItemState {
+  const item = document.querySelector<HTMLElement>(selector)
+  if (!item) throw new Error(`no item at ${selector}`)
+  const part = (name: string) => {
+    const el = item.querySelector(`:scope > .ui-menu-item__${name}`)
+    if (!el) throw new Error(`${selector} has no ${name}`)
+    return getComputedStyle(el).opacity
+  }
+  const computed = getComputedStyle(item)
+  return {
+    background: computed.backgroundColor,
+    opacity: computed.opacity,
+    labelOpacity: part('label'),
+    iconOpacity: part('icon'),
+  }
+}
+
+function resolveBackground(value: string) {
+  const probe = document.createElement('span')
+  probe.style.background = value
+  document.body.append(probe)
+  const color = getComputedStyle(probe).backgroundColor
+  probe.remove()
+  return color
 }
 
 async function openMenuPage(markup: string) {
@@ -180,6 +214,71 @@ describe('GfsResourceMenu: focus styling of unavailable items in Chromium', () =
         expect(grey.labelOpacity).toBe('0.5')
         expect(grey.iconOpacity).toBe('0.5')
       }
+    } finally {
+      await browser.close()
+    }
+  })
+
+  it('dims a greyed-out item at rest and keeps the pointer hover off it', async () => {
+    const refused = menuMarkup('refused.txt', false)
+    const allowed = menuMarkup('allowed.txt', true)
+    const { browser, page } = await openMenuPage(`${refused}${allowed}`)
+    try {
+      await page.addStyleTag({ content: IN_FLOW_MENUS })
+      const item = (menu: string, action: string) =>
+        `[aria-label="${menu}"] [data-gfs-action="${action}"]`
+      const greyRename = item('Actions for refused.txt', 'rename')
+      const greyDelete = item('Actions for refused.txt', 'delete')
+      const liveRename = item('Actions for allowed.txt', 'rename')
+      const liveDelete = item('Actions for allowed.txt', 'delete')
+      const stateOf = (selector: string) => page.evaluate(readItemState, selector)
+      const hoverBackground = await page.evaluate(resolveBackground, 'var(--surface-hover)')
+
+      const greyAtRest = await stateOf(greyRename)
+      expect(greyAtRest.labelOpacity).toBe('0.5')
+      expect(greyAtRest.iconOpacity).toBe('0.5')
+      expect((await stateOf(liveRename)).labelOpacity).toBe('1')
+
+      await page.hover(liveRename)
+      expect((await stateOf(liveRename)).background).toBe(hoverBackground)
+      await page.hover(greyRename)
+      const greyHovered = await stateOf(greyRename)
+      expect(greyHovered.background).not.toBe(hoverBackground)
+      expect(greyHovered.background).toBe(greyAtRest.background)
+
+      // Keyboard focus plus the pointer: a grey Delete keeps the neutral focus
+      // background instead of the danger tint a live Delete gets on hover.
+      await page.hover(liveDelete)
+      const liveDeleteHovered = (await stateOf(liveDelete)).background
+      await page.focus(greyRename)
+      const greyFocused = (await stateOf(greyRename)).background
+      await page.focus(greyDelete)
+      await page.hover(greyDelete)
+      expect(await page.$eval(greyDelete, el => el.matches(':focus-visible:hover'))).toBe(true)
+      const greyDeleteFocusedHovered = (await stateOf(greyDelete)).background
+      expect(greyDeleteFocusedHovered).toBe(greyFocused)
+      expect(greyDeleteFocusedHovered).not.toBe(liveDeleteHovered)
+    } finally {
+      await browser.close()
+    }
+  })
+
+  it('leaves a greyed-out menu item outside the resource menu undimmed', async () => {
+    render(
+      <div>
+        <MenuItem aria-disabled leadingIcon={<svg />}>
+          Elsewhere
+        </MenuItem>
+      </div>
+    )
+    const markup = screen.getByRole('button', { name: 'Elsewhere' }).outerHTML
+    cleanup()
+    const { browser, page } = await openMenuPage(markup)
+    try {
+      const outside = await page.evaluate(readItemState, '.ui-menu-item[aria-disabled="true"]')
+      expect(outside.opacity).toBe('1')
+      expect(outside.labelOpacity).toBe('1')
+      expect(outside.iconOpacity).toBe('1')
     } finally {
       await browser.close()
     }
