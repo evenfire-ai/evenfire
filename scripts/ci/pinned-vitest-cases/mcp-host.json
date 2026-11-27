@@ -2450,5 +2450,189 @@
   {
     "suite": "approvalMode.test.ts",
     "fullName": "approver policy in the channel cap reads the policy from the policy in force and the switch from the Host spec"
+  },
+  {
+    "suite": "mcpApprovalGateController.nativeCause.test.ts",
+    "fullName": "nativeApprovalCause an approval config whose tools is null or another falsy value behaves as no overrides"
+  },
+  {
+    "suite": "admitToolCall.arguments.test.ts",
+    "fullName": "admitToolCall with arguments that are not a JSON object null is refused as a validation result, for every tool"
+  },
+  {
+    "suite": "admitToolCall.arguments.test.ts",
+    "fullName": "admitToolCall with arguments that are not a JSON object an array is refused as a validation result, for every tool"
+  },
+  {
+    "suite": "admitToolCall.arguments.test.ts",
+    "fullName": "admitToolCall with arguments that are not a JSON object a string is refused as a validation result, for every tool"
+  },
+  {
+    "suite": "admitToolCall.arguments.test.ts",
+    "fullName": "admitToolCall with arguments that are not a JSON object a number is refused as a validation result, for every tool"
+  },
+  {
+    "suite": "admitToolCall.arguments.test.ts",
+    "fullName": "admitToolCall with arguments that are not a JSON object a boolean is refused as a validation result, for every tool"
+  },
+  {
+    "suite": "admitToolCall.arguments.test.ts",
+    "fullName": "admitToolCall with arguments that are not a JSON object an object reaches the safety check and the tool’s own validator"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the derived check after a guardrail rewrite declares the reads of the rewritten arguments, not the submitted ones"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision own no_decision, derived no_decision: only a strictly stricter derived decision wins"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision own no_decision, derived allow: only a strictly stricter derived decision wins"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision own no_decision, derived ask: only a strictly stricter derived decision wins"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision own no_decision, derived deny: only a strictly stricter derived decision wins"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision own allow, derived no_decision: only a strictly stricter derived decision wins"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision own allow, derived allow: only a strictly stricter derived decision wins"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision own allow, derived ask: only a strictly stricter derived decision wins"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision own allow, derived deny: only a strictly stricter derived decision wins"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision own ask, derived no_decision: only a strictly stricter derived decision wins"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision own ask, derived allow: only a strictly stricter derived decision wins"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision own ask, derived ask: only a strictly stricter derived decision wins"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision own ask, derived deny: only a strictly stricter derived decision wins"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision own deny, derived no_decision: only a strictly stricter derived decision wins"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision own deny, derived allow: only a strictly stricter derived decision wins"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision own deny, derived ask: only a strictly stricter derived decision wins"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision own deny, derived deny: only a strictly stricter derived decision wins"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision real rules, own allow and file_read allow: the stricter wins, and a tie keeps the call’s own rule"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision real rules, own allow and file_read ask: the stricter wins, and a tie keeps the call’s own rule"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision real rules, own allow and file_read deny: the stricter wins, and a tie keeps the call’s own rule"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision real rules, own ask and file_read allow: the stricter wins, and a tie keeps the call’s own rule"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision real rules, own ask and file_read ask: the stricter wins, and a tie keeps the call’s own rule"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision real rules, own ask and file_read deny: the stricter wins, and a tie keeps the call’s own rule"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision real rules, own deny and file_read allow: the stricter wins, and a tie keeps the call’s own rule"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision real rules, own deny and file_read ask: the stricter wins, and a tie keeps the call’s own rule"
+  },
+  {
+    "suite": "derivedFileReads.test.ts",
+    "fullName": "the merge of a call’s own decision with its derived file_read decision real rules, own deny and file_read deny: the stricter wins, and a tie keeps the call’s own rule"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool result bound (indented size and depth) a small file whose indented result is just over 10 MiB is refused at every indenting site"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool result bound (indented size and depth) a flat object: exactly 10 MiB indented is returned whole, one byte more is refused"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool result bound (indented size and depth) nested arrays and objects: exactly 10 MiB indented is returned whole, one byte more is refused"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool result bound (indented size and depth) multi-byte text and escapes: exactly 10 MiB indented is returned whole, one byte more is refused"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool result bound (indented size and depth) a deep chain: exactly 10 MiB indented is returned whole, one byte more is refused"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool result bound (indented size and depth) 256 levels are indented; 257 levels, and a stack-deep chain, are refused with fixed text"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool error branches and path edges a file tools root that cannot be resolved returns the fixed text and logs the code"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool error branches and path edges an open that fails with another errno returns the fixed text, never the host path"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool error branches and path edges stringify at a missing path returns null"
+  },
+  {
+    "suite": "jsonTransform.test.ts",
+    "fullName": "JsonTransformTool error branches and path edges a path indexes into a string by position, and reads its length"
+  },
+  {
+    "suite": "toolLaneAdapter.test.ts",
+    "fullName": "derivedFileReadDecision uses the rules only: a hook that denies every call is not consulted"
+  },
+  {
+    "suite": "toolLaneAdapter.test.ts",
+    "fullName": "derivedFileReadDecision is undefined on a Host with hooks but no rules, while decide() calls the hook"
+  },
+  {
+    "suite": "toolLaneAdapter.test.ts",
+    "fullName": "ToolLaneGuardrail contract a guardrail without derivedFileReadDecision does not type-check"
   }
 ]
