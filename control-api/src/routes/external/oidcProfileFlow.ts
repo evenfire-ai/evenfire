@@ -142,11 +142,14 @@ function defaultEngine(provider: Provider): OidcProtocolEngine {
  * Completes an attempt by what it was started for. A plain attempt (no
  * context) issues the Profile UI session exactly as password login does: no
  * requested contract and no client version, so the same representation is
- * selected. A Desktop sign-in attempt mints a one-use code bound to the
- * Desktop's code challenge. It issues no session here, so no session format is
- * selected: the Desktop's redeem selects one. An invitation attempt has no
- * completion yet and throws, so it can never complete as an ordinary sign-in;
- * the route answers that with the terminal 503.
+ * selected. An invitation attempt is the invitee signing in to Profile UI, so
+ * it issues that same session; the context stays on the proof, and account
+ * resolution reads it there for the invitation's account-creation exception.
+ * A Desktop sign-in attempt mints a one-use code bound to the Desktop's code
+ * challenge. It issues no session here, so no session format is selected: the
+ * Desktop's redeem selects one. A context of any other kind throws, so it can
+ * never complete as an ordinary sign-in; the route answers that with the
+ * terminal 503.
  *
  * `signInOidcMember` runs in its own default transaction runner: it retries a
  * unique-key conflict only when the PostgreSQL error code reaches it unchanged.
@@ -168,9 +171,8 @@ async function defaultSignInMember(
           completion: { kind: 'desktop_code', codeChallenge: context.codeChallenge },
         })
       case 'invitation':
-        // Fails closed until invitation sign-in adds its own completion: an
-        // invitation attempt must not become an ordinary Profile session.
-        throw new Error('OIDC invitation sign-in has no completion')
+        // The session below; signInOidcMember reads the invitation from the proof.
+        break
       default: {
         const unhandled: never = context
         throw new Error(

@@ -241,7 +241,59 @@ describe('/complete for a Desktop sign-in attempt', () => {
 })
 
 describe('/complete for an invitation attempt', () => {
+  it('issues the Profile UI session and leaves the invitation context on the proof', async () => {
+    signInOidcMember.mockResolvedValue({
+      status: 'signed_in',
+      userId: 'user-invited-1',
+      token: SESSION_TOKEN,
+      contract: 'v1',
+      created: { account: true, link: true, byInvitation: true },
+      invitationsApplied: 1,
+    })
+
+    const response = await request(appCompleting(invitationProof))
+      .post(COMPLETE_PATH)
+      .set('x-request-id', 'request-fixture-invitation')
+      .send(completeBody)
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      outcome: 'member_signed_in',
+      memberAuthenticationActivated: true,
+      token: SESSION_TOKEN,
+      sessionContract: 'v1',
+    })
+    // The same session completion as a plain attempt; account resolution
+    // reads the invitation from the proof it is handed.
+    expect(resolveEffectiveUserAccessPolicy).toHaveBeenCalledTimes(1)
+    expect(selectExternalSessionRepresentation).toHaveBeenCalledTimes(1)
+    expect(selectExternalSessionRepresentation).toHaveBeenCalledWith({}, sessionPolicy)
+    expect(signInOidcMember).toHaveBeenCalledTimes(1)
+    expect(signInOidcMember).toHaveBeenCalledWith({
+      proof: invitationProof,
+      provider,
+      policy: provider.memberSignIn,
+      completion: { kind: 'session', contract: 'v1', sessionPolicy },
+    })
+    expect(flowLog.error).not.toHaveBeenCalled()
+    expect(flowLog.info.mock.calls.map(call => call[0].event)).toEqual([
+      'oidc_member_account_created',
+      'oidc_member_link_created',
+      'oidc_member_invitation_applied',
+      'oidc_member_signed_in',
+    ])
+    expect(loggedText()).not.toContain('member@fixture.test')
+    expect(loggedText()).not.toContain(SESSION_TOKEN)
+  })
+})
+
+describe('/complete for a sign-in context of an unknown kind', () => {
   it('fails closed with the terminal 503 instead of issuing a Profile session', async () => {
+    // A context kind this route has no completion for, as a newer writer could store.
+    const unknownProof = proofWith({
+      kind: 'unknown_fixture_kind',
+      invitedEmail: 'member@fixture.test',
+    } as never)
     // What member sign-in answers for an ordinary attempt: a session for this member.
     signInOidcMember.mockResolvedValue({
       status: 'signed_in',
@@ -252,7 +304,7 @@ describe('/complete for an invitation attempt', () => {
       invitationsApplied: 0,
     })
 
-    const response = await request(appCompleting(invitationProof))
+    const response = await request(appCompleting(unknownProof))
       .post(COMPLETE_PATH)
       .set('x-request-id', 'request-fixture-invitation')
       .send(completeBody)
