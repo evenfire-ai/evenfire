@@ -15943,11 +15943,21 @@ pre {
 }
 
 /* An action greyed out with a reason stays focusable, so it is aria-disabled
-   rather than :disabled; it borrows the disabled look and gets no hover. */
+   rather than :disabled; it borrows the disabled look and gets no hover. Only
+   its content is dimmed: dimming the button would also halve its keyboard
+   focus ring and focus background. */
 .da-gfs-resource-menu__panel .ui-menu-item[aria-disabled='true'],
 .da-gfs-resource-menu__submenu .ui-menu-item[aria-disabled='true'] {
-  opacity: 0.5;
   cursor: not-allowed;
+}
+
+.da-gfs-resource-menu__panel
+  .ui-menu-item[aria-disabled='true']
+  > :is(.ui-menu-item__icon, .ui-menu-item__label, .ui-menu-item__trailing),
+.da-gfs-resource-menu__submenu
+  .ui-menu-item[aria-disabled='true']
+  > :is(.ui-menu-item__icon, .ui-menu-item__label, .ui-menu-item__trailing) {
+  opacity: 0.5;
 }
 
 /* A grey item is still :enabled, so the primitive's hover would reach it and

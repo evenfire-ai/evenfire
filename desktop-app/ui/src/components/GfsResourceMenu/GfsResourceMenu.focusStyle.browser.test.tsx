@@ -43,6 +43,31 @@ function menuMarkup(name: string, allowed: boolean) {
 
 type ItemStyle = { focusVisible: boolean; background: string; color: string }
 
+type FocusIndicator = {
+  focusVisible: boolean
+  // Product of the opacities of the item and every ancestor: what its
+  // outline and background are actually painted at.
+  paintedOpacity: number
+  outline: string
+  labelOpacity: string
+  iconOpacity: string
+}
+
+async function openMenuPage(markup: string) {
+  const browser = await chromium.launch()
+  const page = await browser.newPage()
+  await page.setContent(`<!doctype html><body>${markup}</body>`, {
+    waitUntil: 'domcontentloaded',
+  })
+  await page.addStyleTag({ content: readFileSync(path.join(SRC, 'styles.css'), 'utf8') })
+  await page.addStyleTag({
+    content: readFileSync(path.join(SRC, 'styles/tokens.css'), 'utf8'),
+  })
+  // Transitions would leave the computed background mid-fade.
+  await page.addStyleTag({ content: '* { transition: none !important; }' })
+  return { browser, page }
+}
+
 describe('GfsResourceMenu: focus styling of unavailable items in Chromium', () => {
   afterEach(() => vi.restoreAllMocks())
 
@@ -97,6 +122,64 @@ describe('GfsResourceMenu: focus styling of unavailable items in Chromium', () =
       expect(greyDelete.background).toBe(greyRename.background)
       // Its label keeps the danger hue it has at rest.
       expect(greyDelete.color).toBe(greyDeleteAtRest.color)
+    } finally {
+      await browser.close()
+    }
+  })
+
+  it('keeps the focus indicator of a focused greyed-out item at full contrast and dims only its content', async () => {
+    const refused = menuMarkup('refused.txt', false)
+    const allowed = menuMarkup('allowed.txt', true)
+    const { browser, page } = await openMenuPage(`${refused}${allowed}`)
+    try {
+      const indicatorOf = (menu: string, action: string) =>
+        page.evaluate(
+          ([menuName, key]) => {
+            const item = document.querySelector<HTMLElement>(
+              `[aria-label="${menuName}"] [data-gfs-action="${key}"]`
+            )
+            if (!item) throw new Error(`${menuName}: no ${key} item`)
+            item.focus()
+            let paintedOpacity = 1
+            for (let node: Element | null = item; node; node = node.parentElement) {
+              paintedOpacity *= Number(getComputedStyle(node).opacity)
+            }
+            const part = (name: string) => {
+              const el = item.querySelector(`:scope > .ui-menu-item__${name}`)
+              if (!el) throw new Error(`${menuName}: ${key} has no ${name}`)
+              return getComputedStyle(el).opacity
+            }
+            const computed = getComputedStyle(item)
+            return {
+              focusVisible: item.matches(':focus-visible'),
+              paintedOpacity,
+              outline: `${computed.outlineStyle} ${computed.outlineWidth} ${computed.outlineColor}`,
+              labelOpacity: part('label'),
+              iconOpacity: part('icon'),
+            } satisfies FocusIndicator
+          },
+          [menu, action] as const
+        )
+      const accent = await page.evaluate(() => {
+        const probe = document.createElement('span')
+        probe.style.color = 'var(--accent)'
+        document.body.append(probe)
+        const color = getComputedStyle(probe).color
+        probe.remove()
+        return color
+      })
+
+      const liveRename = await indicatorOf('Actions for allowed.txt', 'rename')
+      expect(liveRename.outline).toBe(`solid 1px ${accent}`)
+      for (const action of ['rename', 'delete']) {
+        const grey = await indicatorOf('Actions for refused.txt', action)
+        expect(grey.focusVisible).toBe(true)
+        expect(grey.paintedOpacity).toBe(1)
+        expect(grey.outline).toBe(liveRename.outline)
+        // Still reads as unavailable while it holds focus.
+        expect(grey.labelOpacity).toBe('0.5')
+        expect(grey.iconOpacity).toBe('0.5')
+      }
     } finally {
       await browser.close()
     }
