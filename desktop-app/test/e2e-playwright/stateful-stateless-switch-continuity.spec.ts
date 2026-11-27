@@ -37,7 +37,6 @@ import { execFile } from 'node:child_process'
 import { realpathSync } from 'node:fs'
 import nodePath from 'node:path'
 import { promisify } from 'node:util'
-import { fleetAgentActions } from './helpers/agentIdentity.js'
 import { startAgentChatFromFleet } from './helpers/agentNavigation.js'
 import { assertBranchProfileContext } from './helpers/branchProfileContext'
 import {
