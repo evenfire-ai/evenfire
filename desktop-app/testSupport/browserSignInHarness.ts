@@ -49,7 +49,7 @@ export async function pushedBrowserSignInSnapshots(): Promise<BrowserSignInSnaps
     clock: new FakeBrowserSignInClock(),
   })
   const binding = {
-    environmentKey: 'fixture_env-0123456789ab',
+    environmentKey: 'env-a',
     profileId: null,
     restBaseUrl: 'https://edge-fixture.example.test',
   }
