@@ -211,7 +211,6 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/name — rename pass
         headers: {
           'x-clerum-edge-caller': 'rpc-proxy',
           'x-clerum-edge-host-ref': 'chatllm',
-          'x-clerum-rpc-proxy-edge-token': 'test-edge-token',
           'x-clerum-edge-action-context': edgeContext.authorizedActionV2?.trustedEdgeHeader,
         },
       })
@@ -259,7 +258,6 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/name — rename pass
     )
     const upstreamHeaders = fetchMock.mock.calls[1][1].headers as Record<string, string>
     expect(upstreamHeaders['x-clerum-edge-action-context']).toEqual(expect.any(String))
-    expect(upstreamHeaders['x-clerum-rpc-proxy-edge-token']).toBe('test-edge-token')
     expect(upstreamHeaders['x-clerum-edge-user-id']).toBeUndefined()
   })
 

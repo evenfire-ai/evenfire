@@ -115,6 +115,28 @@ describe('NudgeArea (D.5b)', () => {
     expect(screen.getByText(/Iteration 2/i)).toBeTruthy()
   })
 
+  it('uses the public product name for the last internal tool in the mini-summary', () => {
+    renderNudge(
+      task(400_000, {
+        steps: [
+          {
+            toolCallId: 'tc-internal',
+            toolName: 'clerum__generate_pdf',
+            displayName: 'Clerum',
+            intentSummary: '',
+            iteration: 2,
+            stepIndex: 0,
+            totalSteps: 1,
+            state: 'completed',
+          },
+        ],
+      })
+    )
+
+    expect(screen.getByText('Last tool: Evenfire')).toBeTruthy()
+    expect(screen.queryByText('Last tool: Clerum')).toBeNull()
+  })
+
   it('renders the T5 nudge with a "Refresh state" button', () => {
     renderNudge(task(1_000_000))
     expect(screen.getByRole('button', { name: /refresh state/i })).toBeTruthy()

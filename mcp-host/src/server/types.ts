@@ -159,6 +159,11 @@ export interface RuntimeCallerContext {
   sender?: string
   /** Present only after strict parsing of rpc-proxy's v2 trusted-edge envelope. */
   actionContextV2?: TrustedEdgeActionContextV2
+  /**
+   * Scopes of the verified V1 edge assertion. Set by the runtime edge guard for caller
+   * rpc-proxy only.
+   */
+  edgeAssertionScopes?: readonly string[]
 }
 
 export interface MessageResponse {
@@ -257,18 +262,11 @@ export interface StatusResponse {
     failed: number
   }
   cronJobs: number
-  pendingApprovals?: Array<{
-    requestId: string
-    userId: string
-    toolName: string
-    parameters: Record<string, unknown>
-    description: string
-    since: string
-    // U5 — connect_required discriminator, mirrored from the underlying
-    // PendingApproval. Absent reason ⇒ generic approval (back-compat).
-    reason?: 'approval_required' | 'connect_required'
-    mcpServerName?: string
-  }>
+  /**
+   * One entry per pending approval, with only its start time: this route
+   * serves every user of the Host, so it names no request, user or tool.
+   */
+  pendingApprovals?: Array<{ since: string }>
   /**
    * Per-MCP-server health snapshot (spec §4.2). Omitted by older mcp-host
    * builds; consumers MUST treat absence as "unknown for every server".
@@ -606,10 +604,10 @@ export type CompactionHandler = (request: {
 
 /**
  * T3.1 — Handler for GET /v1/runtime/sessions/search.
- * `userSub` is the verified JWT identity; callers MUST derive it from the
- * request's `auth.sub`, never from query params. The handler reuses the same
- * `SessionSearchService` that drives the native tool, so the result shape is
- * identical across both surfaces.
+ * `userSub` is the user of the verified rpc-proxy edge caller context
+ * (`RuntimeCallerContext.userId`), never a query parameter. The handler reuses
+ * the same `SessionSearchService` that drives the native tool, so the result
+ * shape is identical across both surfaces.
  */
 export interface SessionSearchRequest {
   userSub: string

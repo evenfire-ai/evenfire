@@ -16,7 +16,7 @@
 
 const COMPONENT_RE = /^\[([^\]]+)\]\s*/
 const SENSITIVE_KEY_RE =
-  /password|secret|token|authorization|cookie|api[_-]?key|dsn|private|refresh|credential|account[_-]?id/i
+  /password|secret|token|authorization|cookie|api[_-]?key|dsn|private|refresh|credential|account[_-]?id|edge[_-]?assertion/i
 const UNSAFE_OBJECT_KEY = /^(?:__proto__|constructor|prototype)$/
 const SAFE_OBJECT_KEY = /^[A-Za-z0-9._-]{1,64}$/
 

@@ -58,7 +58,9 @@ describe('RpcProxyClient — invokeHostMessage()', () => {
 
     const client = new RpcProxyClient()
     const payload = { content: 'Hello agent', messageId: 'm1', channelType: 'telegram' as const }
-    await client.invokeHostMessage('rpc-token', 'chatllm', payload)
+    await client.invokeHostMessage('rpc-token', 'chatllm', payload, {
+      idempotencyKey: 'fixture-idempotency-key',
+    })
 
     const [method, url, opts] = mockRequestJson.mock.calls[0] as [
       string,
@@ -69,6 +71,28 @@ describe('RpcProxyClient — invokeHostMessage()', () => {
     expect(url).toContain('chatllm/messages')
     expect(opts.token).toBe('rpc-token')
     expect(opts.body).toEqual(payload)
+  })
+
+  it('sends the Idempotency-Key header equal to the option', async () => {
+    mockRequestJson.mockResolvedValueOnce({ taskId: 'task-1', status: 'pending' })
+
+    const client = new RpcProxyClient()
+    await client.invokeHostMessage(
+      'rpc-token',
+      'chatllm',
+      { content: 'Hello agent' },
+      { async: true, idempotencyKey: 'fixture-idempotency-key' }
+    )
+
+    expect(mockRequestJson).toHaveBeenCalledTimes(1)
+    const [method, url, opts] = mockRequestJson.mock.calls[0] as [
+      string,
+      string,
+      { headers?: Record<string, string> },
+    ]
+    expect(method).toBe('POST')
+    expect(url).toBe('http://localhost:8094/api/v1/rpc/hosts/chatllm/messages?async=true')
+    expect(opts.headers).toEqual({ 'Idempotency-Key': 'fixture-idempotency-key' })
   })
 })
 

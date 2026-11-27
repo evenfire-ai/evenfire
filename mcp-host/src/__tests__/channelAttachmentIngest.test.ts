@@ -25,6 +25,7 @@ import {
   parseChannelAttachmentMetaHeader,
 } from '../server/channelAttachmentIngest'
 import type { ChannelAttachmentIngestMetadataV1, ChannelAttachmentReceiptV1 } from '../server/types'
+import { withRpcProxyEdgeTestAuthentication } from './rpcProxyEdgeTestHeaders'
 
 function encodeMeta(meta: ChannelAttachmentIngestMetadataV1): string {
   return Buffer.from(JSON.stringify(meta), 'utf8').toString('base64url')
@@ -494,14 +495,12 @@ describe('X4 — POST /v1/runtime/channel-attachments/ingest & handleMessageRout
     // S31: rpc caller sending channelAttachmentIds -> 400 Bad Request.
     const rpcReject = await fetch(`${baseUrl}/v1/runtime/messages`, {
       method: 'POST',
-      headers: {
+      headers: withRpcProxyEdgeTestAuthentication({
         'content-type': 'application/json',
         'x-clerum-edge-caller': 'rpc-proxy',
         'x-clerum-edge-host-ref': config.hostName,
         'x-clerum-edge-user-id': 'user-1',
-        'x-service-token': 'rpc-proxy',
-        'x-clerum-rpc-proxy-edge-token': 'dev-rpc-proxy-mcp-host-edge-token',
-      },
+      }),
       body: JSON.stringify({
         content: 'hello',
         channelType: 'rpc',

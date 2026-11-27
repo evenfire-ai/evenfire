@@ -128,21 +128,41 @@ function hccOwnedLabels(name = ''): Record<string, string> {
   return labels
 }
 
+/**
+ * The rpc-proxy Deployment HCC's edge protocol barrier reads before it creates
+ * a Host Deployment or moves one onto the protocol label: current generation
+ * observed and template labelled signed-assertion-v1.
+ */
+export function signedAssertionRpcProxyDeployment(): k8s.V1Deployment {
+  return {
+    metadata: { name: 'rpc-proxy', namespace: 'rpc-proxy', generation: 1 },
+    spec: {
+      selector: { matchLabels: { app: 'rpc-proxy' } },
+      template: {
+        metadata: { labels: { 'clerum.io/rpc-proxy-edge-protocol': 'signed-assertion-v1' } },
+      },
+    },
+    status: { observedGeneration: 1 },
+  }
+}
+
 export function createMockAppsApi(): MockAppsApi {
   return {
     createNamespacedDeployment: vi.fn().mockResolvedValue({}),
     readNamespacedDeployment: vi.fn(
       ({ name, namespace }: { name?: string; namespace?: string } = {}) =>
-        Promise.resolve({
-          status: { readyReplicas: 1 },
-          metadata: {
-            name,
-            namespace,
-            uid: `uid-${name}`,
-            resourceVersion: '1',
-            labels: hccOwnedLabels(name),
-          },
-        } as MockK8sResource)
+        name === 'rpc-proxy' && namespace === 'rpc-proxy'
+          ? Promise.resolve(signedAssertionRpcProxyDeployment())
+          : Promise.resolve({
+              status: { readyReplicas: 1 },
+              metadata: {
+                name,
+                namespace,
+                uid: `uid-${name}`,
+                resourceVersion: '1',
+                labels: hccOwnedLabels(name),
+              },
+            } as MockK8sResource)
     ),
     replaceNamespacedDeployment: vi.fn().mockResolvedValue({}),
     patchNamespacedDeployment: vi.fn().mockResolvedValue({}),
@@ -317,6 +337,21 @@ export function createMockRbacApi(): MockRbacApi {
 
 export function asAppsApi(mock: MockAppsApi): k8s.AppsV1Api {
   return mock as unknown as k8s.AppsV1Api
+}
+
+/**
+ * For suites whose subject is not the edge protocol barrier: answer its
+ * rpc-proxy Deployment read with a signed-assertion cohort before `mock` sees
+ * it, so the suite's own read sequences and call counts stay about the Host.
+ */
+export function asAppsApiWithSignedAssertionRpcProxy(mock: MockAppsApi): k8s.AppsV1Api {
+  return {
+    ...mock,
+    readNamespacedDeployment: (request: { name?: string; namespace?: string }) =>
+      request.name === 'rpc-proxy' && request.namespace === 'rpc-proxy'
+        ? Promise.resolve(signedAssertionRpcProxyDeployment())
+        : mock.readNamespacedDeployment(request),
+  } as unknown as k8s.AppsV1Api
 }
 
 export function asCoreApi(mock: MockCoreApi): k8s.CoreV1Api {

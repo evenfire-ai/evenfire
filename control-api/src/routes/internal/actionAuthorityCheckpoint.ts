@@ -24,6 +24,10 @@ import {
 } from '../../services/hostRpcAdmission.js'
 import { revalidateWorkflowTriggerCheckpoint } from '../../services/workflows/workflowTriggerCheckpointRevalidation.js'
 import {
+  HostEdgeAssertionBindingError,
+  issueCheckpointHostEdgeAssertion,
+} from '../../utils/auth/hostEdgeAssertion.js'
+import {
   HostMessageAdmissionReceiptBindingError,
   issueHostMessageAdmissionReceipt,
   verifyHostMessageAdmissionReceipt,
@@ -144,6 +148,33 @@ export function createInternalActionAuthorityCheckpointRouter(gateway: K8sGatewa
           budget,
           correlationId: req.correlationId,
         })
+        // rpc-proxy forwards an allowed Host action with an assertion the Host verifies; no
+        // other caller or destination gets one.
+        let edgeAssertionField: { hostEdgeAssertion?: string } = {}
+        if (
+          result.status === 'allowed' &&
+          caller.service === 'rpc-proxy' &&
+          result.destination?.kind === 'host'
+        ) {
+          try {
+            edgeAssertionField = {
+              hostEdgeAssertion: issueCheckpointHostEdgeAssertion({
+                request: parsed,
+                result: { ...result, destination: result.destination },
+              }),
+            }
+          } catch (error) {
+            // As for the receipt: a checkpoint whose validity ends in the second of issue is
+            // the caller's invalid binding; any other failure is a defect.
+            if (!(error instanceof HostEdgeAssertionBindingError)) throw error
+            res.status(400).json({
+              version: ACTION_CONTEXT_VERSION,
+              status: 'invalid_binding',
+              code: 'invalid_binding',
+            })
+            return
+          }
+        }
         if (result.status === 'allowed' && chargesHostMessageAdmission) {
           try {
             admissionReceipt ??= issueHostMessageAdmissionReceipt(
@@ -167,10 +198,11 @@ export function createInternalActionAuthorityCheckpointRouter(gateway: K8sGatewa
           res.status(STATUS_BY_OUTCOME[result.status]).json({
             ...result,
             hostMessageAdmissionReceipt: admissionReceipt,
+            ...edgeAssertionField,
           })
           return
         }
-        res.status(STATUS_BY_OUTCOME[result.status]).json(result)
+        res.status(STATUS_BY_OUTCOME[result.status]).json({ ...result, ...edgeAssertionField })
       } catch (error) {
         // The request budget ended, or a dependency failed, inside an
         // admission or the checkpoint.

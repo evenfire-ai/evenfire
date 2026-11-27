@@ -84,7 +84,12 @@ function callFor(channel: RpcChannel): (client: RpcProxyClient) => Promise<unkno
       return client => client.renameSession(RPC_TOKEN, 'agent-x', 'agent-x', 'chat-1', 'Title')
     case 'rpc:invokeHostMessage':
       return client =>
-        client.invokeHostMessage(RPC_TOKEN, 'agent-x', { content: 'hello' }, { async: true })
+        client.invokeHostMessage(
+          RPC_TOKEN,
+          'agent-x',
+          { content: 'hello' },
+          { async: true, idempotencyKey: 'fixture-idempotency-key' }
+        )
     case 'rpc:getTaskResult':
       return client => client.getTaskResult(RPC_TOKEN, 'agent-x', 'task-1')
   }

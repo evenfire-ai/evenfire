@@ -1,8 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import jwt from 'jsonwebtoken'
+import { generateKeyPairSync } from 'node:crypto'
+import { HOST_EDGE_ASSERTION_HEADER } from '@clerum/action-context-contracts'
 import { config } from '../src/config.js'
 import {
   forwardHostMessageToHost,
   forwardRpcToServer,
+  isHeldEdgeAssertionNearExpiry,
+  refreshV1HostConnection,
   resolveHostConnectionForUser,
   validateRpcRequest,
 } from '../src/services/mcpProxyService.js'
@@ -227,7 +232,12 @@ describe('services/mcpProxyService', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       mkResponse(
         200,
-        JSON.stringify({ userId: 'user-1', hostRef: 'agent2', url: 'http://agent2.mcp-host:8080' })
+        JSON.stringify({
+          userId: 'user-1',
+          hostRef: 'agent2',
+          url: 'http://agent2.mcp-host:8080',
+          edgeAssertion: 'edge-assertion-fixture',
+        })
       )
     )
     const host = await resolveHostConnectionForUser('user-1', 'agent2', 'rpc-token')
@@ -235,11 +245,11 @@ describe('services/mcpProxyService', () => {
       name: 'agent2',
       url: 'http://agent2.mcp-host:8080',
       headers: {
+        'x-clerum-edge-assertion': 'edge-assertion-fixture',
         'x-clerum-edge-access-scope': 'user',
         'x-clerum-edge-caller': 'rpc-proxy',
         'x-clerum-edge-host-ref': 'agent2',
         'x-clerum-edge-user-id': 'user-1',
-        'x-service-token': 'rpc-proxy',
       },
     })
   })
@@ -279,5 +289,254 @@ describe('services/mcpProxyService', () => {
         { content: 'hello', channelType: 'rpc', sender: 'desktop' }
       )
     ).rejects.toThrow('Upstream host returned 500')
+  })
+})
+
+describe('isHeldEdgeAssertionNearExpiry', () => {
+  const EDGE_KEYS = generateKeyPairSync('rsa', { modulusLength: 2048 })
+  const EXP_SECONDS = 2_000_000_000
+  // The re-resolve margin: the longest a retry attempt runs, plus 2 s.
+  const MARGIN_MS = config.upstreamTimeoutMs + 2_000
+
+  function sign(payload: Record<string, unknown>): string {
+    return jwt.sign(payload, EDGE_KEYS.privateKey, { algorithm: 'RS256' })
+  }
+
+  const assertion = sign({ sub: 'user-1', iat: EXP_SECONDS - 300, exp: EXP_SECONDS })
+
+  it('is near expiry when exp is exactly the margin away', () => {
+    expect(isHeldEdgeAssertionNearExpiry(assertion, EXP_SECONDS * 1000 - MARGIN_MS)).toBe(true)
+  })
+
+  it('is not near expiry 1 ms outside the margin', () => {
+    expect(isHeldEdgeAssertionNearExpiry(assertion, EXP_SECONDS * 1000 - MARGIN_MS - 1)).toBe(false)
+  })
+
+  it('is near expiry once exp has passed', () => {
+    expect(isHeldEdgeAssertionNearExpiry(assertion, EXP_SECONDS * 1000 + 1)).toBe(true)
+  })
+
+  it.each([
+    { label: 'a value that is not a JWT', value: 'edge-assertion-fixture' },
+    { label: 'a JWT without exp', value: sign({ sub: 'user-1', iat: EXP_SECONDS - 300 }) },
+    { label: 'no assertion', value: undefined },
+  ])('throws for $label', ({ value }) => {
+    expect(() => isHeldEdgeAssertionNearExpiry(value, EXP_SECONDS * 1000)).toThrow(
+      'Held edge assertion has no readable exp'
+    )
+  })
+})
+
+describe('V1 Host resolve: thrown and unavailable control-api answers', () => {
+  const EDGE_KEYS = generateKeyPairSync('rsa', { modulusLength: 2048 })
+  const USER_ID = 'user-secret-id-1'
+  const TOKEN = 'rpc-test-token-fixture-1'
+  const LINE_PREFIX = '[RPC_PROXY] control-api host resolve unavailable'
+
+  beforeEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  // A body that fails while it is read, with a timeout: what undici does when
+  // the request deadline fires after the headers arrived.
+  function bodyReadTimeout(): Response {
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(
+          new DOMException('body-read-detail: aborted due to timeout', 'TimeoutError')
+        )
+      },
+    })
+    return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+
+  // A network failure, a timeout and a body-read timeout are transport; a
+  // non-JSON 200 is hardening, control-api's host-access route never writes it.
+  const THROWN_CASES = [
+    {
+      label: 'a network failure',
+      fetch: () =>
+        Promise.reject(
+          new TypeError('network-detail: fetch failed', { cause: { code: 'ECONNREFUSED' } })
+        ),
+      cause: 'request_failed',
+      error: 'TypeError code=ECONNREFUSED',
+      detail: 'network-detail',
+    },
+    {
+      label: 'a timeout',
+      fetch: () =>
+        Promise.reject(new DOMException('timeout-detail: aborted due to timeout', 'TimeoutError')),
+      cause: 'timeout',
+      error: 'TimeoutError',
+      detail: 'timeout-detail',
+    },
+    {
+      label: 'a non-JSON 200',
+      fetch: () =>
+        Promise.resolve(
+          new Response('<html>html-detail</html>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          })
+        ),
+      cause: 'request_failed',
+      error: 'SyntaxError',
+      detail: 'html-detail',
+    },
+    {
+      label: 'a body-read timeout',
+      fetch: () => Promise.resolve(bodyReadTimeout()),
+      cause: 'timeout',
+      error: 'TimeoutError',
+      detail: 'body-read-detail',
+    },
+  ] as const
+
+  function resolveLines(warn: { mock: { calls: unknown[][] } }): string[] {
+    return warn.mock.calls.map(args => String(args[0])).filter(line => line.startsWith(LINE_PREFIX))
+  }
+
+  function expectNoSecret(line: string, detail: string): void {
+    expect(line).not.toContain(USER_ID)
+    expect(line).not.toContain(TOKEN)
+    expect(line).not.toContain(detail)
+  }
+
+  function nearExpiryHost(): ResolvedServerConnection {
+    const exp = Math.floor(Date.now() / 1000) + 1
+    return {
+      name: 'agent2',
+      url: 'http://agent2.mcp-host:8080',
+      headers: {
+        [HOST_EDGE_ASSERTION_HEADER]: jwt.sign(
+          { sub: USER_ID, iat: exp - 300, exp },
+          EDGE_KEYS.privateKey,
+          { algorithm: 'RS256' }
+        ),
+      },
+    }
+  }
+
+  it.each(THROWN_CASES)(
+    'resolveHostConnectionForUser returns unavailable when the control-api call throws: $label',
+    async ({ fetch, cause, error, detail }) => {
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(fetch)
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+      const resolved = await resolveHostConnectionForUser(USER_ID, 'agent2', TOKEN)
+
+      expect(fetchMock).toHaveBeenCalledOnce()
+      expect(resolved).toEqual({ unavailable: true, cause })
+      // Exactly one line: it is also the witness that the catch ran.
+      const lines = resolveLines(warn)
+      expect(lines).toEqual([
+        `${LINE_PREFIX} phase=resolve host=agent2 cause=${cause} error=${error}`,
+      ])
+      expectNoSecret(lines[0]!, detail)
+    }
+  )
+
+  it.each(THROWN_CASES)(
+    'refreshV1HostConnection returns unavailable when the control-api call throws: $label',
+    async ({ fetch, cause, error, detail }) => {
+      const host = nearExpiryHost()
+      const heldAssertion = host.headers[HOST_EDGE_ASSERTION_HEADER]
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementationOnce(fetch)
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+      const refusal = await refreshV1HostConnection(host, USER_ID, 'agent2', TOKEN)
+
+      expect(fetchMock).toHaveBeenCalledOnce()
+      expect(refusal).toEqual({ unavailable: true, cause })
+      expect(host.headers[HOST_EDGE_ASSERTION_HEADER]).toBe(heldAssertion)
+      const lines = resolveLines(warn)
+      expect(lines).toEqual([
+        `${LINE_PREFIX} phase=re-resolve host=agent2 cause=${cause} error=${error}`,
+      ])
+      expectNoSecret(lines[0]!, detail)
+    }
+  )
+
+  // A 503 comes only from an intermediary: control-api does not write it on the
+  // host-access route.
+  it('resolveHostConnectionForUser logs one line for a returned http_status 503', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(mkResponse(503, JSON.stringify({ error: 'status-detail' })))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    const resolved = await resolveHostConnectionForUser(USER_ID, 'agent2', TOKEN)
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(resolved).toEqual({ unavailable: true, cause: 'http_status', status: 503 })
+    const lines = resolveLines(warn)
+    expect(lines).toEqual([`${LINE_PREFIX} phase=resolve host=agent2 cause=http_status status=503`])
+    expectNoSecret(lines[0]!, 'status-detail')
+  })
+
+  // A 503 comes only from an intermediary, as above.
+  it('refreshV1HostConnection logs one line for a returned http_status 503', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(mkResponse(503, JSON.stringify({ error: 'status-detail' })))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    const refusal = await refreshV1HostConnection(nearExpiryHost(), USER_ID, 'agent2', TOKEN)
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(refusal).toEqual({ unavailable: true, cause: 'http_status', status: 503 })
+    const lines = resolveLines(warn)
+    expect(lines).toEqual([
+      `${LINE_PREFIX} phase=re-resolve host=agent2 cause=http_status status=503`,
+    ])
+    expectNoSecret(lines[0]!, 'status-detail')
+  })
+
+  // A connection for this user and Host, valid except that it has no edge
+  // assertion: what a control-api older than the assertion answers.
+  function connectionWithoutAssertion(): Response {
+    return mkResponse(
+      200,
+      JSON.stringify({ userId: USER_ID, hostRef: 'agent2', url: 'http://agent2.mcp-host:8080' })
+    )
+  }
+
+  function missingAssertionLine(phase: 'resolve' | 're-resolve'): string {
+    return `[RPC_PROXY] control-api answered the host resolve without an edge assertion; upgrade control-api before RPC Proxy phase=${phase} host=agent2`
+  }
+
+  it('resolveHostConnectionForUser logs the phase of a missing edge assertion', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(connectionWithoutAssertion())
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    const resolved = await resolveHostConnectionForUser(USER_ID, 'agent2', TOKEN)
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(resolved).toEqual({ unavailable: true, cause: 'edge_assertion_missing' })
+    // Every warn call: the one line is the witness, and no generic line was written.
+    const lines = warn.mock.calls.map(args => String(args[0]))
+    expect(lines).toEqual([missingAssertionLine('resolve')])
+    expectNoSecret(lines[0]!, 'agent2.mcp-host')
+  })
+
+  it('refreshV1HostConnection logs the phase of a missing edge assertion', async () => {
+    const host = nearExpiryHost()
+    const heldAssertion = host.headers[HOST_EDGE_ASSERTION_HEADER]
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(connectionWithoutAssertion())
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    const refusal = await refreshV1HostConnection(host, USER_ID, 'agent2', TOKEN)
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(refusal).toEqual({ unavailable: true, cause: 'edge_assertion_missing' })
+    expect(host.headers[HOST_EDGE_ASSERTION_HEADER]).toBe(heldAssertion)
+    const lines = warn.mock.calls.map(args => String(args[0]))
+    expect(lines).toEqual([missingAssertionLine('re-resolve')])
+    expectNoSecret(lines[0]!, 'agent2.mcp-host')
   })
 })
