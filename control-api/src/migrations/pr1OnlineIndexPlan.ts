@@ -5,6 +5,10 @@ import {
 } from './governedTraceRetention.js'
 import { MIGRATION_EXECUTION_POLICY } from './migrationExecutionPolicy.js'
 import { type RUNNER_MIGRATION_VERSIONS, runBoundedTransaction } from './migrationRunner.js'
+import {
+  WORKFLOW_RUN_CANCEL_REQUEST_MIGRATION,
+  WORKFLOW_RUN_CANCEL_REQUEST_PAIR_CHECK,
+} from './workflowRunCancelRequest.js'
 
 export type OnlineIndexDefinition = Readonly<{
   migrationVersion: (typeof RUNNER_MIGRATION_VERSIONS)[number]
@@ -230,6 +234,11 @@ export const POST_SCHEMA_CONSTRAINT_VALIDATIONS: readonly PostSchemaConstraintVa
       migrationVersion: '0156_workflow_authorization_pause',
       table: 'workflow_runs',
       constraint: 'workflow_runs_failure_reason_check',
+    }),
+    constraintValidation({
+      migrationVersion: WORKFLOW_RUN_CANCEL_REQUEST_MIGRATION,
+      table: 'workflow_runs',
+      constraint: WORKFLOW_RUN_CANCEL_REQUEST_PAIR_CHECK,
     }),
   ])
 

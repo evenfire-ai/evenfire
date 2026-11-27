@@ -342,6 +342,11 @@ describe('D34 migration execution policy', () => {
       ['0155_workflow_run_failure_reason', 'workflow_runs', 'workflow_runs_failure_reason_check'],
       ['0156_workflow_authorization_pause', 'workflow_runs', 'workflow_runs_phase_check'],
       ['0156_workflow_authorization_pause', 'workflow_runs', 'workflow_runs_failure_reason_check'],
+      [
+        '0160_workflow_run_cancel_request',
+        'workflow_runs',
+        'workflow_runs_cancel_request_pair_check',
+      ],
     ])
     // A version with only constraint validations (0152, 0155) still has
     // post-schema work; the versions without either have none.
@@ -582,14 +587,14 @@ describe('D34 PR1 migration runner', () => {
 
     expect(applied).toEqual(RUNNER_MIGRATION_VERSIONS)
     // One transaction per version without post-schema work (0137-0150,
-    // 0153-0154, 0157-0160); a version with it commits its schema, each validation and
+    // 0153-0154, 0157-0159); a version with it commits its schema, each validation and
     // its receipt separately: 0151 1 + 4 + 1, 0152 1 + 1 + 1, 0155 1 + 1 + 1,
-    // 0156 1 + 2 + 1.
-    const transactions = 20 + 6 + 3 + 3 + 4
+    // 0156 1 + 2 + 1, 0160 1 + 1 + 1.
+    const transactions = 19 + 6 + 3 + 3 + 4 + 3
     expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
-    expect(queries.filter(({ sql }) => VALIDATE_CONSTRAINT.test(sql))).toHaveLength(8)
+    expect(queries.filter(({ sql }) => VALIDATE_CONSTRAINT.test(sql))).toHaveLength(9)
   })
 
   it('runs after-schema online indexes, then each constraint validation, before recording', async () => {
@@ -775,6 +780,71 @@ describe('D34 PR1 migration runner', () => {
     expect(rejectedWhileAborted).toEqual([])
     expect(recordMigration).not.toHaveBeenCalled()
     expect(appliedVersions).not.toContain(pendingVersion)
+  })
+
+  it('does not record 0160 when its validation fails, and a rerun records it once', async () => {
+    const pendingVersion = '0160_workflow_run_cancel_request'
+    expect(hasPostSchemaWork(pendingVersion)).toBe(true)
+    const validationSql =
+      'ALTER TABLE workflow_runs VALIDATE CONSTRAINT workflow_runs_cancel_request_pair_check'
+    const validationError = Object.assign(
+      new Error('canceling statement due to statement timeout'),
+      { code: '57014' }
+    )
+    const queries: string[] = []
+    let failValidation = true
+    const query = vi.fn(async (sql: string) => {
+      queries.push(sql)
+      if (sql === validationSql && failValidation) throw validationError
+      return { rows: [], rowCount: 0 }
+    })
+    const transactionEvents = () =>
+      queries.filter(
+        sql => sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK' || sql === validationSql
+      )
+    const apply = vi.fn(async () => undefined)
+    const migrations = RUNNER_MIGRATION_VERSIONS.map(version => ({
+      version,
+      apply: version === pendingVersion ? apply : vi.fn(async () => undefined),
+    }))
+    const appliedVersions = new Set<string>(
+      RUNNER_MIGRATION_VERSIONS.filter(version => version !== pendingVersion)
+    )
+    const recorded: string[] = []
+    const run = () =>
+      applyPendingPr1Migrations({
+        db: { query },
+        migrations,
+        appliedVersions,
+        recordMigration: async (_db, version) => {
+          recorded.push(version)
+        },
+      })
+
+    await expect(run()).rejects.toBe(validationError)
+    // Witness: the schema transaction committed before the failing VALIDATE,
+    // which ran in its own transaction and was rolled back.
+    expect(apply).toHaveBeenCalledTimes(1)
+    expect(transactionEvents()).toEqual(['BEGIN', 'COMMIT', 'BEGIN', validationSql, 'ROLLBACK'])
+    expect(recorded).toEqual([])
+    expect(appliedVersions).not.toContain(pendingVersion)
+
+    // The next start re-applies the idempotent schema, validates and records once.
+    failValidation = false
+    queries.length = 0
+    await run()
+    expect(apply).toHaveBeenCalledTimes(2)
+    expect(transactionEvents()).toEqual([
+      'BEGIN',
+      'COMMIT',
+      'BEGIN',
+      validationSql,
+      'COMMIT',
+      'BEGIN',
+      'COMMIT',
+    ])
+    expect(recorded).toEqual([pendingVersion])
+    expect(appliedVersions).toContain(pendingVersion)
   })
 
   it('does not record an after-schema migration when its online index fails', async () => {
