@@ -168,10 +168,10 @@ describeRealPostgres('workflow run duration on real PostgreSQL', () => {
       .mockImplementation(((...args: Parameters<typeof pool.query>) =>
         (databasePool.query as typeof pool.query)(...args)) as typeof pool.query)
 
-    await databasePool.query(`INSERT INTO users(id, email, name) VALUES ($1, $2, 'S33 User')`, [
-      userId,
-      `${userId}@example.test`,
-    ])
+    await databasePool.query(
+      `INSERT INTO users(id, email, name) VALUES ($1, $2, 'Duration Producer User')`,
+      [userId, `${userId}@example.test`]
+    )
     await databasePool.query(`INSERT INTO user_contexts(user_id, context_id) VALUES ($1, $2)`, [
       userId,
       `${config.contextsNamespace}/${contextName}`,
@@ -396,7 +396,7 @@ describeRealPostgres('workflow run duration on real PostgreSQL', () => {
       recipeName: name,
       callerKey,
       targetUserId: userId,
-      payload: { message: 'Approve S33 legacy workflow trigger' },
+      payload: { message: 'Approve legacy workflow trigger' },
       idempotencyKey,
       runIntent: {
         actorType: 'user',

@@ -1660,7 +1660,7 @@ describeRealPostgres('workflow run cancel lifecycle model', () => {
         mostRunsInSequence: mostRuns,
         reached,
       }
-      process.stdout.write(`S30 ${JSON.stringify(summary)}\n`)
+      process.stdout.write(`cancel lifecycle model ${JSON.stringify(summary)}\n`)
       expect(runs).toBe(REPLAY_PATH ? 1 : NUM_RUNS)
       if (!REPLAY_PATH) {
         // Sequences reach the budget; commands whose precondition fails are skipped.
