@@ -6,6 +6,7 @@ import {
   controlApiFailureLogFields,
   controlApiRequestWithStatus,
 } from '../controlApiClient.js'
+import { isControlApiRateLimited, sendControlApiRateLimited } from '../http/controlApiRetry.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import { clientRateKey } from './oidcProfileFlow.js'
 
@@ -15,6 +16,8 @@ const LABEL_MAX_LENGTH = 80
 const SIGN_IN_URL_MAX_LENGTH = 2048
 /** Reads per minute for one client (forwarded IP). */
 const METHODS_PER_CLIENT_LIMIT = 60
+/** The methods limiter's window; a control-api 429 without a usable Retry-After waits one. */
+const METHODS_WINDOW_SECONDS = 60
 const CACHE_TTL_MS = 30_000
 
 type OidcMethod = Readonly<{ label: string; signInUrl: string }>
@@ -63,15 +66,15 @@ function rebuildMethods(data: unknown): MethodsAnswer | undefined {
 /**
  * `GET /auth/methods`: which sign-in methods Desktop offers. Public. A rebuilt 200 is cached
  * for 30 s as one answer for the whole environment; nothing else is cached. control-api's 404
- * (a control-api older than the route) stays a 404, and anything else is
- * `503 methods_unavailable`, never a default list.
+ * (a control-api older than the route) stays a 404, its 429 stays a 429 with a bounded
+ * Retry-After, and anything else is `503 methods_unavailable`, never a default list.
  */
 export function createAuthMethodsRouter(): Router {
   const router = Router()
   // On the route itself: the router is mounted without a path, so a bare `router.use` would
   // count every later /api/v1 request against this budget.
   const perClient = createRateLimiter({
-    windowMs: 60_000,
+    windowMs: METHODS_WINDOW_SECONDS * 1000,
     maxRequests: METHODS_PER_CLIENT_LIMIT,
     keyFn: clientRateKey,
     errorCode: 'rate_limited',
@@ -101,6 +104,12 @@ export function createAuthMethodsRouter(): Router {
     } catch (error) {
       if (error instanceof ControlApiError && error.status === 404) {
         res.status(404).json({ error: 'Not Found' })
+        return
+      }
+      // control-api's own limiter: a wait, not an outage. It is relayed with a bounded
+      // Retry-After, not cached and not logged.
+      if (error instanceof ControlApiError && isControlApiRateLimited(error)) {
+        sendControlApiRateLimited(error, res, METHODS_WINDOW_SECONDS)
         return
       }
       // Not forwarded to the global handler, which would answer 500 or relay control-api's

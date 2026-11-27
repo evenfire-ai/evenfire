@@ -7,7 +7,11 @@ import {
 
 const SESSION_ISSUANCE_UNAVAILABLE_CODE = 'session_issuance_temporarily_unavailable'
 
-function isSessionIssuanceUnavailable(error: ControlApiError): boolean {
+/**
+ * Whether the body carries the code control-api's 503 sends when the session security cutoff
+ * defers issuing a session, as a flat `error` or as `error.code`.
+ */
+export function isSessionIssuanceUnavailable(error: ControlApiError): boolean {
   if (!error.body || typeof error.body !== 'object') return false
   const rawError = (error.body as Record<string, unknown>).error
   if (rawError === SESSION_ISSUANCE_UNAVAILABLE_CODE) return true
