@@ -2,7 +2,7 @@
 import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import type { WorkflowRunListItem } from '../../../../src/types'
+import type { WorkflowInputContractSchema, WorkflowRunListItem } from '../../../../src/types'
 import {
   useWorkflowController,
   useWorkflowRecentRuns,
@@ -378,5 +378,82 @@ describe('WorkflowsPage cancel', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     expect(cancelRun).toHaveBeenCalledTimes(1)
     expect(cancelRun).toHaveBeenCalledWith(WORKFLOW.namespace, WORKFLOW.name, RUN_ID)
+  })
+
+  it('the Trigger modal and the cancel confirmation never open together', async () => {
+    const contract: WorkflowInputContractSchema = {
+      properties: { topic: { type: 'string', default: 'initial topic' } },
+    }
+    const recipeRead = deferred()
+    const handleSelectWorkflow = vi
+      .fn()
+      .mockResolvedValueOnce(contract)
+      .mockReturnValueOnce(recipeRead.promise.then(() => contract))
+    const handleTriggerWorkflow = vi.fn().mockResolvedValue(undefined)
+    const cancelRun = vi.fn(async () => undefined)
+    useWorkflowControllerMock.mockReturnValue({
+      workflowsLoading: false,
+      workflowsError: null,
+      workflows: [WORKFLOW, WORKFLOW_B],
+      selectedWorkflowInputContract: contract,
+      workflowInputValues: { topic: 'initial topic' },
+      setWorkflowInputValues: vi.fn(),
+      workflowTriggerLoading: false,
+      handleSelectWorkflow,
+      handleTriggerWorkflow,
+      cancelRun,
+    } as unknown as ReturnType<typeof useWorkflowController>)
+    useWorkflowRecentRunsMock.mockImplementation(wf =>
+      makeRecentRuns(
+        makeRun({ id: wf.name === WORKFLOW_B.name ? RUN_ID_B : RUN_ID, viewerCanCancel: true })
+      )
+    )
+    render(<WorkflowsPage />)
+    const table = within(screen.getByRole('table'))
+    const triggerButtons = () => table.getAllByRole('button', { name: 'Trigger' })
+    const cancelButtons = () => table.getAllByRole('button', { name: 'Cancel run' })
+    expect(triggerButtons()).toHaveLength(2)
+    expect(cancelButtons()).toHaveLength(2)
+
+    // (1) The cancel confirmation is open: every row's Trigger is disabled.
+    fireEvent.click(cancelButtons()[0] as HTMLElement)
+    const cancelDialog = screen.getByRole('dialog', { name: 'Cancel run 7f0b4c1e?' })
+    for (const button of triggerButtons()) {
+      expect((button as HTMLButtonElement).disabled).toBe(true)
+    }
+
+    // (2) After "Keep running", Trigger opens the Trigger modal: every row's Cancel is
+    // disabled and it is the only dialog.
+    fireEvent.click(within(cancelDialog).getByRole('button', { name: 'Keep running' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    fireEvent.click(triggerButtons()[0] as HTMLElement)
+    const triggerDialog = await screen.findByRole('dialog', {
+      name: `Trigger ${WORKFLOW.name}`,
+    })
+    for (const button of cancelButtons()) {
+      expect((button as HTMLButtonElement).disabled).toBe(true)
+    }
+    expect(screen.getAllByRole('dialog')).toHaveLength(1)
+
+    // (3) While a Trigger waits for its recipe read, every row's Cancel is disabled;
+    // when the read resolves the Trigger modal opens alone.
+    fireEvent.click(within(triggerDialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    handleSelectWorkflow.mockClear()
+    fireEvent.click(triggerButtons()[0] as HTMLElement)
+    expect(handleSelectWorkflow).toHaveBeenCalledTimes(1)
+    for (const button of cancelButtons()) {
+      expect((button as HTMLButtonElement).disabled).toBe(true)
+    }
+    expect(screen.queryByRole('dialog')).toBeNull()
+
+    await act(async () => {
+      recipeRead.resolve()
+      await recipeRead.promise
+    })
+    await screen.findByRole('dialog', { name: `Trigger ${WORKFLOW.name}` })
+    expect(screen.getAllByRole('dialog')).toHaveLength(1)
+    expect(cancelRun).not.toHaveBeenCalled()
+    expect(handleTriggerWorkflow).not.toHaveBeenCalled()
   })
 })

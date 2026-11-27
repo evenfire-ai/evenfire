@@ -44,11 +44,13 @@ function RecentRunsCell({
   onDownload,
   downloadingKey,
   onRequestCancel,
+  cancelDisabled,
 }: {
   recent: WorkflowRecentRuns
   onDownload: (run: WorkflowRunListItem, artifact: WorkflowRunArtifact) => void
   downloadingKey: string | null
   onRequestCancel: (run: WorkflowRunListItem) => void
+  cancelDisabled: boolean
 }) {
   if (recent.loading) {
     return <span className="muted">Loading runs…</span>
@@ -82,6 +84,7 @@ function RecentRunsCell({
           <Button
             aria-label="Cancel run"
             color="danger"
+            disabled={cancelDisabled}
             onClick={() => onRequestCancel(run)}
             size="xs"
             title={`Cancel this run. ${WORKFLOW_RUN_CANCEL_EFFECT}`}
@@ -119,12 +122,14 @@ function WorkflowRow({
   wf,
   pendingTriggerKey,
   triggerModalOpen,
+  cancelConfirmOpen,
   onTrigger,
   onRequestCancel,
 }: {
   wf: WorkflowSummary
   pendingTriggerKey: string | null
   triggerModalOpen: boolean
+  cancelConfirmOpen: boolean
   onTrigger: (wf: WorkflowSummary) => void
   onRequestCancel: (run: WorkflowRunListItem) => void
 }) {
@@ -184,17 +189,25 @@ function WorkflowRow({
           onDownload={handleDownload}
           downloadingKey={downloadingKey}
           onRequestCancel={onRequestCancel}
+          // The same rule the other way: while the Trigger modal is open, or any
+          // row's trigger is pending (the recipe read that decides whether the
+          // modal opens, or the trigger call itself), every row's Cancel is
+          // disabled, so no cancel confirmation can open beside the modal.
+          cancelDisabled={triggerModalOpen || pendingTriggerKey !== null}
         />
       </td>
       <td className="da-table__cell da-table__cell--right">
         <span className="action-row">
           <Button
             color="primary"
-            // While the Trigger modal is open, every row's Trigger is disabled:
-            // ConfirmDialog has no focus trap yet, so a keyboard user could
-            // otherwise Shift+Tab out and activate another row, resetting the
-            // modal's global selection state. (Central focus-trap is follow-up.)
-            disabled={!wf.triggerableByUser || anotherPending || triggerModalOpen}
+            // While the Trigger modal or the cancel confirmation is open, every
+            // row's Trigger is disabled: ConfirmDialog has no focus trap yet, so a
+            // keyboard user could otherwise Shift+Tab out and activate another row,
+            // resetting the modal's global selection state or opening a second
+            // dialog over the first. (Central focus-trap is follow-up.)
+            disabled={
+              !wf.triggerableByUser || anotherPending || triggerModalOpen || cancelConfirmOpen
+            }
             loading={isTriggering}
             onClick={() => onTrigger(wf)}
             size="sm"
@@ -343,6 +356,7 @@ export function WorkflowsPage() {
                     wf={wf}
                     pendingTriggerKey={pendingTriggerKey}
                     triggerModalOpen={triggerModalWorkflow !== null}
+                    cancelConfirmOpen={cancelConfirm !== null}
                     onTrigger={w => void handleTrigger(w)}
                     onRequestCancel={run => setCancelConfirm(current => current ?? { wf, run })}
                   />
