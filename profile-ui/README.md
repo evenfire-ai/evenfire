@@ -12,6 +12,7 @@
 - Authenticated member invitation route at `/members/invite`, which posts to `external-rest-api /api/v1/members/invite`
 - Invitation confirmation route at `/invitations/[token]`
 - Desktop app authorization route at `/desktop-setup`
+- Desktop app link handoff routes at `/open/apps/<namespace>/<name>` (shared app links) and `/open/files?uri=…` (shared EvenDrive links)
 
 ## Environment
 

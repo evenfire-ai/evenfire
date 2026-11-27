@@ -76,6 +76,9 @@ for what breaks without it.
 - `/invitations/[token]` and `/forgot-password` — reachable without a
   session.
 - `/desktop-setup` — the Desktop App handoff, above.
+- `/open/apps/<namespace>/<name>` and `/open/files?uri=…` — browser landing
+  pages for shared app and EvenDrive links; they hand the link to the Desktop
+  App as `evenfire://app/…` or `evenfire://files?uri=…`.
 
 ## Sign-out
 
