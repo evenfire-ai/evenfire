@@ -720,7 +720,7 @@ describe('FilesPage', () => {
     ])
   })
 
-  it('shows permission-backed share and rename actions for folder and file children', () => {
+  it('shows permission-backed share and rename actions for folder and file children', async () => {
     const folder = {
       resourceId: 'folder-child',
       rid: 'folder-child',
@@ -842,10 +842,19 @@ describe('FilesPage', () => {
       ).disabled
     ).toBe(false)
 
-    fireEvent.click(readonlyShare)
-    fireEvent.click(readonlyRename)
-    expect(screen.queryByRole('dialog')).toBeNull()
-    expect(screen.queryByRole('form', { name: 'Rename resource' })).toBeNull()
+    // Clicking the readonly icons proves nothing: React never dispatches a
+    // click to a natively disabled button, and `disabled` is pinned above.
+    // The enabled twins show the same icons drive their action, so only
+    // `disabled` withholds it on the readonly row. Share uses the folder twin:
+    // a file's Share first navigates to the file, which this controller mock
+    // does not perform.
+    fireEvent.click(within(fileRow!).getByRole('button', { name: 'Rename report.txt' }))
+    const renameForm = await screen.findByRole('form', { name: 'Rename resource' })
+    expect(fileRow!.contains(renameForm)).toBe(true)
+    fireEvent.click(within(renameForm).getByRole('button', { name: 'Cancel rename' }))
+    await waitFor(() => expect(screen.queryByRole('form', { name: 'Rename resource' })).toBeNull())
+    fireEvent.click(within(folderRow!).getByRole('button', { name: 'Share Assets' }))
+    expect(await screen.findByRole('dialog', { name: 'Share folder Assets' })).toBeTruthy()
   })
 
   type InlineIconCase = {
