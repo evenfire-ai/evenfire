@@ -265,6 +265,8 @@ interface Submission {
   outcomes: Set<string>
   /** An outcome toast was attributed to it. */
   toasted: boolean
+  /** When the latest toast attributed to it was pushed. */
+  toastedAt: number | null
   /** An error banner in its own dialog showed its outcome. */
   shownInline: boolean
   /** That banner refused a Move whose source changed since it was chosen. */
@@ -386,6 +388,12 @@ interface World {
   moveChecksSeen: number
   /** A resource another client writes just before the next Move PATCH of it. */
   changeBeforeNextMove: string | null
+  /**
+   * A fixed example's extra host generation check: called with the stack of
+   * each real check, it returns the stack to record one more check under, or
+   * null for none.
+   */
+  extraGenCheck: ((stack: string | undefined) => string | null) | null
   /** A generation answer a fixed example releases by hand. */
   heldGen: { promise: Promise<void>; release: () => void } | null
   releaseGen: (() => void) | null
@@ -813,14 +821,29 @@ function installBridge(w: World) {
     value: {
       auth: {
         getSessionGeneration: (() => {
-          const answer = scheduled(w, 'getSessionGeneration', async () => {
-            const generation = w.model.mainGen
+          const record = (generation: number) => {
             w.genCalls.push({
               at: tick(w),
               answer: generation,
               host: askedByHost(stack),
               family: askingFamily(stack),
             })
+            // Recorded here, with a real call's stack, so the oracle reads it
+            // exactly as it reads that call: a check asked from the test itself
+            // would not count as the host's and would vanish unnoticed.
+            const extra = w.extraGenCheck?.(stack) ?? null
+            if (extra !== null) {
+              w.genCalls.push({
+                at: tick(w),
+                answer: generation,
+                host: askedByHost(extra),
+                family: askingFamily(extra),
+              })
+            }
+          }
+          const answer = scheduled(w, 'getSessionGeneration', async () => {
+            const generation = w.model.mainGen
+            record(generation)
             if (askingFamily(stack) === 'move') {
               w.moveChecksSeen += 1
               // A fixed example revokes access right as the Move asks main.
@@ -840,12 +863,7 @@ function installBridge(w: World) {
             // Main answers now; the renderer receives it when the example says.
             w.heldGen = null
             const generation = w.model.mainGen
-            w.genCalls.push({
-              at: tick(w),
-              answer: generation,
-              host: askedByHost(stack),
-              family: askingFamily(stack),
-            })
+            record(generation)
             return held.promise.then(() => generation)
           }
         })(),
@@ -1174,13 +1192,15 @@ function menuViolations(w: World): string[] {
 }
 
 function checkAtRest(w: World) {
+  expect(atRestViolations(w)).toEqual([])
+}
+
+/** Every invariant broken at rest, as one message each. */
+function atRestViolations(w: World): string[] {
   // A generation answer a fixed example still holds: an outcome is pending,
   // so L1 cannot be judged yet. Held bit reads and a held publish leave the
   // composition at rest (a pending menu, a renderer behind main) and are checked.
-  if (w.heldGen || w.releaseGen) {
-    expect(w.violations).toEqual([])
-    return
-  }
+  if (w.heldGen || w.releaseGen) return [...w.violations]
   const m = w.model
   const violations = [...w.violations, ...menuViolations(w)]
   const menu = openMenu()
@@ -1286,7 +1306,10 @@ function checkAtRest(w: World) {
   // the submission that asked, found by the kind of action on its stack and
   // the latest activity of that kind before it. Its bound is exact for the
   // route it took: one per operation and one before the outcome, or, for a
-  // Move, the measured count of the pipeline path it ended on.
+  // Move, the measured count of the pipeline path it ended on. Uploads are
+  // bounded apart, below: they are the one action that runs outside the
+  // host's dialog, so two of them can interleave and the latest activity no
+  // longer names the one that asked.
   const routeBudget = (s: Submission) => {
     if (s.op !== 'moveResource') return s.calls.length + 1
     const call = s.calls[0]
@@ -1306,7 +1329,10 @@ function checkAtRest(w: World) {
       `K1: ${gestureChecks} copy/download generation checks for ${w.openings.length} gestures`
     )
   }
-  for (const check of w.genCalls.filter(call => call.host && call.family !== 'gesture')) {
+  const perSubmission = w.genCalls.filter(
+    call => call.host && call.family !== 'gesture' && call.family !== 'upload'
+  )
+  for (const check of perSubmission) {
     const asker = w.submissions
       .filter(s => familyOf(s.op) === check.family && s.at < check.at)
       .sort((a, b) => lastActivityBefore(b, check.at) - lastActivityBefore(a, check.at))[0]
@@ -1323,6 +1349,7 @@ function checkAtRest(w: World) {
       )
     }
   }
+  violations.push(...uploadCheckViolations(w))
 
   // K1 for the location on screen: after a mutation lands, the background
   // re-reads of Q it causes (the host's refresh, the watch echo) are at most
@@ -1384,7 +1411,63 @@ function checkAtRest(w: World) {
     }
   }
 
-  expect(violations).toEqual([])
+  return violations
+}
+
+/**
+ * K1 for uploads. A check carries no identity of the upload that asked, and
+ * two uploads in flight ask in any order (an earlier one may still wait on
+ * its write check while a later one finishes). So each check is charged to
+ * the uploads live when it was asked: opened before it and not yet past the
+ * toast attributed to them. When several are live they are joined, and a
+ * group is held to the sum of its members' bounds; an upload that never
+ * shares a check with another stays held to its own.
+ *
+ * An upload with no toast (aborted, refused, its picker closed) stays live
+ * until rest, so every later upload joins it, and any bound it left unused
+ * can hide an extra check of theirs. That only loosens the bound, it never
+ * charges an upload for a check it did not ask: the one that asked is always
+ * live, since its own toast comes after its last check. A newer upload with
+ * the same outcome text may take that toast instead, but then the one that
+ * asked has none and stays live, and the two were already joined when the
+ * newer one asked before its request.
+ */
+function uploadCheckViolations(w: World): string[] {
+  const violations: string[] = []
+  const uploads = w.submissions.filter(s => s.op === 'createFileFromPath')
+  const liveAt = (s: Submission, at: number) =>
+    s.at < at && (s.toastedAt === null || s.toastedAt > at)
+  const parent = new Map(uploads.map(s => [s, s]))
+  const root = (s: Submission): Submission => {
+    let r = s
+    while (parent.get(r) !== r) r = parent.get(r)!
+    return r
+  }
+  const charged = new Map<Submission, number>()
+  for (const check of w.genCalls.filter(call => call.host && call.family === 'upload')) {
+    const live = uploads.filter(s => liveAt(s, check.at))
+    const first = live[0]
+    if (!first) {
+      violations.push(`K1: an upload generation check at ${check.at} has no live upload`)
+      continue
+    }
+    for (const other of live.slice(1)) parent.set(root(other), root(first))
+    charged.set(first, (charged.get(first) ?? 0) + 1)
+  }
+  const groups = new Map<Submission, Submission[]>()
+  for (const s of uploads) groups.set(root(s), [...(groups.get(root(s)) ?? []), s])
+  for (const members of groups.values()) {
+    const asked = members.reduce((sum, s) => sum + (charged.get(s) ?? 0), 0)
+    const bound = members.reduce((sum, s) => sum + s.calls.length + 1, 0)
+    if (asked <= bound) continue
+    const only = members.length === 1 ? members[0] : undefined
+    violations.push(
+      only
+        ? `K1: ${only.op} #${only.id} asked main ${asked} times for a bound of ${bound}`
+        : `K1: uploads ${members.map(s => `#${s.id}`).join(',')} asked main ${asked} times for a bound of ${bound}`
+    )
+  }
+  return violations
 }
 
 const COPY_LINK_TOASTS = /^Shareable EvenDrive link|^Shareable EvenDrive links are unavailable/
@@ -1432,6 +1515,7 @@ function judgeToast(w: World, toast: Toast) {
     )
   if (source) {
     source.toasted = true
+    source.toastedAt = toast.at
     toast.legal =
       current(source.origin) &&
       mainAdmits(w, source.origin.gen, source.calls.at(-1)?.at ?? source.at)
@@ -1664,6 +1748,7 @@ function submit(
     name: action.targetName,
     outcomes: new Set(outcome ? [outcome] : []),
     toasted: false,
+    toastedAt: null,
     shownInline: false,
     refusedAsChanged: false,
     id: w.submissions.length + 1,
@@ -2657,6 +2742,132 @@ const MOVE_REFUSED_CHECKS = 5
  */
 const MOVE_UNSENT_CHECKS = 6
 
+/** Lets answers land one by one until the host asked main `count` times for `family`. */
+class StepUntilChecks extends OracleEvent {
+  constructor(
+    readonly family: ActionFamily,
+    readonly count: number
+  ) {
+    super()
+  }
+  async perform(m: Model, w: World) {
+    const asked = () => w.genCalls.filter(call => call.host && call.family === this.family).length
+    for (let step = 0; step < 50 && asked() < this.count; step += 1) {
+      if (w.s.count() === 0) {
+        await act(async () => {
+          await sleep(10)
+        })
+        continue
+      }
+      await new Step().perform(m, w)
+    }
+  }
+  toString() {
+    return `StepUntilChecks(${this.family},${this.count})`
+  }
+}
+
+/** The next upload generation check is recorded twice, as an upload asking once too often would. */
+class DuplicateNextUploadCheck extends OracleEvent {
+  async perform(_m: Model, w: World) {
+    w.extraGenCheck = stack => {
+      if (askingFamily(stack) !== 'upload') return null
+      w.extraGenCheck = null
+      return stack ?? ''
+    }
+  }
+  toString() {
+    return 'DuplicateNextUploadCheck'
+  }
+}
+
+/**
+ * Keeps the stack of the next upload generation check and records one more
+ * check under it during the next copy or download, when that upload is over.
+ */
+class UploadCheckOnNextGesture extends OracleEvent {
+  async perform(_m: Model, w: World) {
+    let upload: string | null = null
+    w.extraGenCheck = stack => {
+      const family = askingFamily(stack)
+      if (family === 'upload') upload ??= stack ?? ''
+      if (family !== 'gesture' || upload === null) return null
+      w.extraGenCheck = null
+      return upload
+    }
+  }
+  toString() {
+    return 'UploadCheckOnNextGesture'
+  }
+}
+
+/** One upload of `file` into `folder`, carried to its outcome. */
+const uploadTo = (folder: string, file: string): Cmd[] => [
+  new OpenMenuOn(folder),
+  new Settle(),
+  new Choose('upload-file'),
+  new Settle(),
+  new Pick(file),
+  new Settle(),
+]
+
+/**
+ * An upload that ends with no toast and no generation check: access is
+ * revoked while the picker is open, so the host drops the chosen file unread.
+ * Access then comes back for what follows.
+ */
+const droppedUpload = (folder: string): Cmd[] => [
+  new OpenMenuOn(folder),
+  new Settle(),
+  new Choose('upload-file'),
+  new Settle(),
+  new Revoke(),
+  new Pick('report.txt'),
+  new Settle(),
+  new RetryAccess(),
+  new Settle(),
+]
+
+/**
+ * Two uploads in flight at once: the first one's write check waits on a bit
+ * read while the second runs to its outcome, so the first asks main for the
+ * generation after the second's request already landed. Each upload asks
+ * main exactly twice (before its request, before its outcome).
+ */
+const crossedUploads = (): Cmd[] => [
+  new OpenMenuOn('Quarterly'),
+  new Settle(),
+  new Choose('upload-file'),
+  new Settle(),
+  new BitsAge(),
+  new HoldBits(QUARTER),
+  new Pick('notes.txt'),
+  new Settle(),
+  new OpenMenuOn('Docs'),
+  new Settle(),
+  new Choose('upload-file'),
+  new Settle(),
+  new Pick('report.txt'),
+  new Settle(),
+  new ReleaseBits(QUARTER),
+  new Settle(),
+]
+
+/** Runs a fixed example to rest under the example scheduler, then judges it. */
+async function atRestAfter(commands: Cmd[], judge: (w: World) => void) {
+  const w = await mountWorld(exampleScheduler())
+  try {
+    await fc.asyncModelRun(() => ({ model: w.model, real: w }), commands)
+    await rest(w)
+    judge(w)
+  } finally {
+    await unmountWorld(w)
+  }
+}
+
+const uploadChecks = (w: World) => w.genCalls.filter(call => call.host && call.family === 'upload')
+const uploadsOf = (w: World) => w.submissions.filter(s => s.op === 'createFileFromPath')
+
 const exampleScheduler = () => fc.sample(fc.scheduler(), { seed: 2611, numRuns: 1 })[0]!
 
 const pick = fc.nat({ max: 11 })
@@ -2788,6 +2999,7 @@ async function mountWorld(s: Scheduler): Promise<World> {
       [ARCHIVE, '43434343-4343-4343-4343-434343434343'],
     ]),
     heldGen: null,
+    extraGenCheck: null,
     changeBeforeNextMove: null,
     revokeAtMoveCheck: null,
     moveChecksSeen: 0,
@@ -3091,4 +3303,190 @@ describe('GfsActionHost — model-based oracle', () => {
       await unmountWorld(lost)
     }
   }, 60_000)
+})
+
+describe('GfsActionHost — model-based oracle: upload generation checks (K1)', () => {
+  it('charges two crossed uploads only their own generation checks', async () => {
+    await atRestAfter(crossedUploads(), w => {
+      expect(w.calls.filter(call => call.op === 'createFileFromPath')).toHaveLength(2)
+      expect(uploadChecks(w)).toHaveLength(4)
+      expect(atRestViolations(w)).toEqual([])
+    })
+  })
+
+  it('holds an upload that never shares a check to its own bound', async () => {
+    // The dropped upload afterwards leaves a bound of one unused: pooled with
+    // it, the extra check would fit.
+    await atRestAfter(
+      [
+        new DuplicateNextUploadCheck(),
+        ...uploadTo('Docs', 'report.txt'),
+        ...droppedUpload('Quarterly'),
+      ],
+      w => {
+        const [first, dropped] = uploadsOf(w)
+        expect(first?.toastedAt).not.toBeNull()
+        expect(dropped?.calls).toEqual([])
+        expect(dropped?.toastedAt).toBeNull()
+        expect(uploadChecks(w)).toHaveLength(3)
+        expect(atRestViolations(w)).toEqual([
+          'K1: createFileFromPath #1 asked main 3 times for a bound of 2',
+        ])
+      }
+    )
+  })
+
+  it('holds two crossed uploads to the sum of their bounds', async () => {
+    await atRestAfter([new DuplicateNextUploadCheck(), ...crossedUploads()], w => {
+      expect(w.calls.filter(call => call.op === 'createFileFromPath')).toHaveLength(2)
+      expect(atRestViolations(w)).toEqual(['K1: uploads #1,#2 asked main 5 times for a bound of 4'])
+    })
+  })
+
+  it('ends an upload at its toast, so later uploads cannot cover its extra check', async () => {
+    // Were the first upload live past its toast, the third one's checks would
+    // join it with the dropped one, and 5 checks would fit their bound of 5.
+    await atRestAfter(
+      [
+        new DuplicateNextUploadCheck(),
+        ...uploadTo('Docs', 'report.txt'),
+        ...droppedUpload('Quarterly'),
+        ...uploadTo('Archive', 'notes.txt'),
+      ],
+      w => {
+        expect(uploadsOf(w).map(s => s.calls.length)).toEqual([1, 0, 1])
+        expect(uploadChecks(w)).toHaveLength(5)
+        expect(atRestViolations(w)).toEqual([
+          'K1: createFileFromPath #1 asked main 3 times for a bound of 2',
+        ])
+      }
+    )
+  })
+
+  it('accepts two uploads aborted together after their write checks', async () => {
+    await atRestAfter(
+      [
+        new OpenMenuOn('Quarterly'),
+        new Settle(),
+        new Choose('upload-file'),
+        new Settle(),
+        new BitsAge(),
+        new HoldBits(QUARTER),
+        new Pick('notes.txt'),
+        new Settle(),
+        new OpenMenuOn('Docs'),
+        new Settle(),
+        new Choose('upload-file'),
+        new Settle(),
+        new Pick('report.txt'),
+        new StepUntilChecks('upload', 1),
+        new ReleaseBits(QUARTER),
+        new StepUntilChecks('upload', 2),
+        new Revoke(),
+        new Settle(),
+      ],
+      w => {
+        expect(uploadsOf(w).map(s => [s.calls.length, s.toastedAt])).toEqual([
+          [0, null],
+          [0, null],
+        ])
+        expect(uploadChecks(w)).toHaveLength(2)
+        expect(atRestViolations(w)).toEqual([])
+      }
+    )
+  })
+
+  it('accepts an upload opened after another one aborted', async () => {
+    await atRestAfter(
+      [
+        new OpenMenuOn('Docs'),
+        new Settle(),
+        new Choose('upload-file'),
+        new Settle(),
+        new Pick('report.txt'),
+        new StepUntilChecks('upload', 1),
+        new Revoke(),
+        new Settle(),
+        new RetryAccess(),
+        new Settle(),
+        ...uploadTo('Archive', 'notes.txt'),
+      ],
+      w => {
+        expect(uploadsOf(w).map(s => [s.calls.length, s.toastedAt === null])).toEqual([
+          [0, true],
+          [1, false],
+        ])
+        expect(uploadChecks(w)).toHaveLength(3)
+        expect(atRestViolations(w)).toEqual([])
+      }
+    )
+  })
+
+  it('misses an extra check that an earlier upload without a toast leaves room for', async () => {
+    // A known limit, pinned so it stays deliberate: an upload with no toast
+    // stays live until rest, so every later upload is grouped with it, and
+    // the bound it left unused absorbs one extra check of theirs. The same
+    // happens inside a real crossing when a member aborted or asked for no
+    // outcome. Telling the asker apart needs the check's identity, which the
+    // host does not expose.
+    await atRestAfter(
+      [
+        ...droppedUpload('Quarterly'),
+        new DuplicateNextUploadCheck(),
+        ...uploadTo('Docs', 'report.txt'),
+      ],
+      w => {
+        expect(uploadsOf(w).map(s => s.calls.length)).toEqual([0, 1])
+        expect(uploadChecks(w)).toHaveLength(3)
+        expect(atRestViolations(w)).toEqual([])
+      }
+    )
+  })
+
+  it('flags an upload generation check asked when no upload is live', async () => {
+    await atRestAfter(
+      [
+        new UploadCheckOnNextGesture(),
+        ...uploadTo('Docs', 'report.txt'),
+        new OpenMenuOn('notes.txt'),
+        new Settle(),
+        new Choose('download'),
+        new Settle(),
+      ],
+      w => {
+        const [upload] = uploadsOf(w)
+        const late = uploadChecks(w).at(-1)!
+        expect(uploadChecks(w)).toHaveLength(3)
+        expect(late.at).toBeGreaterThan(upload!.toastedAt!)
+        expect(atRestViolations(w)).toEqual([
+          `K1: an upload generation check at ${late.at} has no live upload`,
+        ])
+      }
+    )
+  })
+
+  it('accepts an upload aborted on its name retry, after its first request', async () => {
+    // Archive's children are never listed, so the second upload of the same
+    // name only learns of the first from the server's conflict, and retries.
+    await atRestAfter(
+      [
+        ...uploadTo('Archive', 'notes.txt'),
+        new OpenMenuOn('Archive'),
+        new Settle(),
+        new Choose('upload-file'),
+        new Settle(),
+        new Pick('notes.txt'),
+        new StepUntilChecks('upload', 4),
+        new Revoke(),
+        new Settle(),
+      ],
+      w => {
+        const retried = uploadsOf(w)[1]!
+        expect(retried.calls.map(call => call.rejected ?? false)).toEqual([true])
+        expect(retried.toastedAt).toBeNull()
+        expect(uploadChecks(w)).toHaveLength(4)
+        expect(atRestViolations(w)).toEqual([])
+      }
+    )
+  })
 })
