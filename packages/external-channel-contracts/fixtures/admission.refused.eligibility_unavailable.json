@@ -1,0 +1,15 @@
+{
+  "outcome": "refused",
+  "reason": "eligibility_unavailable",
+  "notice": "origin_generic",
+  "event": {
+    "providerAccountId": "U0FIXTURE01",
+    "deliveryAlias": null,
+    "conversationId": "C0FIXTURE01",
+    "conversationKind": "channel",
+    "threadRootId": null,
+    "messageId": "1763460000.000100",
+    "eventKind": "message",
+    "action": null
+  }
+}

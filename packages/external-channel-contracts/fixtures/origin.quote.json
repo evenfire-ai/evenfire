@@ -1,0 +1,9 @@
+{
+  "medium": "teams",
+  "channelRef": "agents/fixture-teams-channel",
+  "conversationId": "19:fixture-teams-conversation@thread.v2",
+  "conversationKind": "group",
+  "threadRootId": "1763460000000",
+  "replyStyle": "quote",
+  "quotedMessageId": "1763460300000"
+}

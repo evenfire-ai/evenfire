@@ -1,0 +1,8 @@
+{
+  "medium": "slack",
+  "channelRef": "agents/fixture-slack-channel",
+  "conversationId": "C0FIXTURE01",
+  "conversationKind": "channel",
+  "threadRootId": "1763460000.000100",
+  "replyStyle": "thread"
+}

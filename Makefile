@@ -87,7 +87,8 @@ TEST_SERVICES := \
 	packages/llm-provider-attempt-contract \
 	packages/action-context-contracts \
 	packages/llm-providers \
-	packages/grok-provider-attempt-contract
+	packages/grok-provider-attempt-contract \
+	packages/external-channel-contracts
 
 # ── Optional private infra (gcp-*, promotion) ──────────────────────────────
 -include Makefile.infra
