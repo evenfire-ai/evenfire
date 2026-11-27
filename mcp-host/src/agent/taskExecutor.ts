@@ -2094,14 +2094,18 @@ export class TaskExecutor {
       })
     }
     // D3 — same barrier-before-ACK contract as handleLoopResult 'response'.
+    if (this.identityAbortReason !== null) return
     this.executionBudget.assertTime()
     this.executionBudget.pause()
     try {
       await this.deps.conversationManager.completeTurn(this.conversation!, content)
     } catch (err) {
-      await this.deps.conversationManager.failTurn(this.conversation!)
+      if (this.identityAbortReason === null) {
+        await this.deps.conversationManager.failTurn(this.conversation!)
+      }
       throw err
     }
+    if (this.identityAbortReason !== null) return
     this.task.result = {
       response: content,
       model: this.deps.modelName,

@@ -1560,6 +1560,29 @@ export class AgentStateMachine extends EventEmitter {
       }
     }
 
+    // Step 2b (R2A-01): synchronously mark every matching processing executor
+    // aborted BEFORE Step 3 suspends on async DB I/O so no concurrent task
+    // across another chat can finish `suspendForApproval` and enter
+    // `approvalMap` during the Step 3 -> Step 4 TOCTOU window. Retain their
+    // references so Step 4 still tears down their SQLite sessions and caches
+    // even if `run()`'s `finally` removes them from `activeExecutors` while
+    // Step 3 awaits.
+    const preAbortedExecutors = new Map<
+      string,
+      { executor: TaskExecutor; sessionKey: string; obsoleteSessionId: string | undefined }
+    >()
+    for (const [taskId, executor] of this.activeExecutors.entries()) {
+      if (executor.executorState !== 'processing') continue
+      if (!matchesChannelReconcileTarget(executor.identityScope, filter)) continue
+      const sessionKey =
+        executor.sessionKey ?? resolveCanonicalSessionKey(executor.sourceTask.sourceMessage)
+      const obsoleteSessionId =
+        executor.conversationId ?? this.conversationManager.getSessionByKey(sessionKey)?.id
+      preAbortedExecutors.set(taskId, { executor, sessionKey, obsoleteSessionId })
+      executor.abortForIdentity(endReason)
+      this.lifecycle.transition(taskId, 'cancelled', endReason)
+    }
+
     // Step 3: Cancel matching waiting approvals via CAS.
     for (const [requestId, entry] of Array.from(this.approvalMap.entries())) {
       if (
@@ -1584,16 +1607,28 @@ export class AgentStateMachine extends EventEmitter {
       await this.cancelObsoleteApproval(requestId, entry, executor, endReason)
     }
 
-    // Step 4: Abort matching in-flight processing executors, await unwind,
-    // commit `endObsoleteApprovalSession` for the aborted session BEFORE
-    // releasing `suspendedSessions`, and guard against ending a newer session.
+    // Step 4: Abort matching in-flight processing executors (including any
+    // pre-aborted in Step 2b whose `run()` unwound during Step 3), await
+    // unwind, commit `endObsoleteApprovalSession` for the aborted session
+    // BEFORE releasing `suspendedSessions`, and guard against ending a newer
+    // session.
+    const step4Targets = new Map(preAbortedExecutors)
     for (const [taskId, executor] of Array.from(this.activeExecutors.entries())) {
+      if (step4Targets.has(taskId)) continue
       if (executor.executorState !== 'processing') continue
       if (!matchesChannelReconcileTarget(executor.identityScope, filter)) continue
       const sessionKey =
         executor.sessionKey ?? resolveCanonicalSessionKey(executor.sourceTask.sourceMessage)
       const obsoleteSessionId =
         executor.conversationId ?? this.conversationManager.getSessionByKey(sessionKey)?.id
+      step4Targets.set(taskId, { executor, sessionKey, obsoleteSessionId })
+    }
+    for (const [taskId, target] of step4Targets.entries()) {
+      const { executor, sessionKey } = target
+      const obsoleteSessionId =
+        target.obsoleteSessionId ??
+        executor.conversationId ??
+        this.conversationManager.getSessionByKey(sessionKey)?.id
       executor.abortForIdentity(endReason)
       this.lifecycle.transition(taskId, 'cancelled', endReason)
       await Promise.race([

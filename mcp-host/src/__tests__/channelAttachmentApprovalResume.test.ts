@@ -15,6 +15,7 @@ import {
 import { SqliteColdStartLoader } from '../core/conversation/persistence/sqliteColdStartLoader'
 import { WorkflowBrokerRequestError } from '../core/tools/workflowBrokerClient'
 import { type ChatMessage, ConversationState, FinishReason } from '../core/types'
+import { createDispatcher, dispatch } from '../db/worker/dispatcher'
 import type { RetainedChannelAttachmentRow } from '../db/worker/protocol'
 import {
   ChannelAttachmentStore,
@@ -2470,6 +2471,399 @@ describe('Channel attachment approval resume, revocation, CAS races, scoping & l
         .prepare('SELECT state, end_reason FROM sessions WHERE id = ?')
         .get('sess-teams-br08') as { state: string; end_reason: string }
       expect(teamsRow).toEqual({ state: 'ended', end_reason: 'legacy_approval_reaped' })
+    } finally {
+      await pod.coldCrash()
+    }
+  })
+
+  it('T-R2A-01, T-R2A-02 & T-R2A-03: reconcile pre-aborts processing tasks before Step 3 await, completeWithStaticResponse guards identity abort, and SQLite refuses ended-session resurrection', async () => {
+    const pod = buildPod({
+      dbPath,
+      tmpDir,
+      resolveCaller: async msg => ({
+        targetUserId: 'linked-user-a',
+        conversationId: msg.channelId,
+      }),
+      llmResponder: async (_messages, callIndex) => ({
+        content: null,
+        tool_calls: [
+          {
+            id: `tc-r2a-${callIndex}`,
+            name: 'srv__gated_action',
+            arguments: { step: callIndex },
+          },
+        ],
+        finish_reason: FinishReason.ToolUse,
+      }),
+    })
+
+    try {
+      const db = pod.storeHandle.worker.db
+      const cm = (
+        pod.agent as unknown as {
+          conversationManager: {
+            suspendForApproval: (...args: unknown[]) => Promise<void>
+            completeTurn: (...args: unknown[]) => Promise<void>
+            failTurn: (...args: unknown[]) => Promise<void>
+            getStore: () => {
+              endObsoleteApprovalSession?: (...args: unknown[]) => Promise<unknown>
+            }
+          }
+        }
+      ).conversationManager
+
+      // --- T-R2A-01: Step 3 -> Step 4 TOCTOU race across two chats of the same user ---
+      // Chat 1 enters waiting_approval (liveness witness: approval registered).
+      const chat1Res = await pod.send({
+        content: 'Run approval tool on chat 1',
+        channelType: 'slack',
+        channelId: 'C_R2A_1',
+        sender: 'u-r2a-1',
+        timestamp: new Date().toISOString(),
+        messageId: 'm-r2a-1',
+        hostRef: 'ns/host-appr',
+        admittedLinkedUserId: 'linked-user-a',
+        providerIdentity: makeIdentity('slack', 'u-r2a-1', 'C_R2A_1', 'W_R2A'),
+      })
+      expect(chat1Res.status).toBe('waiting_approval')
+      expect(pod.agent.getPendingApprovals()).toHaveLength(1)
+
+      // Chat 2 enters suspendForApproval and pauses on suspendGate.
+      const origSuspend = cm.suspendForApproval.bind(cm)
+      let chat2InSuspend!: () => void
+      const chat2InSuspendPromise = new Promise<void>(r => {
+        chat2InSuspend = r
+      })
+      let releaseChat2Suspend!: () => void
+      const chat2SuspendGate = new Promise<void>(r => {
+        releaseChat2Suspend = r
+      })
+      const suspendSpy = vi.spyOn(cm, 'suspendForApproval').mockImplementationOnce(async (...a) => {
+        chat2InSuspend()
+        await chat2SuspendGate
+        return origSuspend(...a)
+      })
+
+      const chat2Promise = pod.send({
+        content: 'Run approval tool on chat 2',
+        channelType: 'slack',
+        channelId: 'C_R2A_2',
+        sender: 'u-r2a-1',
+        timestamp: new Date().toISOString(),
+        messageId: 'm-r2a-2',
+        hostRef: 'ns/host-appr',
+        admittedLinkedUserId: 'linked-user-a',
+        providerIdentity: makeIdentity('slack', 'u-r2a-1', 'C_R2A_2', 'W_R2A'),
+      })
+      await chat2InSuspendPromise
+
+      // Gate Step 3's endObsoleteApprovalSession on Chat 1 so Chat 2 finishes suspendForApproval
+      // WHILE Step 3 is mid-await.
+      const store = cm.getStore()
+      const origEndObsolete = store.endObsoleteApprovalSession!.bind(store)
+      let step3Entered!: () => void
+      const step3EnteredPromise = new Promise<void>(r => {
+        step3Entered = r
+      })
+      let releaseStep3!: () => void
+      const step3Gate = new Promise<void>(r => {
+        releaseStep3 = r
+      })
+      vi.spyOn(store, 'endObsoleteApprovalSession').mockImplementationOnce(async (...a) => {
+        step3Entered()
+        await step3Gate
+        return origEndObsolete(...a)
+      })
+
+      const chat2ApprovalEvents: unknown[] = []
+      pod.agent.on('tool:approval_needed', e => chat2ApprovalEvents.push(e))
+
+      const reconcilePromise = pod.agent.reconcileChannelIdentity({
+        medium: 'slack',
+        workspaceOrTargetKey: 'W_R2A',
+        providerUserId: 'u-r2a-1',
+        channelScope: null,
+        liveLinkedUserId: 'linked-user-b',
+      })
+      await step3EnteredPromise
+
+      // Release Chat 2's suspendForApproval BEFORE Step 3 finishes!
+      // Step 2b already marked Chat 2 aborted synchronously, so Chat 2 MUST NOT register an approval.
+      releaseChat2Suspend()
+      await new Promise(r => setTimeout(r, 25))
+      releaseStep3()
+
+      await reconcilePromise
+      await chat2Promise.catch(() => undefined)
+      suspendSpy.mockRestore()
+
+      expect(chat2ApprovalEvents).toHaveLength(0)
+      expect(pod.agent.getPendingApprovals()).toHaveLength(0)
+      const chat1Key = resolveCanonicalSessionKey({
+        sender: 'u-r2a-1',
+        channelType: 'slack',
+        channelId: 'C_R2A_1',
+      })
+      const chat2Key = resolveCanonicalSessionKey({
+        sender: 'u-r2a-1',
+        channelType: 'slack',
+        channelId: 'C_R2A_2',
+      })
+      expect(
+        (
+          db.prepare('SELECT state FROM sessions WHERE session_key = ?').get(chat1Key) as {
+            state: string
+          }
+        ).state
+      ).toBe('ended')
+      expect(
+        (
+          db.prepare('SELECT state FROM sessions WHERE session_key = ?').get(chat2Key) as {
+            state: string
+          }
+        ).state
+      ).toBe('ended')
+
+      // --- T-R2A-02: completeWithStaticResponse guards identity abort before/after completeTurn & on failTurn ---
+      // Liveness witness: attachment-only turn WITHOUT abort completes, emits task:completed, and delivers static reply.
+      const completedStaticEvents: unknown[] = []
+      pod.agent.on('task:completed', e => completedStaticEvents.push(e))
+      const witnessStatic = await pod.send({
+        content: '',
+        channelType: 'slack',
+        channelId: 'C_R2A_STATIC_OK',
+        sender: 'u-r2a-2',
+        timestamp: new Date().toISOString(),
+        messageId: 'm-r2a-static-ok',
+        hostRef: 'ns/host-appr',
+        admittedLinkedUserId: 'linked-user-a',
+        providerIdentity: makeIdentity('slack', 'u-r2a-2', 'C_R2A_STATIC_OK', 'W_R2A'),
+        attachmentIngestErrors: [
+          { filename: 'big.pdf', code: 'file_too_large', message: 'Too large' },
+        ],
+      })
+      expect(witnessStatic.success).toBe(true)
+      expect(witnessStatic.response).toContain('big.pdf')
+      // `responseCallback` resolves `pod.send()` one microtask before `onComplete` emits `task:completed`.
+      await new Promise(r => setImmediate(r))
+      expect(completedStaticEvents).toHaveLength(1)
+      completedStaticEvents.length = 0
+
+      // Abort during completeTurn in completeWithStaticResponse -> responseCallback NOT called, onComplete NOT called.
+      const origCompleteTurn = cm.completeTurn.bind(cm)
+      const failTurnSpy = vi.spyOn(cm, 'failTurn')
+      let enteredComplete!: () => void
+      const enteredCompletePromise = new Promise<void>(r => {
+        enteredComplete = r
+      })
+      let releaseComplete!: () => void
+      const completeGate = new Promise<void>(r => {
+        releaseComplete = r
+      })
+      vi.spyOn(cm, 'completeTurn').mockImplementationOnce(async (...a) => {
+        enteredComplete()
+        await completeGate
+        return origCompleteTurn(...a)
+      })
+
+      const staticRacePromise = pod.send({
+        content: '',
+        channelType: 'slack',
+        channelId: 'C_R2A_STATIC_RACE',
+        sender: 'u-r2a-3',
+        timestamp: new Date().toISOString(),
+        messageId: 'm-r2a-static-race',
+        hostRef: 'ns/host-appr',
+        admittedLinkedUserId: 'linked-user-a',
+        providerIdentity: makeIdentity('slack', 'u-r2a-3', 'C_R2A_STATIC_RACE', 'W_R2A'),
+        attachmentIngestErrors: [
+          { filename: 'secret-name.pdf', code: 'file_too_large', message: 'Too large' },
+        ],
+      })
+      await enteredCompletePromise
+      const reconcileStatic = pod.agent.reconcileChannelIdentity({
+        medium: 'slack',
+        workspaceOrTargetKey: 'W_R2A',
+        providerUserId: 'u-r2a-3',
+        channelScope: null,
+        liveLinkedUserId: null,
+      })
+      releaseComplete()
+      await reconcileStatic
+      await staticRacePromise.catch(() => undefined)
+      await new Promise(r => setImmediate(r))
+      expect(completedStaticEvents).toHaveLength(0)
+
+      // Also verify failTurn skipped when completeTurn throws after identity abort.
+      failTurnSpy.mockClear()
+      let enteredThrowComplete!: () => void
+      const enteredThrowCompletePromise = new Promise<void>(r => {
+        enteredThrowComplete = r
+      })
+      let releaseThrowComplete!: () => void
+      const throwCompleteGate = new Promise<void>(r => {
+        releaseThrowComplete = r
+      })
+      vi.spyOn(cm, 'completeTurn').mockImplementationOnce(async () => {
+        enteredThrowComplete()
+        await throwCompleteGate
+        throw new Error('simulated sqlite write failure')
+      })
+      const staticThrowPromise = pod.send({
+        content: '',
+        channelType: 'slack',
+        channelId: 'C_R2A_STATIC_THROW',
+        sender: 'u-r2a-4',
+        timestamp: new Date().toISOString(),
+        messageId: 'm-r2a-static-throw',
+        hostRef: 'ns/host-appr',
+        admittedLinkedUserId: 'linked-user-a',
+        providerIdentity: makeIdentity('slack', 'u-r2a-4', 'C_R2A_STATIC_THROW', 'W_R2A'),
+        attachmentIngestErrors: [
+          { filename: 'fail.pdf', code: 'file_too_large', message: 'Too large' },
+        ],
+      })
+      await enteredThrowCompletePromise
+      const reconcileThrow = pod.agent.reconcileChannelIdentity({
+        medium: 'slack',
+        workspaceOrTargetKey: 'W_R2A',
+        providerUserId: 'u-r2a-4',
+        channelScope: null,
+        liveLinkedUserId: null,
+      })
+      releaseThrowComplete()
+      await reconcileThrow
+      await staticThrowPromise.catch(() => undefined)
+      expect(failTurnSpy).not.toHaveBeenCalled()
+      failTurnSpy.mockRestore()
+
+      // --- T-R2A-03: SQLite updateSessionState & insert_pending_approval never resurrect ended sessions ---
+      const nowSec = Math.floor(Date.now() / 1000)
+      db.prepare(
+        `INSERT INTO sessions (
+          id, session_key, source, user_id, channel_type, channel_id, started_at, last_activity_at,
+          turn_count, message_count, tool_call_count, input_tokens, output_tokens,
+          cache_read_tokens, cache_write_tokens, cache_tokens_reported, state, end_reason, approval_mode, linked_user_id
+        ) VALUES ('sess-ended-r2a03', 'u-r2a03:slack:C_R2A03:default', 'slack', 'u-r2a03', 'slack', 'C_R2A03', ?, ?, 1, 1, 0, 0, 0, 0, 0, 0, 'ended', 'identity_changed', 'manual', 'linked-user-a')`
+      ).run(nowSec - 10, nowSec - 10)
+      db.prepare(
+        `INSERT INTO sessions (
+          id, session_key, source, user_id, channel_type, channel_id, started_at, last_activity_at,
+          turn_count, message_count, tool_call_count, input_tokens, output_tokens,
+          cache_read_tokens, cache_write_tokens, cache_tokens_reported, state, approval_mode, linked_user_id
+        ) VALUES ('sess-live-r2a03', 'u-r2a03:slack:C_R2A03:default', 'slack', 'u-r2a03', 'slack', 'C_R2A03', ?, ?, 1, 1, 0, 0, 0, 0, 0, 0, 'processing', 'manual', 'linked-user-b')`
+      ).run(nowSec, nowSec)
+
+      const dispatcher = createDispatcher(db)
+      dispatch(
+        {
+          kind: 'update_session_state',
+          sessionId: 'sess-ended-r2a03',
+          state: 'idle',
+        },
+        dispatcher
+      )
+      dispatch(
+        {
+          kind: 'update_session_state',
+          sessionId: 'sess-live-r2a03',
+          state: 'idle',
+        },
+        dispatcher
+      )
+      expect(
+        (
+          db.prepare('SELECT state FROM sessions WHERE id = ?').get('sess-ended-r2a03') as {
+            state: string
+          }
+        ).state
+      ).toBe('ended')
+      // Liveness witness: live session transitioned to idle
+      expect(
+        (
+          db.prepare('SELECT state FROM sessions WHERE id = ?').get('sess-live-r2a03') as {
+            state: string
+          }
+        ).state
+      ).toBe('idle')
+
+      dispatch(
+        {
+          kind: 'insert_pending_approval',
+          markAwaitingApproval: true,
+          payload: {
+            request_id: 'req-ended-r2a03',
+            session_id: 'sess-ended-r2a03',
+            task_id: 'task-ended-r2a03',
+            tool_name: 'shell_exec',
+            tool_call_id: 'tc-ended',
+            parameters: '{}',
+            description: 'should be ignored',
+            context_snapshot: '[]',
+            completed_results: null,
+            intent_summary: null,
+            source_message: null,
+            task_budget: null,
+            registered_at: nowSec,
+            expires_at: nowSec + 3600,
+            trace_context: null,
+            reason: null,
+            mcp_server_name: null,
+          },
+        },
+        dispatcher
+      )
+      dispatch(
+        {
+          kind: 'insert_pending_approval',
+          markAwaitingApproval: true,
+          payload: {
+            request_id: 'req-live-r2a03',
+            session_id: 'sess-live-r2a03',
+            task_id: 'task-live-r2a03',
+            tool_name: 'shell_exec',
+            tool_call_id: 'tc-live',
+            parameters: '{}',
+            description: 'live witness',
+            context_snapshot: '[]',
+            completed_results: null,
+            intent_summary: null,
+            source_message: null,
+            task_budget: null,
+            registered_at: nowSec,
+            expires_at: nowSec + 3600,
+            trace_context: null,
+            reason: null,
+            mcp_server_name: null,
+          },
+        },
+        dispatcher
+      )
+      expect(
+        db
+          .prepare('SELECT request_id FROM pending_approvals WHERE session_id = ?')
+          .all('sess-ended-r2a03')
+      ).toHaveLength(0)
+      expect(
+        (
+          db.prepare('SELECT state FROM sessions WHERE id = ?').get('sess-ended-r2a03') as {
+            state: string
+          }
+        ).state
+      ).toBe('ended')
+      // Liveness witness: live session inserted approval and moved to awaiting_approval
+      expect(
+        db
+          .prepare('SELECT request_id FROM pending_approvals WHERE session_id = ?')
+          .all('sess-live-r2a03')
+      ).toHaveLength(1)
+      expect(
+        (
+          db.prepare('SELECT state FROM sessions WHERE id = ?').get('sess-live-r2a03') as {
+            state: string
+          }
+        ).state
+      ).toBe('awaiting_approval')
     } finally {
       await pod.coldCrash()
     }

@@ -114,6 +114,7 @@ export function prepareStatements(db: Database): PreparedStatements {
                ELSE COALESCE(@active_trace_context, active_trace_context)
              END
        WHERE id = @id
+         AND state != 'ended'
     `),
     updateSessionDeniedTools: db.prepare(`
       UPDATE sessions

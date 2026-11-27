@@ -684,6 +684,12 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
               op.replaceRequestId
             )
           }
+          const targetSession = db
+            .prepare('SELECT state FROM sessions WHERE id = ?')
+            .get(row.session_id) as { state: string } | undefined
+          if (targetSession?.state === 'ended') {
+            return
+          }
           s.insertPendingApproval.run({
             ...row,
             source_message: sourceMessage,
@@ -693,7 +699,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
             authorization_scope: row.authorization_scope ?? null,
           })
           if (op.markAwaitingApproval)
-            db.prepare('UPDATE sessions SET state = ? WHERE id = ?').run(
+            db.prepare("UPDATE sessions SET state = ? WHERE id = ? AND state != 'ended'").run(
               'awaiting_approval',
               row.session_id
             )
