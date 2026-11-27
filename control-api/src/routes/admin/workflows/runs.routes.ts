@@ -163,7 +163,7 @@ export function createAdminWorkflowRunsRoutes(
       try {
         await gateway.getResource(WORKFLOW_RECIPE_PLURAL, name, ns)
         const limit = parseLimit(req.query?.limit)
-        const items = await listCanonicalRuns(ns, name, limit)
+        const items = await listCanonicalRuns(ns, name, limit, 'admin')
         res.json({ items, count: items.length })
       } catch (err) {
         if (err instanceof K8sNotFoundError) {
@@ -202,7 +202,7 @@ export function createAdminWorkflowRunsRoutes(
           res.status(404).json({ error: `Workflow run ${runId} not found` })
           return
         }
-        res.json(mapDbRun(row))
+        res.json(mapDbRun(row, 'admin'))
       } catch (err) {
         if (err instanceof K8sNotFoundError) {
           res.status(404).json({ error: `Recipe ${ns}/${name} not found` })
@@ -378,7 +378,7 @@ export function createAdminWorkflowRunsRoutes(
             const row = result.rows[0]
             if (filterNamespace && row.recipe_namespace !== filterNamespace) return
             if (filterName && row.recipe_name !== filterName) return
-            writeEvent('run', mapDbRun(row))
+            writeEvent('run', mapDbRun(row, 'admin'))
           } catch (err) {
             logger.warn(
               { err: err instanceof Error ? err.message : String(err), runId },

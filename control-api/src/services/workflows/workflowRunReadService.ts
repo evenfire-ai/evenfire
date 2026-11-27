@@ -377,6 +377,7 @@ function toIso(value: string | null): string | null {
  * Control UI operator asked to cancel the run (the request stays on the row
  * after it reaches a terminal phase). Archived runs (`source: 'audit'`) do not carry them, which is why
  * they are optional here: run lists and health reads mix the two sources.
+ * What `canceledBy` shows depends on the viewer (see `RunDtoViewer`).
  */
 export type CancelAwareRunDto = CanonicalRunDto & {
   cancelRequestedAt?: string | null
@@ -388,7 +389,32 @@ export type ViewerCanonicalRunDto = CancelAwareRunDto & {
   viewerCanCancel: boolean
 }
 
-export function mapDbRun(row: WorkflowRunRow): CancelAwareRunDto {
+/**
+ * Who reads a run DTO. `admin` readers (the Control UI routes) see the stored
+ * `canceled_by` as is. `tenant` readers (External REST, mcp-host, provider
+ * decisions) see an operator cancel (`operator:<subject>`) as `operator`, so
+ * the operator's subject stays on the admin surface. The stored column is
+ * never rewritten.
+ */
+export type RunDtoViewer = 'admin' | 'tenant'
+
+const OPERATOR_CANCELED_BY_PREFIX = 'operator:'
+
+function assertRunDtoViewer(viewer: unknown): asserts viewer is RunDtoViewer {
+  if (viewer !== 'admin' && viewer !== 'tenant') {
+    throw new TypeError("run DTO viewer must be 'admin' or 'tenant'")
+  }
+}
+
+function canceledByForViewer(canceledBy: string | null, viewer: RunDtoViewer): string | null {
+  if (viewer === 'tenant' && canceledBy?.startsWith(OPERATOR_CANCELED_BY_PREFIX)) {
+    return 'operator'
+  }
+  return canceledBy
+}
+
+export function mapDbRun(row: WorkflowRunRow, viewer: RunDtoViewer): CancelAwareRunDto {
+  assertRunDtoViewer(viewer)
   const executionRef: CanonicalRunExecutionRef | null =
     row.child_recipe_name && row.child_recipe_namespace
       ? { namespace: row.child_recipe_namespace, name: row.child_recipe_name }
@@ -403,7 +429,7 @@ export function mapDbRun(row: WorkflowRunRow): CancelAwareRunDto {
     completedAt: toIso(row.completed_at),
     message: row.failure_reason ?? null,
     cancelRequestedAt: toIso(row.cancel_requested_at),
-    canceledBy: row.canceled_by,
+    canceledBy: canceledByForViewer(row.canceled_by, viewer),
     actor: actorFromDbRow(row),
     executionRef,
   }
@@ -510,15 +536,17 @@ export function sortRunsNewestFirst(a: CanonicalRunDto, b: CanonicalRunDto): num
 export async function getLatestRun(
   recipeNamespace: string,
   recipeName: string,
+  viewer: RunDtoViewer,
   caller?: WorkflowRouteCaller
 ): Promise<CanonicalRunDto | null> {
+  assertRunDtoViewer(viewer)
   const scope = caller ? userRunScope(caller) : null
   const liveRows = scope
     ? await listRunsByRecipeForUserScope(recipeNamespace, recipeName, 1, scope)
     : await listRunsByRecipe(recipeNamespace, recipeName, 1)
   const liveRuns = liveRows
     .filter(row => !scope || runMatchesUserScope(row, scope))
-    .map(mapDbRun)
+    .map(row => mapDbRun(row, viewer))
     .sort(sortRunsNewestFirst)
   const auditRun = (await listAuditRunsByRecipe(recipeNamespace, recipeName, 1, caller))[0] ?? null
   return (
@@ -532,8 +560,10 @@ export async function listCanonicalRuns(
   recipeNamespace: string,
   recipeName: string,
   limit: number,
+  viewer: RunDtoViewer,
   caller?: WorkflowRouteCaller
 ): Promise<CanonicalRunDto[]> {
+  assertRunDtoViewer(viewer)
   const scope = caller ? userRunScope(caller) : null
   const liveRows = scope
     ? await listRunsByRecipeForUserScope(recipeNamespace, recipeName, limit, scope)
@@ -550,7 +580,7 @@ export async function listCanonicalRuns(
       .filter(row => runMatchesUserScope(row, scope))
       .map(
         (row): ViewerCanonicalRunDto => ({
-          ...mapDbRun(row),
+          ...mapDbRun(row, viewer),
           viewerCanCancel:
             canCancel(row, scope, liveAdmin) &&
             isNonTerminalRunPhase(row.phase) &&
@@ -558,7 +588,7 @@ export async function listCanonicalRuns(
         })
       )
   } else {
-    liveRuns = liveRows.map(mapDbRun)
+    liveRuns = liveRows.map(row => mapDbRun(row, viewer))
   }
   const liveRunIds = new Set(liveRuns.map(run => run.id))
   const auditRuns = (
@@ -570,13 +600,15 @@ export async function listCanonicalRuns(
 export async function getWorkflowHealth(
   recipeNamespace: string,
   recipeName: string,
+  viewer: RunDtoViewer,
   caller?: WorkflowRouteCaller
 ) {
+  assertRunDtoViewer(viewer)
   const scope = caller ? userRunScope(caller) : null
   const liveRows = scope
     ? await listRunsByRecipeForUserScope(recipeNamespace, recipeName, 50, scope)
     : await listRunsByRecipe(recipeNamespace, recipeName, 50)
-  const liveRuns = liveRows.map(mapDbRun).sort(sortRunsNewestFirst)
+  const liveRuns = liveRows.map(row => mapDbRun(row, viewer)).sort(sortRunsNewestFirst)
   const liveRunIds = new Set(liveRuns.map(run => run.id))
   const latestAuditRun =
     (await listAuditRunsByRecipe(recipeNamespace, recipeName, 1, caller)).find(

@@ -78,6 +78,7 @@ export function createAdminOutputsRouter(gateway: K8sGateway): Router {
             namespace,
             name,
             OUTPUTS_RUNS_PER_RECIPE_LIMIT,
+            'admin',
             caller
           )
           const remainingRunQueries = OUTPUTS_TOTAL_RUN_ARTIFACT_QUERY_LIMIT - runArtifactQueryCount

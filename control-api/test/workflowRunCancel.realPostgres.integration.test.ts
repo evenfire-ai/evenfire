@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import express, { type NextFunction, type Request, type Response } from 'express'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { Client, Pool, type PoolClient, type QueryResult } from 'pg'
 import request from 'supertest'
 import { createDbRunProcessor } from '../../workflow-recipes/src/reconciler/dbRunProcessor.js'
@@ -11,6 +13,7 @@ import type { ExternalAuthedRequest } from '../src/middleware/externalSessionAut
 import type { TeamRole } from '../src/profileTypes.js'
 import { createWorkflowsAdminRouter } from '../src/routes/admin/workflows/index.js'
 import { createExternalWorkflowsRouter } from '../src/routes/external/workflows/index.js'
+import { createMcpHostWorkflowRoutes } from '../src/routes/mcp-host/workflows/index.js'
 import { authorizeActionV2 } from '../src/services/access/actionAuthorizer.js'
 import { prepareActionOperationTarget } from '../src/services/access/actionMessageId.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
@@ -44,6 +47,7 @@ import { listCanonicalRuns } from '../src/services/workflows/workflowRunReadServ
 import { resumeWorkflowRun } from '../src/services/workflows/workflowRunResumeService.js'
 import { triggerWorkflow } from '../src/services/workflows/workflowTriggerService.js'
 import { signAdminToken } from '../src/utils/auth/adminAuthToken.js'
+import { issueMcpHostControlJwt } from '../src/utils/auth/mcpHostJwtToken.js'
 import {
   issueUserDelegationV2,
   verifyUserDelegationV2,
@@ -356,6 +360,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     app.use(express.json())
     app.use(createExternalWorkflowsRouter(gateway))
     app.use(createWorkflowsAdminRouter(gateway))
+    app.use('/mcp-host', createMcpHostWorkflowRoutes(gateway))
     app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
       capturedErrors.push(error)
       res.status(500).json({ error: 'test_error_handler' })
@@ -1068,6 +1073,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
         ns,
         entry.recipe,
         50,
+        'tenant',
         await callerFor(tokens[entry.caller])
       )
       const listedRun = listed.find(run => run.id === runId) as
@@ -1135,7 +1141,13 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
       ]
       for (const { row, run, recipe } of unreachable) {
         for (const caller of ['A', 'L', 'M', 'P'] as const) {
-          const listed = await listCanonicalRuns(ns, recipe, 50, await callerFor(tokens[caller]))
+          const listed = await listCanonicalRuns(
+            ns,
+            recipe,
+            50,
+            'tenant',
+            await callerFor(tokens[caller])
+          )
           expect({ row, caller, listed: listed.some(entry => entry.id === run) }).toEqual({
             row,
             caller,
@@ -1238,7 +1250,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
       approvalRequestId: approval.id,
     })
     const listedFlags = async () => {
-      const listed = await listCanonicalRuns(ns, recipe, 50, await callerFor(token))
+      const listed = await listCanonicalRuns(ns, recipe, 50, 'tenant', await callerFor(token))
       const flag = (runId: string) => {
         const run = listed.find(entry => entry.id === runId) as
           | { viewerCanCancel?: boolean }
@@ -2188,16 +2200,188 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
       })
     }
 
-    // The launcher of the teammate run reads it: the request is shown and the
-    // cancel is no longer offered.
+    // The launcher of the teammate run reads it: the request is shown, the
+    // cancel is no longer offered, and the operator's subject is not shown.
     const memberList = await externalRuns(memberToken, recipe)
     expect(memberList.status).toBe(200)
     const memberRun = (memberList.body.items as Array<Record<string, unknown>>).find(
       run => run.id === teammate
     )
-    expect(memberRun).toMatchObject({ id: teammate, phase: 'Canceled', viewerCanCancel: false })
+    expect(memberRun).toMatchObject({
+      id: teammate,
+      phase: 'Canceled',
+      canceledBy: 'operator',
+      viewerCanCancel: false,
+    })
     expect(memberRun?.cancelRequestedAt).toEqual(expect.any(String))
   }, 60_000)
+
+  it('non-admin readers see operator, admin readers see the operator id', async () => {
+    const recipe = `op-s23-${suffix}`
+    await databasePool.query(
+      `INSERT INTO user_workflow_triggers(user_id, recipe_namespace, recipe_name)
+       VALUES ($1, $2, $3)`,
+      [L.id, ns, recipe]
+    )
+    kubernetesApi.put('workflowrecipes', ns, {
+      apiVersion: 'clerum.io/v1alpha1',
+      kind: 'WorkflowRecipe',
+      metadata: {
+        name: recipe,
+        namespace: ns,
+        uid: randomUUID(),
+        resourceVersion: '1',
+        generation: 1,
+      },
+      spec: {
+        enabled: true,
+        contextRef: contextName,
+        model: { provider: 'openai', name: 'cancel-test' },
+        triggers: { onDemand: { requiresApproval: false } },
+      },
+    })
+    const token = await v1Token(L, null, 'member')
+
+    // A run the launcher cancelled itself, then a newer run the operator cancelled.
+    const userCanceled = await launcherRun('Pending', recipe)
+    expect((await cancel(token, userCanceled, recipe)).status).toBe(200)
+    expect((await readRun(userCanceled)).canceled_by).toBe(L.id)
+    const operatorCanceled = await launcherRun('Pending', recipe)
+    expect((await operatorCancel(operatorCanceled, recipe)).status).toBe(200)
+    // The stored column keeps the operator's subject.
+    expect((await readRun(operatorCanceled)).canceled_by).toBe(operatorCanceledBy)
+
+    // Liveness witness: the admin list reads the operator's subject for this run.
+    const adminList = await request(app)
+      .get(`/admin/workflows/${ns}/${recipe}/runs`)
+      .set('Cookie', `control_ui_admin_session=${operatorToken}`)
+    expect(adminList.status).toBe(200)
+    const adminItems = adminList.body.items as Array<Record<string, unknown>>
+    expect(adminItems.find(run => run.id === operatorCanceled)).toMatchObject({
+      canceledBy: operatorCanceledBy,
+    })
+    expect(adminItems.find(run => run.id === userCanceled)).toMatchObject({ canceledBy: L.id })
+
+    // External list: operator for the operator cancel, the user id for the user's.
+    const externalList = await externalRuns(token, recipe)
+    expect(externalList.status).toBe(200)
+    const externalItems = externalList.body.items as Array<Record<string, unknown>>
+    expect(externalItems.find(run => run.id === operatorCanceled)).toMatchObject({
+      canceledBy: 'operator',
+    })
+    expect(externalItems.find(run => run.id === userCanceled)).toMatchObject({
+      canceledBy: L.id,
+    })
+
+    // External read (health): the newest run is the operator-cancelled one.
+    const externalHealth = await request(app)
+      .get(`/external/workflows/${ns}/${recipe}/health`)
+      .set('x-user-session-token', token)
+    expect(externalHealth.status).toBe(200)
+    expect(externalHealth.body.lastRun).toMatchObject({
+      id: operatorCanceled,
+      canceledBy: 'operator',
+    })
+
+    // External cancel, repeated by the launcher on the operator-cancelled run.
+    const repeat = await cancel(token, operatorCanceled, recipe)
+    expect(repeat.status).toBe(200)
+    expect(repeat.body.run).toMatchObject({ id: operatorCanceled, canceledBy: 'operator' })
+    expect((await readRun(operatorCanceled)).canceled_by).toBe(operatorCanceledBy)
+
+    // mcp-host read of the recipe it runs as.
+    const hostToken = issueMcpHostControlJwt(ns, recipe, undefined, {
+      scopes: ['workflow:read'],
+    }).token
+    const hostRead = await request(app)
+      .get(`/mcp-host/workflows/${ns}/${recipe}`)
+      .set('Authorization', `Bearer ${hostToken}`)
+    expect(hostRead.status).toBe(200)
+    expect(hostRead.body.latestRun).toMatchObject({
+      id: operatorCanceled,
+      canceledBy: 'operator',
+    })
+
+    // Admin SSE: a run update for the operator-cancelled run carries the subject.
+    const sseEvent = await readAdminRunStreamEvent(recipe, operatorCanceled)
+    expect(sseEvent).toMatchObject({ id: operatorCanceled, canceledBy: operatorCanceledBy })
+  }, 60_000)
+
+  /**
+   * Opens the admin run stream filtered to one recipe, sends a run update for
+   * `runId` once the stream is open, and returns the first `run` event's data.
+   */
+  async function readAdminRunStreamEvent(
+    recipe: string,
+    runId: string
+  ): Promise<Record<string, unknown>> {
+    const streamApp = express()
+    streamApp.use(
+      createWorkflowsAdminRouter(gateway, {
+        runsStreamAutoCloseMs: 30_000,
+        runsStreamKeepAliveMs: 30_000,
+      })
+    )
+    const server = streamApp.listen(0)
+    if (!server.listening) {
+      await new Promise<void>(resolve => server.once('listening', () => resolve()))
+    }
+    const { address, port } = server.address() as AddressInfo
+    let streamRequest: http.ClientRequest | null = null
+    try {
+      return await new Promise<Record<string, unknown>>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error('no run event on the admin stream')),
+          15_000
+        )
+        streamRequest = http.get(
+          {
+            host: address,
+            port,
+            path: `/admin/workflows/runs/stream?namespace=${ns}&name=${recipe}`,
+            headers: { Cookie: `control_ui_admin_session=${operatorToken}` },
+          },
+          response => {
+            if (response.statusCode !== 200) {
+              clearTimeout(timer)
+              reject(new Error(`admin stream answered ${response.statusCode}`))
+              return
+            }
+            response.setEncoding('utf8')
+            let buffer = ''
+            let notified = false
+            response.on('data', (chunk: string) => {
+              buffer += chunk
+              if (!notified && buffer.includes('event: open')) {
+                notified = true
+                databasePool
+                  .query(`SELECT pg_notify('workflow_run_update', $1)`, [runId])
+                  .catch(error => {
+                    clearTimeout(timer)
+                    reject(error)
+                  })
+              }
+              const match = /event: run\ndata: (.*)\n\n/.exec(buffer)
+              if (match) {
+                clearTimeout(timer)
+                resolve(JSON.parse(match[1]!) as Record<string, unknown>)
+              }
+            })
+          }
+        )
+        streamRequest.on('error', error => {
+          clearTimeout(timer)
+          reject(error)
+        })
+      })
+    } finally {
+      ;(streamRequest as http.ClientRequest | null)?.destroy()
+      await new Promise<void>(resolve => {
+        server.closeAllConnections()
+        server.close(() => resolve())
+      })
+    }
+  }
 
   it('a failed approval update rolls the operator cancel back', async () => {
     const recipe = `op-s10-${suffix}`

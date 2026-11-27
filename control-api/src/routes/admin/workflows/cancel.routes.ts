@@ -70,7 +70,7 @@ export function createAdminWorkflowCancelRoutes(): Router {
           },
           'WorkflowRun cancel requested (operator)'
         )
-        res.status(200).json(mapDbRun(row))
+        res.status(200).json(mapDbRun(row, 'admin'))
       } catch (err) {
         if (err instanceof WorkflowRunCancelError) {
           res.status(err.status).json({ error: err.code })
