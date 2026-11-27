@@ -388,6 +388,19 @@ run's coordinator. A running run stops at the first step boundary after its coor
 the signal (normally within 5 s). A step that starts before then still runs, and steps that already
 ran are not undone. Only workflow-recipes images of this release deliver cancel requests.
 
+**Runs keep running after the user's sessions are revoked.** A run that has started is authorized
+from the user's live account state (active user and a live access path to the recipe: the user's
+own grant, or an active team membership and the team's grant). It is not tied to the session that
+started it. "Sign out everywhere" and a password reset revoke sessions, so they stop new requests
+but do not stop runs already in progress. To stop the runs of a compromised account, retire
+(delete) the user in the Control UI; this cannot be undone. Each run then stops at its next
+authority checkpoint. Removing the user from the team, or removing the user's grant on the recipe,
+also stops the runs that depend on it. You can also cancel the runs: the user who launched a run
+can cancel it from any live session, and a platform admin can cancel any run with
+`POST /api/v1/admin/workflows/<namespace>/<recipe>/runs/<runId>/cancel`. A team admin can cancel
+only the team's scheduled and autonomous runs. Every run also ends at its duration limit (24 hours
+at most).
+
 **The upgrade window.** The deploy rolls control-api before workflow-recipes. For one to two
 minutes the new control-api accepts cancel requests while the old workflow-recipes pod still runs
 and does not deliver them. A run canceled in that window keeps running:
