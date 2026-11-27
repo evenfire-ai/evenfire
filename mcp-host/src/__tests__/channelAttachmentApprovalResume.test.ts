@@ -2194,6 +2194,41 @@ describe('Channel attachment approval resume, revocation, CAS races, scoping & l
         .get(racedKey) as { state: string }
       expect(racedRow.state).toBe('ended')
 
+      // --- T-BR07-a (3): Pre-suspendForApproval guard — if identityAbortReason is already set
+      // when case 'need_approval' enters, suspendForApproval MUST NOT be called at all.
+      suspendSpy.mockClear()
+      approvalNeededEvents.length = 0
+      const preGuardTurn = await pod.send({
+        content: 'Seed conversation for pre-suspend guard',
+        channelType: 'slack',
+        channelId: 'D_BR07_PRE',
+        sender: 'u-br07-pre',
+        timestamp: new Date().toISOString(),
+        messageId: 'm-br07-pre',
+        hostRef: 'ns/host-appr',
+        admittedLinkedUserId: 'linked-user-a',
+        providerIdentity: makeIdentity('slack', 'u-br07-pre', 'D_BR07_PRE', 'W07'),
+      })
+      expect(preGuardTurn.status).toBe('waiting_approval')
+      const preExec = activeExecutors.get(preGuardTurn.approval!.taskId)! as unknown as {
+        abortForIdentity: (r: 'identity_changed' | 'identity_revoked') => void
+        handleLoopResult: (result: unknown) => Promise<void>
+      }
+      suspendSpy.mockClear()
+      approvalNeededEvents.length = 0
+      preExec.abortForIdentity('identity_changed')
+      await preExec.handleLoopResult({
+        type: 'need_approval',
+        approval: {
+          request_id: 'req-br07-pre-suppressed',
+          tool_name: 'clerum__gfs_save_attachment',
+          parameters: {},
+          description: 'Save file',
+        },
+      })
+      expect(suspendSpy).toHaveBeenCalledTimes(0)
+      expect(approvalNeededEvents).toHaveLength(0)
+
       // --- T-BR07-b: TaskLimitError + abortForIdentity in run() AND suspendForApproval throwing while identityAbortReason !== null ---
       failTurnSpy.mockClear()
       let limitThrowEntered!: () => void

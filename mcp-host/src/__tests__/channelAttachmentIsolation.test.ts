@@ -1457,6 +1457,27 @@ describe('Channel attachment & identity isolation (S68, S71, S72, S73, S77, S78,
       expect(rB2.success).toBe(true)
       expect(snapSpy).toHaveBeenCalledTimes(1)
 
+      // 2b) Inject stale User A entry while User B already owns the active session (no rotation drop).
+      // maybeGetOrBuildParts MUST detect linkedUserId mismatch, miss cache, and re-snapshot User B's daily logs.
+      stack.promptCache.set(sessionKey, cachedA!)
+      const rB3 = await stack.send({
+        content: 'Turn B3 with stale User A cache entry',
+        channelType: 'slack',
+        channelId: 'D_BR11',
+        sender: 'U_BR11',
+        timestamp: new Date().toISOString(),
+        messageId: 'm-br11-b3',
+        hostRef: 'ns/host-iso',
+        admittedLinkedUserId: 'linked-user-b',
+        providerIdentity: slackIdentity('U_BR11', 'D_BR11'),
+      })
+      expect(rB3.success).toBe(true)
+      expect(snapSpy).toHaveBeenCalledTimes(2)
+      const cachedB3 = stack.promptCache.get(sessionKey)
+      expect(cachedB3?.linkedUserId).toBe('linked-user-b')
+      expect(cachedB3?.dailyLogSnapshot).toContain('DAILY-B-1102')
+      expect(cachedB3?.dailyLogSnapshot).not.toContain('DAILY-A-1101')
+
       // 3) Identity abort during readIdentityFiles() MUST skip promptCache.set!
       const abortKey = resolveCanonicalSessionKey({
         sender: 'U_BR11_ABORT',
