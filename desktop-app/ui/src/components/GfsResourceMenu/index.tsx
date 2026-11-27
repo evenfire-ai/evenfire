@@ -1,5 +1,9 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+  ReactNode,
+} from 'react'
 import { createPortal } from 'react-dom'
 import { IconButton, MenuItem } from '@components/Common'
 import {
@@ -15,12 +19,18 @@ import {
   IconTrash,
   IconUpload,
 } from '@components/SidebarNav/icons'
-import type { GfsResourceMenuProps } from './types'
+import type { GfsResourceActionId } from '@lib/gfsResourceActions'
+import { gfsActionNeedsAffordances } from '@lib/gfsRowActionAvailability'
+import type {
+  GfsResourceMenuActionKey,
+  GfsResourceMenuPermissionStatus,
+  GfsResourceMenuProps,
+} from './types'
 
 type GfsResourceMenuAction = {
   color?: 'neutral' | 'danger'
   icon: ReactNode
-  key: string
+  key: GfsResourceMenuActionKey
   label: string
   onClick: () => void
   submenu?: boolean
@@ -28,7 +38,7 @@ type GfsResourceMenuAction = {
 }
 
 function menuAction(
-  key: string,
+  key: GfsResourceMenuActionKey,
   label: string,
   icon: ReactNode,
   onClick: (() => void) | undefined,
@@ -41,10 +51,27 @@ function isMenuAction(action: GfsResourceMenuAction | null): action is GfsResour
   return action !== null
 }
 
-function horizontalBounds(anchor: HTMLElement, edgeInset: number) {
+// Actions that finish without opening a dialog or picker: they navigate,
+// save a file or write the clipboard.
+const ACTIONS_WITHOUT_SURFACE: ReadonlySet<GfsResourceMenuActionKey> = new Set([
+  'preview',
+  'download',
+  'download-zip',
+  'copy-link',
+  'copy-route',
+  'open-folder',
+])
+
+const EDGE_INSET = 8
+const GAP = 6
+
+type AnchorRect = Pick<DOMRect, 'bottom' | 'left' | 'right' | 'top'>
+type HorizontalBounds = { left: number; right: number }
+
+function horizontalBounds(anchor: HTMLElement | null, edgeInset: number): HorizontalBounds {
   const viewportLeft = edgeInset
   const viewportRight = window.innerWidth - edgeInset
-  const drive = anchor.closest<HTMLElement>('.da-gfs-drive')
+  const drive = anchor?.closest<HTMLElement>('.da-gfs-drive')
   const driveRect = drive?.getBoundingClientRect()
 
   // Breadcrumb menus live beside a persistent sidebar. Keep their portal
@@ -61,9 +88,53 @@ function horizontalBounds(anchor: HTMLElement, edgeInset: number) {
   }
 }
 
+function pointRect(point: { x: number; y: number }): AnchorRect {
+  return { bottom: point.y, left: point.x, right: point.x, top: point.y }
+}
+
+/** Right edge of the panel aligned with the anchor's right edge. */
+function endAlignedLeft(anchorRect: AnchorRect, width: number, bounds: HorizontalBounds) {
+  const maxLeft = Math.max(bounds.left, bounds.right - width)
+  return Math.min(Math.max(bounds.left, anchorRect.right - width), maxLeft)
+}
+
+/** Beside the anchor, flipping to its left side when the right side overflows. */
+function besideLeft(anchorRect: AnchorRect, width: number, bounds: HorizontalBounds) {
+  const opensLeft = anchorRect.right + GAP + width > bounds.right
+  const preferredLeft = opensLeft ? anchorRect.left - width - GAP : anchorRect.right + GAP
+  const maxLeft = Math.max(bounds.left, bounds.right - width)
+  return Math.min(Math.max(bounds.left, preferredLeft), maxLeft)
+}
+
+/** Below the anchor, flipping above it when the bottom overflows. */
+function belowOrAboveTop(anchorRect: AnchorRect, height: number, viewportHeight: number) {
+  const opensAbove =
+    anchorRect.bottom + GAP + height > viewportHeight - EDGE_INSET &&
+    anchorRect.top - GAP - height >= EDGE_INSET
+  const unclampedTop = opensAbove ? anchorRect.top - height - GAP : anchorRect.bottom + GAP
+  return Math.min(
+    Math.max(EDGE_INSET, unclampedTop),
+    Math.max(EDGE_INSET, viewportHeight - height - EDGE_INSET)
+  )
+}
+
+function withPermissionGate(
+  action: GfsResourceMenuAction,
+  actionId: GfsResourceActionId,
+  permissionStatus: GfsResourceMenuPermissionStatus | undefined
+): GfsResourceMenuAction {
+  if (permissionStatus === undefined || permissionStatus === 'ok' || action.submenu) return action
+  // Unresolved or failed bits keep the item visible but inert, so the menu
+  // never offers an action the target may not allow.
+  return gfsActionNeedsAffordances(actionId) ? { ...action, disabled: true } : action
+}
+
 export function GfsResourceMenu({
   resourceName,
   actions,
+  anchor,
+  permissionStatus: requestedPermissionStatus,
+  onDismiss,
   onManage,
   onCopyLink,
   onCreateFolder,
@@ -77,7 +148,14 @@ export function GfsResourceMenu({
   onMove,
   onReplace,
 }: GfsResourceMenuProps) {
-  const [open, setOpen] = useState(false)
+  const anchorMode = anchor !== undefined
+  const anchorX = anchor?.x
+  const anchorY = anchor?.y
+  // A context menu that is not told its bits are settled treats them as
+  // unresolved, so a caller that forgets the status cannot offer actions the
+  // target may not allow.
+  const permissionStatus = requestedPermissionStatus ?? (anchorMode ? 'pending' : undefined)
+  const [open, setOpen] = useState(anchorMode)
   const [shareOpen, setShareOpen] = useState(false)
   const menuRef = useRef<HTMLSpanElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
@@ -85,18 +163,42 @@ export function GfsResourceMenu({
   const shareTriggerRef = useRef<HTMLButtonElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
   const replaceInputRef = useRef<HTMLInputElement | null>(null)
+  const returnFocusRef = useRef<HTMLElement | null>(null)
+  // Whether a pointer move over Share may open its submenu. It starts disarmed
+  // on every menu open, after every explicit close of the submenu and whenever
+  // Share is activated (click, Enter or Space), and only a pointermove that
+  // lands outside Share re-arms it. Without it, a pointer resting on Share
+  // (where the panel appeared, or after Escape closed the submenu) would
+  // reopen the submenu on the first 1px tremor and steal focus from a
+  // keyboard user. Boundary events (pointerover/enter, pointerleave)
+  // cannot stand in for that move: Chromium fires them on layout changes and
+  // scrolls while the pointer is still.
+  const shareHoverArmedRef = useRef(false)
   const [panelPosition, setPanelPosition] = useState<{ left: number; top: number } | null>(null)
   const [submenuPosition, setSubmenuPosition] = useState<{ left: number; top: number } | null>(null)
+  const panelPositioned = panelPosition !== null
+  const submenuPositioned = submenuPosition !== null
   const closeMenu = useCallback(() => {
     setOpen(false)
     setShareOpen(false)
   }, [])
   const onOpenChangeRef = useRef(onOpenChange)
+  const onDismissRef = useRef(onDismiss)
   const prevOpenRef = useRef(false)
 
   useEffect(() => {
     onOpenChangeRef.current = onOpenChange
-  }, [onOpenChange])
+    onDismissRef.current = onDismiss
+  }, [onDismiss, onOpenChange])
+
+  // `onOpenChange` only reports state, and StrictMode replays it as
+  // open → closed → open on mount. An owner that unmounted on that transient
+  // `false` would drop the menu as it appears, so unmounting follows this
+  // user-driven dismissal instead.
+  const dismissMenu = useCallback(() => {
+    closeMenu()
+    onDismissRef.current?.()
+  }, [closeMenu])
 
   useEffect(() => {
     if (prevOpenRef.current === open) return
@@ -106,7 +208,11 @@ export function GfsResourceMenu({
 
   useEffect(
     () => () => {
-      if (prevOpenRef.current) onOpenChangeRef.current?.(false)
+      if (!prevOpenRef.current) return
+      // Reset so a StrictMode effect replay of a menu that mounts open
+      // re-reports `true` instead of leaving the owner stuck on `false`.
+      prevOpenRef.current = false
+      onOpenChangeRef.current?.(false)
     },
     []
   )
@@ -121,38 +227,32 @@ export function GfsResourceMenu({
         submenuRef.current?.contains(target)
       )
         return
-      closeMenu()
+      dismissMenu()
     }
     document.addEventListener('mousedown', handlePointerDown)
     return () => document.removeEventListener('mousedown', handlePointerDown)
-  }, [closeMenu, open])
+  }, [dismissMenu, open])
 
   const positionPanel = useCallback(() => {
     const trigger = triggerRef.current
     const panel = panelRef.current
-    if (!trigger || !panel) return
+    const hasPoint = anchorX !== undefined && anchorY !== undefined
+    const anchorRect = hasPoint
+      ? pointRect({ x: anchorX, y: anchorY })
+      : trigger?.getBoundingClientRect()
+    if (!panel || !anchorRect) return
 
-    const triggerRect = trigger.getBoundingClientRect()
     const panelRect = panel.getBoundingClientRect()
-    const edgeInset = 8
-    const gap = 6
-    const viewportHeight = window.innerHeight
-    const bounds = horizontalBounds(trigger, edgeInset)
-    const maxLeft = Math.max(bounds.left, bounds.right - panelRect.width)
-    const left = Math.min(Math.max(bounds.left, triggerRect.right - panelRect.width), maxLeft)
-    const opensAbove =
-      triggerRect.bottom + gap + panelRect.height > viewportHeight - edgeInset &&
-      triggerRect.top - gap - panelRect.height >= edgeInset
-    const unclampedTop = opensAbove
-      ? triggerRect.top - panelRect.height - gap
-      : triggerRect.bottom + gap
-    const top = Math.min(
-      Math.max(edgeInset, unclampedTop),
-      Math.max(edgeInset, viewportHeight - panelRect.height - edgeInset)
-    )
+    const bounds = horizontalBounds(trigger, EDGE_INSET)
+    // A trigger owns its panel's end edge; a pointer opens a context menu
+    // beside the point, like the Share flyout beside its item.
+    const left = hasPoint
+      ? besideLeft(anchorRect, panelRect.width, bounds)
+      : endAlignedLeft(anchorRect, panelRect.width, bounds)
+    const top = belowOrAboveTop(anchorRect, panelRect.height, window.innerHeight)
 
     setPanelPosition({ left, top })
-  }, [])
+  }, [anchorX, anchorY])
 
   useLayoutEffect(() => {
     if (!open) {
@@ -184,18 +284,11 @@ export function GfsResourceMenu({
 
     const triggerRect = trigger.getBoundingClientRect()
     const submenuRect = submenu.getBoundingClientRect()
-    const edgeInset = 8
-    const gap = 6
     const viewportHeight = window.innerHeight
-    const bounds = horizontalBounds(triggerRef.current ?? trigger, edgeInset)
-    const opensLeft = triggerRect.right + gap + submenuRect.width > bounds.right
-    const preferredLeft = opensLeft
-      ? triggerRect.left - submenuRect.width - gap
-      : triggerRect.right + gap
-    const maxLeft = Math.max(bounds.left, bounds.right - submenuRect.width)
-    const left = Math.min(Math.max(bounds.left, preferredLeft), maxLeft)
-    const maxTop = Math.max(edgeInset, viewportHeight - submenuRect.height - edgeInset)
-    const top = Math.min(Math.max(edgeInset, triggerRect.top), maxTop)
+    const bounds = horizontalBounds(triggerRef.current ?? trigger, EDGE_INSET)
+    const left = besideLeft(triggerRect, submenuRect.width, bounds)
+    const maxTop = Math.max(EDGE_INSET, viewportHeight - submenuRect.height - EDGE_INSET)
+    const top = Math.min(Math.max(EDGE_INSET, triggerRect.top), maxTop)
 
     setSubmenuPosition({ left, top })
   }, [])
@@ -226,30 +319,91 @@ export function GfsResourceMenu({
   }, [panelPosition, positionSubmenu, shareOpen])
 
   useEffect(() => {
-    if (!open) return
-    panelRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus()
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        if (shareOpen) {
-          event.preventDefault()
-          setShareOpen(false)
-          shareTriggerRef.current?.focus()
-        } else {
-          closeMenu()
-          triggerRef.current?.focus()
-        }
+    if (!open || !anchorMode) return
+    const focused = document.activeElement
+    // A StrictMode replay runs after focus already moved into the menu; the
+    // opener captured on the first run stays the return target.
+    if (panelRef.current?.contains(focused) || submenuRef.current?.contains(focused)) return
+    returnFocusRef.current = focused instanceof HTMLElement ? focused : null
+  }, [anchorMode, open])
+
+  /** One Escape closes one level: the Share flyout first, then the menu. */
+  const dismissOneLevel = useCallback(
+    (event: KeyboardEvent) => {
+      if (shareOpen) {
+        event.preventDefault()
+        shareHoverArmedRef.current = false
+        setShareOpen(false)
+        shareTriggerRef.current?.focus()
+        return
       }
+      dismissMenu()
+      ;(triggerRef.current ?? returnFocusRef.current)?.focus()
+    },
+    [dismissMenu, shareOpen]
+  )
+
+  // Entry focus waits for the positioned commit: the first commit paints the
+  // panel with `visibility: hidden`, and Chromium refuses focus on a hidden
+  // element, so focusing on `open` alone leaves focus on the opener. The deps
+  // are booleans so a scroll or resize that repositions the panel does not
+  // pull focus back to the first item.
+  useEffect(() => {
+    if (!open || !panelPositioned) return
+    panelRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus()
+  }, [open, panelPositioned])
+
+  useEffect(() => {
+    if (!open) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') dismissOneLevel(event)
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [closeMenu, open, shareOpen])
+  }, [dismissOneLevel, open])
 
+  // A context menu opens inside surfaces that also close on Escape (the
+  // compact sidebar drawer listens on document). Capturing on document lets
+  // the menu consume that Escape before any bubble listener, and only while
+  // focus is in the menu, so a closed menu leaves Escape to the drawer. A
+  // click on a disabled item or the panel padding drops focus to body; that
+  // Escape still belongs to the open menu.
   useEffect(() => {
-    if (!shareOpen) return
+    if (!open || !anchorMode) return
+    const handleEscapeCapture = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      const focused = document.activeElement
+      const focusInMenu =
+        panelRef.current?.contains(focused) ||
+        submenuRef.current?.contains(focused) ||
+        focused === document.body
+      if (!focusInMenu) return
+      event.preventDefault()
+      event.stopPropagation()
+      dismissOneLevel(event)
+    }
+    document.addEventListener('keydown', handleEscapeCapture, true)
+    return () => document.removeEventListener('keydown', handleEscapeCapture, true)
+  }, [anchorMode, dismissOneLevel, open])
+
+  // Same constraint as the panel's entry focus: the submenu's first commit is
+  // hidden until it is positioned.
+  useEffect(() => {
+    if (!shareOpen || !submenuPositioned) return
     submenuRef.current
       ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
       ?.focus()
-  }, [shareOpen])
+  }, [shareOpen, submenuPositioned])
+
+  useEffect(() => {
+    if (!open) return
+    const rearmShareHover = (event: Event) => {
+      if (shareTriggerRef.current?.contains(event.target as Node | null)) return
+      shareHoverArmedRef.current = true
+    }
+    document.addEventListener('pointermove', rearmShareHover)
+    return () => document.removeEventListener('pointermove', rearmShareHover)
+  }, [open])
 
   const handleMenuKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
     if (!open) return
@@ -264,6 +418,7 @@ export function GfsResourceMenu({
       submenuRef.current?.contains(document.activeElement)
     ) {
       event.preventDefault()
+      shareHoverArmedRef.current = false
       setShareOpen(false)
       shareTriggerRef.current?.focus()
       return
@@ -283,11 +438,36 @@ export function GfsResourceMenu({
     items[nextIndex]?.focus()
   }
 
-  const runAction = (action: () => void) => {
-    closeMenu()
-    action()
+  // Only real pointer movement opens Share: Chromium fires mouseenter and
+  // pointerenter/over when the panel appears or scrolls under a still pointer.
+  const openShareOnHover = () => {
+    if (!shareOpen && shareHoverArmedRef.current) setShareOpen(true)
   }
 
+  // With focus in the portal, a ContextMenu key or right-click would reach
+  // Electron, which shows its native text menu over this one when the page
+  // has a selection.
+  const preventNativeContextMenu = (event: ReactMouseEvent) => event.preventDefault()
+
+  const runAction = (action: GfsResourceMenuAction) => {
+    dismissMenu()
+    // An anchored menu unmounts with the item that had focus, which drops it
+    // to <body>. For an action that opens nothing of its own, focus goes back
+    // to the anchor. An action that opens a host surface leaves it where it
+    // falls: that surface may not take focus (the Move dialog does not, and
+    // the host checks permissions before any dialog mounts), and a focused
+    // row under it would still answer Enter or Shift+F10.
+    if (anchorMode && ACTIONS_WITHOUT_SURFACE.has(action.key)) returnFocusRef.current?.focus()
+    action.onClick()
+  }
+
+  // The fallback Share child is keyed apart from its submenu parent.
+  const gateFallback = (action: GfsResourceMenuAction) =>
+    withPermissionGate(
+      action,
+      action.key === 'share-access' ? 'share' : action.key,
+      permissionStatus
+    )
   const fallbackShareChildren = [
     menuAction('share-access', 'Share', <IconShare />, onManage),
     menuAction('copy-link', 'Copy link', <IconCopy />, onCopyLink),
@@ -325,28 +505,35 @@ export function GfsResourceMenu({
     ),
   ].filter(group => group.length > 0)
   const menuActions = actions?.filter(action => action.menu)
-  const sharedActions: GfsResourceMenuAction[] | undefined = menuActions?.map(action => ({
-    color: action.id === 'delete' ? 'danger' : undefined,
-    disabled: action.disabled,
-    icon: action.icon,
-    key: action.id,
-    label: action.label,
-    onClick:
-      action.id === 'replace'
-        ? () =>
-            action.run(undefined, {
-              requestFileSelection: () => replaceInputRef.current?.click(),
-            })
-        : () => action.run(),
-  }))
+  const sharedActions: GfsResourceMenuAction[] | undefined = menuActions?.map(action =>
+    withPermissionGate(
+      {
+        color: action.id === 'delete' ? 'danger' : undefined,
+        disabled: action.disabled,
+        icon: action.icon,
+        key: action.id,
+        label: action.label,
+        onClick:
+          action.id === 'replace'
+            ? () =>
+                action.run(undefined, {
+                  requestFileSelection: () => replaceInputRef.current?.click(),
+                })
+            : () => action.run(),
+      },
+      action.id,
+      permissionStatus
+    )
+  )
   const shareMenuChildren =
     actions !== undefined
       ? (sharedActions ?? [])
           .filter(action => ['share', 'copy-link', 'copy-route'].includes(action.key))
-          .map(action =>
-            action.key === 'share' ? { ...action, key: 'share-access', label: 'Share' } : action
+          .map(
+            (action): GfsResourceMenuAction =>
+              action.key === 'share' ? { ...action, key: 'share-access', label: 'Share' } : action
           )
-      : fallbackShareChildren
+      : fallbackShareChildren.map(gateFallback)
   const hasShareSubmenu = shareMenuChildren.length > 0
   const shareGroup = hasShareSubmenu
     ? [
@@ -367,7 +554,9 @@ export function GfsResourceMenu({
             ? [sharedActions.filter(action => action.key === 'delete')]
             : []),
         ].filter(group => group.length > 0)
-      : fallbackActionGroups
+      : fallbackActionGroups.map(group => group.map(gateFallback))
+
+  const gatedReplace = actionGroups.flat().find(action => action.key === 'replace')
 
   return (
     <span
@@ -375,25 +564,28 @@ export function GfsResourceMenu({
       ref={menuRef}
       onKeyDown={handleMenuKeyDown}
     >
-      <IconButton
-        className="da-gfs-resource-menu__trigger"
-        label={`Options for ${resourceName}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={event => {
-          event.stopPropagation()
-          if (open) {
-            closeMenu()
-          } else {
-            setOpen(true)
-          }
-        }}
-        ref={triggerRef}
-        size="sm"
-        variant="ghost"
-      >
-        <IconMoreVertical />
-      </IconButton>
+      {anchorMode ? null : (
+        <IconButton
+          className="da-gfs-resource-menu__trigger"
+          label={`Options for ${resourceName}`}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          onClick={event => {
+            event.stopPropagation()
+            if (open) {
+              dismissMenu()
+            } else {
+              shareHoverArmedRef.current = false
+              setOpen(true)
+            }
+          }}
+          ref={triggerRef}
+          size="sm"
+          variant="ghost"
+        >
+          <IconMoreVertical />
+        </IconButton>
+      )}
       {open
         ? createPortal(
             <Fragment>
@@ -408,6 +600,7 @@ export function GfsResourceMenu({
                     : { left: 0, top: 0, visibility: 'hidden' }
                 }
                 onKeyDown={handleMenuKeyDown}
+                onContextMenu={preventNativeContextMenu}
               >
                 {actionGroups.map((group, groupIndex) => (
                   <Fragment key={`group-${groupIndex}`}>
@@ -426,13 +619,14 @@ export function GfsResourceMenu({
                         role="menuitem"
                         ref={action.submenu ? shareTriggerRef : undefined}
                         trailingIcon={action.submenu ? <IconChevronRight /> : undefined}
-                        onMouseEnter={action.submenu ? () => setShareOpen(true) : undefined}
+                        onPointerMove={action.submenu ? openShareOnHover : undefined}
                         onClick={() => {
                           if (action.disabled) return
                           if (action.submenu) {
+                            shareHoverArmedRef.current = false
                             action.onClick()
                           } else {
-                            runAction(action.onClick)
+                            runAction(action)
                           }
                         }}
                       >
@@ -454,6 +648,7 @@ export function GfsResourceMenu({
                       : { left: 0, top: 0, visibility: 'hidden' }
                   }
                   onKeyDown={handleMenuKeyDown}
+                  onContextMenu={preventNativeContextMenu}
                 >
                   {shareMenuChildren.map(action => (
                     <MenuItem
@@ -462,7 +657,10 @@ export function GfsResourceMenu({
                       key={action.key}
                       leadingIcon={action.icon}
                       role="menuitem"
-                      onClick={() => runAction(action.onClick)}
+                      onClick={() => {
+                        if (action.disabled) return
+                        runAction(action)
+                      }}
                     >
                       {action.label}
                     </MenuItem>
@@ -479,11 +677,14 @@ export function GfsResourceMenu({
           aria-label={`Replace ${resourceName}`}
           className="visually-hidden"
           ref={replaceInputRef}
+          // Only the Replace item opens the picker, so the hidden input stays
+          // out of the tab order and refuses a file while that item is inert.
+          tabIndex={-1}
           type="file"
           onChange={event => {
             const file = event.currentTarget.files?.[0]
             event.currentTarget.value = ''
-            if (!file) return
+            if (!file || !gatedReplace || gatedReplace.disabled) return
             closeMenu()
             const replaceAction = menuActions?.find(action => action.id === 'replace')
             if (replaceAction) replaceAction.run(file)

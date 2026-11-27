@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Button, IconButton, StatusBanner } from '@components/Common'
+import { Button, StatusBanner } from '@components/Common'
+import { SandboxUiTitlebarLeadingActions } from '@components/SandboxUiTitlebarLeadingActions'
 import { useEmbedOwnership } from '@hooks/useEmbedOwnership'
-import { joinClasses } from '@lib/classNames'
 import { embedFailureMessage, embedViewState, httpStatusOf } from '@lib/embedOwnershipView'
 import SandboxCurrentContentSearch from '../components/SandboxCurrentContentSearch'
 import type { AppFindState } from '../components/SandboxCurrentContentSearch/types'
-import { IconCopy, IconRefresh, IconSandboxUi } from '../components/SidebarNav/icons'
+import { IconSandboxUi } from '../components/SidebarNav/icons'
 import { clickableRowProps } from '../lib/clickableRowProps'
 import { toActiveSandboxUiApp } from '../lib/sandboxUiAppSelection'
 import type { SandboxUiAppListing } from '../lib/sandboxUiAppSelection.types'
@@ -168,42 +168,6 @@ function useEmbedBounds(
 
 const APP_PAGE_SIZE = 6
 let nextSandboxFindClientRequestId = 0
-
-// Icon-only app action rendered into the native title bar's leading slot. The
-// label is surfaced through IconButton's native `title` (from `label`) plus
-// `aria-label` for assistive tech. The native `title` is deliberate here: the
-// mounted app is a native WebContentsView that always paints above the renderer
-// DOM regardless of CSS, so a DOM tooltip would render BEHIND the app view and
-// be unreadable. The OS composes the native `title` tooltip over that native
-// view, so it is the only label affordance that can actually be seen.
-function TitlebarLeadingAction({
-  className,
-  label,
-  pressed,
-  onClick,
-  children,
-}: {
-  className: string
-  label: string
-  pressed?: boolean
-  onClick: () => void
-  children: React.ReactNode
-}) {
-  return (
-    <span className="titlebar-leading-action">
-      <IconButton
-        variant="ghost"
-        size="sm"
-        className={joinClasses('titlebar-leading-action__btn', className)}
-        label={label}
-        aria-pressed={pressed}
-        onClick={onClick}
-      >
-        {children}
-      </IconButton>
-    </span>
-  )
-}
 
 export function SandboxUiPage({
   embed,
@@ -478,22 +442,10 @@ export function SandboxUiPage({
         {titlebarLeadingContainer &&
           hasLeadingActions &&
           createPortal(
-            <div className="window-titlebar__leading-actions">
-              <TitlebarLeadingAction
-                className="sandbox-ui-refresh-btn"
-                label="Refresh app content"
-                onClick={() => onRefresh?.()}
-              >
-                <IconRefresh />
-              </TitlebarLeadingAction>
-              <TitlebarLeadingAction
-                className="sandbox-ui-copy-link-btn"
-                label="Copy current app link"
-                onClick={() => void onCopyDeepLink()}
-              >
-                <IconCopy />
-              </TitlebarLeadingAction>
-            </div>,
+            <SandboxUiTitlebarLeadingActions
+              onRefresh={() => onRefresh?.()}
+              onCopyLink={() => void onCopyDeepLink()}
+            />,
             titlebarLeadingContainer
           )}
         {showRefreshBanner && (

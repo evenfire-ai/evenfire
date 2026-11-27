@@ -255,6 +255,11 @@ describe('chat body budget parity across rpc-proxy, mcp-host and the composer (#
       ],
       [
         'composerNonImageShareBytes',
+        '(request.locationReferences.length',
+        '(request.locationReferences.length ? jsonBytes(request.locationReferences) : 0) +',
+      ],
+      [
+        'composerNonImageShareBytes',
         '2 * jsonBytes(request.hostRef)',
         '2 * jsonBytes(request.hostRef) +',
       ],
@@ -300,7 +305,7 @@ describe('chat body budget parity across rpc-proxy, mcp-host and the composer (#
     }
     // The non-image share is the sum of exactly the terms pinned above.
     const share = functionSource(admission, 'composerNonImageShareBytes', 'composer admission')
-    expect(share.match(/ \+$/gm), 'composerNonImageShareBytes term count').toHaveLength(6)
+    expect(share.match(/ \+$/gm), 'composerNonImageShareBytes term count').toHaveLength(7)
   })
 
   it('the composer reserves the headroom rpc-proxy is tested to add when forwarding', () => {

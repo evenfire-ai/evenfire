@@ -965,6 +965,7 @@ describe('FilesPage against the real GFS browser controller', () => {
           ]),
         },
         team: { directory: vi.fn(async () => ({ currentTeamId: 'team-a', items: [] })) },
+        auth: { getSessionGeneration: vi.fn(async () => 1) },
       }
     )
 
@@ -996,7 +997,8 @@ describe('FilesPage against the real GFS browser controller', () => {
     })
 
     const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
-    const emptyState = screen.getByText('This folder is empty')
+    // Sharing the row leaves the browser on the listing that shows it.
+    const listingRow = screen.getByRole('button', { name: 'Share Folder A' })
     expect(subjectInput.isConnected).toBe(true)
     expect(selectedSubject.isConnected).toBe(true)
     expect(within(dialog).getByText('Checking permissions…')).toBeTruthy()
@@ -1004,7 +1006,7 @@ describe('FilesPage against the real GFS browser controller', () => {
     expect(shareButton.disabled).toBe(true)
     fireEvent.click(shareButton)
     expect(grant).not.toHaveBeenCalled()
-    expect(emptyState.isConnected).toBe(true)
+    expect(listingRow.isConnected).toBe(true)
     expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull()
     expect(browser.getAttribute('aria-busy')).toBe('false')
 
@@ -1028,7 +1030,7 @@ describe('FilesPage against the real GFS browser controller', () => {
         true
       )
     })
-    expect(emptyState.isConnected).toBe(true)
+    expect(listingRow.isConnected).toBe(true)
     expect(browser.getAttribute('aria-busy')).toBe('false')
 
     const selectAgent = async (input = subjectInput) => {
@@ -1137,7 +1139,7 @@ describe('FilesPage against the real GFS browser controller', () => {
     expect(subjectInput.isConnected).toBe(false)
     expect(selectedAgain.isConnected).toBe(false)
     expect(grant).toHaveBeenCalledTimes(2)
-    expect(emptyState.isConnected).toBe(true)
+    expect(listingRow.isConnected).toBe(true)
     expect(browser.getAttribute('aria-busy')).toBe('false')
 
     const restoredPermission = deferred<typeof freshPositive>()
@@ -1171,7 +1173,7 @@ describe('FilesPage against the real GFS browser controller', () => {
       ).checked
     ).toBe(true)
     expect(within(dialog).queryByText(/share attempt failed/)).toBeNull()
-    expect(emptyState.isConnected).toBe(true)
+    expect(listingRow.isConnected).toBe(true)
     expect(browser.getAttribute('aria-busy')).toBe('false')
   })
 })

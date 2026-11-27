@@ -1,10 +1,15 @@
 import type { Request, Response } from 'express'
 import {
+  HOST_EDGE_RPC_PROXY_ROUTE_SCOPES,
   validateHostActivityLimit,
   validateHostApprovalRequestId,
   validateHostModelSelectionRequest,
 } from '@clerum/action-context-contracts'
-import { parseIncomingFileReferences } from '../agent/fileReferenceResolver'
+import { LOCATION_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
+import {
+  parseIncomingFileReferences,
+  parseIncomingLocationReferences,
+} from '../agent/fileReferenceResolver'
 import { config } from '../config'
 import { approvalLogId } from '../core/approval/grantMemory'
 import type { ShellAction } from '../core/approval/shellCard'
@@ -172,7 +177,8 @@ export function runtimeApiInfo() {
       'GET /v1/runtime/health': 'Health check endpoint',
       'GET /v1/runtime/live': 'Liveness check endpoint',
       'GET /metrics': 'Prometheus metrics endpoint',
-      'GET /v1/runtime/status': 'Get agent and queue status (includes pendingApprovals)',
+      'GET /v1/runtime/status':
+        'Get agent and queue status (includes the start time of each pending approval)',
       'GET /v1/runtime/activity': 'Get host activity timeline snapshot',
       'GET /v1/runtime/activity/stream': 'Read-only host activity stream (SSE)',
       'POST /v1/runtime/messages': 'Submit a message for processing',
@@ -366,6 +372,20 @@ export async function handleMessageRoute(
           badRequest(res, 'V2 authority requires authenticated V2 runtime context')
           return
         }
+        // A body that carries its own approval mode also needs the approval-mode scope, as
+        // rpc-proxy requires before forwarding it. The check is on the key, not on its value; a
+        // caller context without verified assertion scopes is refused.
+        if (
+          Object.prototype.hasOwnProperty.call(message, 'approvalMode') &&
+          !caller.edgeAssertionScopes?.includes(
+            HOST_EDGE_RPC_PROXY_ROUTE_SCOPES[
+              'PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode'
+            ]
+          )
+        ) {
+          json(res, 403, { error: 'Forbidden: missing scope' })
+          return
+        }
         message.sender = caller.userId
         if (caller.actionContextV2) {
           const target = caller.actionContextV2.target
@@ -401,9 +421,13 @@ export async function handleMessageRoute(
             }
             message.metadata = sanitized
           }
-        } else if (caller.teamId) {
-          // Explicit v1 compatibility adapter. V2 never copies team metadata.
-          message.metadata = { ...(message.metadata ?? {}), teamId: caller.teamId }
+        } else {
+          // V1: the verified caller is the only source of access scope. Body
+          // metadata is discarded and rebuilt as rpc-proxy sends it.
+          message.metadata =
+            typeof caller.teamId === 'string'
+              ? { accessScope: 'team', teamId: caller.teamId }
+              : { accessScope: 'user' }
         }
       } else {
         json(res, 401, { error: 'Missing rpc edge caller context' })
@@ -453,6 +477,28 @@ export async function handleMessageRoute(
     }
     message.fileReferences = fileReferences.references.length
       ? fileReferences.references
+      : undefined
+
+    // A folder reference is refused the same way: a request to create or save
+    // in that folder must not run without it.
+    const locationReferences = parseIncomingLocationReferences(
+      message.locationReferences,
+      LOCATION_REFERENCE_MAX_COUNT
+    )
+    if (!locationReferences.ok) {
+      json(res, 200, {
+        success: false,
+        error: {
+          code: locationReferences.code,
+          message: locationReferences.message,
+          retryable: false,
+          provider: 'unknown',
+        },
+      })
+      return
+    }
+    message.locationReferences = locationReferences.references.length
+      ? locationReferences.references
       : undefined
 
     logger.info(
@@ -1571,8 +1617,7 @@ export async function handleSessionsListRoute(
 /**
  * T3.1 — GET /v1/runtime/sessions/search. Authenticated full-text search over
  * the trusted-edge user's history. `userSub` comes from rpc-proxy's validated
- * action context (or its isolated v1 edge adapter); caller-supplied `?user=`
- * is silently ignored.
+ * action context; caller-supplied `?user=` is silently ignored.
  *
  * Status codes:
  *   - 200: results returned (possibly empty).

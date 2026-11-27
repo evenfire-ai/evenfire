@@ -121,6 +121,22 @@ describe('WindowTitleBar', () => {
     expect(screen.getByRole('button', { name: 'Close window' })).toBeTruthy()
   })
 
+  // The app-region outcome itself is checked in real Electron by
+  // test/native/titlebar-app-region.fixture.cjs; jsdom cannot compute it.
+  it('renders the leading slot after the actions so its no-drag region wins', () => {
+    setNavigatorPlatform('MacIntel')
+    installClerumWindowControls()
+    const { container } = render(<WindowTitleBar />)
+
+    const actions = container.querySelector('.window-titlebar__actions')
+    const leading = container.querySelector('.window-titlebar__leading')
+    expect(actions).toBeTruthy()
+    expect(leading).toBeTruthy()
+    expect(
+      actions!.compareDocumentPosition(leading!) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+  })
+
   it('toggles maximize when the draggable titlebar area is double clicked', () => {
     setNavigatorPlatform('MacIntel')
     const { api } = installClerumWindowControls()

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
+import {
+  INTERNAL_SERVICE_AUTH_REFUSAL_HEADER,
+  INTERNAL_SERVICE_CREDENTIAL_REJECTED,
+} from '../services/controlApiRestService.js'
 import { hostAccessDenialCodeForReason } from '../services/hostAccessDenial.js'
 
 /**
@@ -41,6 +45,8 @@ const controlApiRoute = read('../../../control-api/src/routes/rpc-access/users.t
 const rpcProxyRestService = read('../services/controlApiRestService.ts')
 const rpcProxyDenial = read('../services/hostAccessDenial.ts')
 const desktopUpstreamErrors = read('../../../desktop-app/src/upstreamErrors.ts')
+const controlApiGate = read('../../../control-api/src/middleware/internalServiceAuth.ts')
+const controlApiApp = read('../../../control-api/src/app.ts')
 
 const controlApiReasons = quotedLiterals(
   extractOne(
@@ -76,6 +82,38 @@ const desktopDeniedCode = extractOne(
   /export const HOST_ACCESS_DENIED_CODE = '([^']+)'/,
   'desktop HOST_ACCESS_DENIED_CODE'
 )
+
+// J1 (R1-L7): the service gate's refusal mark, as control-api writes it and as
+// rpc-proxy reads it.
+const gateRefusalHeaderSent = extractOne(
+  controlApiGate,
+  /export const INTERNAL_SERVICE_AUTH_REFUSAL_HEADER = '([^']+)'/,
+  'control-api INTERNAL_SERVICE_AUTH_REFUSAL_HEADER'
+)
+const gateRefusalValueSent = extractOne(
+  controlApiGate,
+  /export const INTERNAL_SERVICE_CREDENTIAL_REJECTED = '([^']+)'/,
+  'control-api INTERNAL_SERVICE_CREDENTIAL_REJECTED'
+)
+const gateRefusalHeaderRead = extractOne(
+  rpcProxyRestService,
+  /export const INTERNAL_SERVICE_AUTH_REFUSAL_HEADER = '([^']+)'/,
+  'rpc-proxy INTERNAL_SERVICE_AUTH_REFUSAL_HEADER'
+)
+const gateRefusalValueRead = extractOne(
+  rpcProxyRestService,
+  /export const INTERNAL_SERVICE_CREDENTIAL_REJECTED = '([^']+)'/,
+  'rpc-proxy INTERNAL_SERVICE_CREDENTIAL_REJECTED'
+)
+
+/** Index of one occurrence of `needle`; a miss means the source moved. */
+function indexOfOne(source: string, needle: string, label: string): number {
+  const index = source.indexOf(needle)
+  if (index < 0 || source.indexOf(needle, index + 1) >= 0) {
+    throw new Error(`Expected exactly one ${label} (${needle}) — re-derive the guard`)
+  }
+  return index
+}
 
 describe('R3-L9 Host-access denial contract across control-api, rpc-proxy and Desktop', () => {
   it('rpc-proxy reads the denial-reason header under the name control-api sends it', () => {
@@ -116,5 +154,28 @@ describe('R3-L9 Host-access denial contract across control-api, rpc-proxy and De
       expect(hostAccessDenialCodeForReason(reason)).toBe(desktopRevokedCode)
     }
     expect(hostAccessDenialCodeForReason('a_reason_no_service_sends')).toBe(desktopDeniedCode)
+  })
+})
+
+describe('J1 service-gate refusal contract between control-api and rpc-proxy', () => {
+  it('rpc-proxy reads the refusal mark under the name and value control-api sends', () => {
+    expect(gateRefusalHeaderRead).toBe(gateRefusalHeaderSent)
+    expect(gateRefusalValueRead).toBe(gateRefusalValueSent)
+    // The parsed literals are the running exports.
+    expect(INTERNAL_SERVICE_AUTH_REFUSAL_HEADER).toBe(gateRefusalHeaderRead)
+    expect(INTERNAL_SERVICE_CREDENTIAL_REJECTED).toBe(gateRefusalValueRead)
+  })
+
+  it('control-api mounts both service gates before the RPC access router', () => {
+    const tokenGate = indexOfOne(controlApiApp, 'api.use(requireInternalToken)', 'token gate')
+    const rpcServiceGate = indexOfOne(
+      controlApiApp,
+      "api.use('/rpc', requireInternalService('rpc-proxy'))",
+      'rpc-proxy service gate'
+    )
+    const rpcAccessRouter = indexOfOne(controlApiApp, 'createRpcAccessRouter(', 'RPC access router')
+
+    expect(tokenGate).toBeLessThan(rpcServiceGate)
+    expect(rpcServiceGate).toBeLessThan(rpcAccessRouter)
   })
 })

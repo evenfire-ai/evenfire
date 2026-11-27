@@ -171,6 +171,7 @@ export default defineConfig({
         '**/native-tool-discovery.spec.ts',
         '**/session-tool-approval-scope.test.ts',
         '**/session-team-ux.test.ts',
+        '**/chromium-focus-boundary.spec.ts',
       ],
     },
     {

@@ -4434,6 +4434,9 @@ export class AppService {
     if (request.fileReferences !== undefined && !Array.isArray(request.fileReferences)) {
       throw new Error('File references must be a list.')
     }
+    if (request.locationReferences !== undefined && !Array.isArray(request.locationReferences)) {
+      throw new Error('Location references must be a list.')
+    }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     // A non-manual hold is stored on the first message, which rpc-proxy accepts
     // only when the token also has host:approval:write. manual stays on the
@@ -4476,13 +4479,21 @@ export class AppService {
       // Structured references (#666): parsed at the IPC boundary; rpc-proxy
       // forwards them and mcp-host resolves each one.
       ...(request.fileReferences === undefined ? {} : { fileReferences: request.fileReferences }),
+      ...(request.locationReferences === undefined
+        ? {}
+        : { locationReferences: request.locationReferences }),
     }
+    // One Idempotency-Key per send, shared by the first POST and the refresh
+    // retry below: rpc-proxy uses it as the Host messageId, so a retry of a
+    // message the Host already admitted replays instead of running the turn
+    // twice.
+    const sendOptions = { ...options, idempotencyKey: randomUUID() }
     try {
       return await this.rpcClient.invokeHostMessage(
         rpc.token,
         targetHostRef,
         contextualRequest,
-        options
+        sendOptions
       )
     } catch (error) {
       const availabilityError = AppService.toHostAvailabilityError(targetHostRef, error)
@@ -4495,7 +4506,7 @@ export class AppService {
             retried.token,
             targetHostRef,
             contextualRequest,
-            options
+            sendOptions
           )
         } catch (retryError) {
           const retryAvailabilityError = AppService.toHostAvailabilityError(
@@ -4781,7 +4792,9 @@ export class AppService {
           ({ event, data }) => {
             if (closed) return
             if (event === 'open') {
-              backoffMs = 1000
+              // No backoff reset here: rpc-proxy writes `open` before its first
+              // Host poll, so `open` proves only that the stream was accepted.
+              // The reset waits for a `status` event, the proof the Host answers.
               const payload = data as { hostRef?: string; observedAt?: string }
               onEvent({
                 type: 'open',
@@ -4797,8 +4810,9 @@ export class AppService {
               return
             }
             if (event === 'auth-expired') {
-              // Upstream rejected the captured RPC token (TTL is 300s; this
-              // is normal on long-lived sessions). Drop the cached token so
+              // rpc-proxy ends the stream before the held edge assertion
+              // (bounded by the RPC token, TTL 300s) expires, or after the
+              // Host refused three polls in a row. Drop the cached token so
               // the upcoming retry calls authClient.issueRpcToken with the
               // long-lived session and gets a fresh one — no relogin needed.
               this.rpcTokenManager.clear()

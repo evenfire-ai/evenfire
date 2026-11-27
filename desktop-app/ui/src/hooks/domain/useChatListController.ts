@@ -1106,6 +1106,12 @@ export function useChatListController({
     },
     []
   )
+  const dropTeamScopedPendingSelections = useCallback(() => {
+    const pending = pendingChatSelectionByAgentRef.current
+    for (const agentName of Object.keys(pending)) {
+      if (pending[agentName]?.mode === 'specific') delete pending[agentName]
+    }
+  }, [])
   const isChatDeleted = useCallback(
     (agentRef: string, chatId: string) =>
       deletedChatIdsByAgentRef.current.get(agentRef)?.has(chatId) ?? false,
@@ -1907,6 +1913,7 @@ export function useChatListController({
     readPendingSelection,
     writePendingSelection,
     clearPendingSelection,
+    dropTeamScopedPendingSelections,
     isChatDeleted,
   }
 }

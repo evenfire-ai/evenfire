@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import type { Metadata } from '@lib/api'
 
 export type ConnectorAccessPrincipal = {
   id: string
@@ -43,7 +44,7 @@ export type McpServerSpec = {
 }
 
 export type McpServerItem = {
-  metadata?: { name?: string; namespace?: string }
+  metadata?: Pick<Metadata, 'name' | 'namespace' | 'annotations' | 'labels'>
   spec?: McpServerSpec
   status?: McpServerStatus
 }

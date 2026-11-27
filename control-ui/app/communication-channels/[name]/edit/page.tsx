@@ -9,17 +9,16 @@ import type { CredentialEditStates, CredentialKey } from '@components/ChannelCre
 import { CommunicationChannelAccessSelector } from '@components/CommunicationChannelAccessSelector'
 import { CommunicationChannelConversationsTable } from '@components/CommunicationChannelConversations'
 import type { CommunicationChannelConversation } from '@components/CommunicationChannelConversations/types'
+import { CommunicationChannelIdentity } from '@components/CommunicationChannelIdentity'
+import { CommunicationChannelProviderSetup } from '@components/CommunicationChannelProviderSetup'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
+import { CreateStepFlow } from '@components/CreateStepFlow'
 import { DashboardLayout } from '@components/DashboardLayout'
-import { SegmentedControl } from '@components/SegmentedControl'
-import { SelectionDropdown } from '@components/SelectionDropdown'
 import { IconBroadcast } from '@components/Sidebar/icons'
-import { TeamsSetupPrerequisites } from '@components/TeamsSetupPrerequisites'
 import { useToast } from '@components/Toast'
-import { IconCopy } from '@components/icons'
-import { Button } from '@components/ui'
+import { CHANNEL_STEP_DETAILS, CHANNEL_STEP_LABELS } from '@constants/communicationChannelFlow'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { apiGet, apiSend, isSilentApiError } from '@lib/api'
 import {
@@ -28,40 +27,27 @@ import {
   credentialStateIsDirty,
 } from '@lib/channelCredentialSave'
 import type { ChannelType } from '@lib/channelTypes'
-import { copyTextToClipboard } from '@lib/clipboard'
 import {
   type CommunicationChannelDraftState,
   buildCommunicationChannelSpec,
   communicationChannelInitialTab,
   createCommunicationChannelDraft,
+  hasSlackConfig,
   hasSlackConfigForRequestUrl,
+  hasTeamsConfig,
   hasTeamsConfigForRequestUrl,
+  hasTelegramConfig,
 } from '@lib/communicationChannelEdit'
-import {
-  COMMUNICATION_CHANNEL_PROVIDERS,
-  COMMUNICATION_CHANNEL_PROVIDER_OPTIONS,
-  type CommunicationChannelProvider,
-  communicationChannelProviderServiceLabel,
-} from '@lib/communicationChannelProviders'
+import { type CommunicationChannelProvider } from '@lib/communicationChannelProviders'
 import {
   type CommunicationChannelItem,
   slackWebhookUrlForChannelName,
   teamsWebhookUrlForChannelName,
 } from '@lib/communicationChannels'
-import { canGenerateSlackAppManifest, slackAppManifest } from '@lib/slackAppManifest'
-import {
-  LOCAL_TEAMS_ENDPOINT_ORIGIN,
-  TEAMS_APP_NAME_MAX_LENGTH,
-  buildTeamsAppCreateCommand,
-  canGenerateTeamsCommand,
-  teamsAppNameError,
-  teamsPlaceholderEndpoint,
-} from '@lib/teamsSetup'
+import { teamsAppNameError } from '@lib/teamsSetup'
 
 type ChannelProvider = CommunicationChannelProvider
 type DraftState = CommunicationChannelDraftState
-
-const DEFAULT_SLACK_APP_NAME = 'Evenfire'
 
 type HostItem = {
   metadata?: { name?: string; namespace?: string }
@@ -127,6 +113,7 @@ export default function EditCommunicationChannelPage() {
   const [draft, setDraft] = useState<DraftState | null>(null)
   const [savedDraft, setSavedDraft] = useState<DraftState | null>(null)
   const [credentialEditStates, setCredentialEditStates] = useState<CredentialEditStates>({})
+  const [step, setStep] = useState(0)
   const [activeTab, setActiveTab] = useState<ChannelProvider>('telegram')
   const [hosts, setHosts] = useState<HostItem[]>([])
   // Which credential keys the channel's Secret actually holds. Undefined until
@@ -283,62 +270,37 @@ export default function EditCommunicationChannelPage() {
           item?.metadata?.namespace
         )
       : null
-  // A relative request_url is invalid to Slack, so warn instead of handing over a manifest that
-  // cannot work. slackWebhookUrlForChannelName falls back to a bare path when the deployment has
-  // no public webhook address.
-  const slackManifest =
-    slackRequestUrl && canGenerateSlackAppManifest(slackRequestUrl)
-      ? slackAppManifest(draft?.slackBotHandle.trim() || DEFAULT_SLACK_APP_NAME, slackRequestUrl)
+
+  /** Both Save and conversation deletion validate before writing a full spec. */
+  function draftValidationError(nextDraft: DraftState): string | null {
+    const spec = buildCommunicationChannelSpec(nextDraft)
+    const teamsAppName = spec.teamsSettings?.appName
+    const nameError = teamsAppName === undefined ? null : teamsAppNameError(teamsAppName)
+    if (nameError) return nameError
+
+    // Legacy email-only/providerless records remain editable through their URL.
+    // Once a record has a supported provider, an edit must not remove its last
+    // one: that would make it unreachable through all three provider tabs.
+    const hasProvider = (value: DraftState) =>
+      hasTelegramConfig(value) || hasSlackConfig(value) || hasTeamsConfig(value)
+    return savedDraft && hasProvider(savedDraft) && !hasProvider(nextDraft)
+      ? 'Keep at least one channel provider configured before saving.'
       : null
-  // A relative endpoint would point the Teams CLI at a host that does not
-  // exist, so a deployment with no public webhook origin falls back to
-  // teamsAppCreatePlaceholderCommand below instead of a command built from
-  // that relative path. This is also the repair path when a channel is
-  // recreated under a new name: retyping the Name field alone is enough to
-  // regenerate this command.
-  const teamsAppCreateCommand =
-    teamsRequestUrl && canGenerateTeamsCommand(teamsRequestUrl)
-      ? buildTeamsAppCreateCommand({
-          botName: draft?.teamsAppName || '',
-          endpoint: teamsRequestUrl,
-        })
-      : null
-  // The minikube case: no public origin to build a real command from. Still
-  // render a runnable-looking command rather than nothing, using the marker
-  // origin LOCAL_TEAMS_ENDPOINT_ORIGIN, because substituting a real origin by
-  // hand for that marker is the documented self-hosted workflow.
-  const teamsAppCreatePlaceholderCommand =
-    teamsRequestUrl && !canGenerateTeamsCommand(teamsRequestUrl)
-      ? buildTeamsAppCreateCommand({
-          botName: draft?.teamsAppName || '',
-          endpoint: teamsPlaceholderEndpoint(teamsRequestUrl),
-        })
-      : null
-  // hasTeamsConfigForRequestUrl is satisfied by CLIENT_ID or TENANT_ID alone,
-  // so teamsAppCreateCommand can render with a blank Name -- which
-  // buildTeamsAppCreateCommand fills with the literal placeholder <bot-name>.
-  // Gate Copy on a usable name the same way the create page does, so that
-  // placeholder is never handed over as if it were runnable.
-  const teamsBotNameError = teamsAppNameError(draft?.teamsAppName || '')
+  }
 
   /**
-   * The single validation boundary for this page: every path that persists a
-   * full spec goes through here, Save and deleteConversation alike. Validating
-   * in handleSave instead let deleteConversation persist a value Save refuses.
-   *
-   * It validates the SPEC, not the draft, because the spec is what is sent: an
-   * empty name is omitted by buildCommunicationChannelSpec rather than written
-   * as an empty string, which is exactly what the server accepts.
+   * Conversation deletion persists a full spec independently of handleSave.
+   * Keep its validation aligned with Save through draftValidationError, so a
+   * conversation action cannot persist a value Save would refuse.
    *
    * Returns false when nothing was persisted, so callers do not navigate away
    * from an unsaved page -- neither on a rejected value nor on a failed PUT.
    */
   async function persistDraft(nextDraft: DraftState, successMessage: string): Promise<boolean> {
     const spec = buildCommunicationChannelSpec(nextDraft)
-    const teamsAppName = spec.teamsSettings?.appName
-    const nameError = teamsAppName === undefined ? null : teamsAppNameError(teamsAppName)
-    if (nameError) {
-      setSaveError(nameError)
+    const validationError = draftValidationError(nextDraft)
+    if (validationError) {
+      setSaveError(validationError)
       return false
     }
     setSaving(true)
@@ -363,12 +325,12 @@ export default function EditCommunicationChannelPage() {
     event.preventDefault()
     if (!draft || saving) return
     const spec = buildCommunicationChannelSpec(draft)
-    const teamsName = spec.teamsSettings?.appName
-    const nameError = teamsName === undefined ? null : teamsAppNameError(teamsName)
     const plan = buildCredentialOperationPlan(credentialEditStates, validCredentialChannelTypes)
-    if (nameError || plan.invalidLabels.length) {
+    const validationError = draftValidationError(draft)
+    if (validationError || plan.invalidLabels.length) {
       setSaveError(
-        nameError || `Credential changes are no longer valid for: ${plan.invalidLabels.join(', ')}.`
+        validationError ||
+          `Credential changes are no longer valid for: ${plan.invalidLabels.join(', ')}.`
       )
       return
     }
@@ -514,61 +476,6 @@ export default function EditCommunicationChannelPage() {
     await persistDraft(nextDraft, 'Conversation deleted.')
   }
 
-  async function copySlackRequestUrl() {
-    if (!slackRequestUrl) return
-    const copied = await copyTextToClipboard(slackRequestUrl)
-    showToast(
-      copied
-        ? 'Slack Request URL copied.'
-        : 'Could not copy to clipboard. Select the URL and copy it manually.',
-      { tone: copied ? 'success' : 'error' }
-    )
-  }
-
-  async function copySlackAppManifest() {
-    if (!slackManifest) return
-    const copied = await copyTextToClipboard(slackManifest)
-    showToast(
-      copied
-        ? 'Slack app manifest copied.'
-        : 'Could not copy to clipboard. Select the manifest and copy it manually.',
-      { tone: copied ? 'success' : 'error' }
-    )
-  }
-
-  async function copyTeamsRequestUrl() {
-    if (!teamsRequestUrl) return
-    const copied = await copyTextToClipboard(teamsRequestUrl)
-    showToast(
-      copied
-        ? 'Teams Request URL copied.'
-        : 'Could not copy to clipboard. Select the URL and copy it manually.',
-      { tone: copied ? 'success' : 'error' }
-    )
-  }
-
-  async function copyTeamsAppCreateCommand() {
-    if (!teamsAppCreateCommand) return
-    const copied = await copyTextToClipboard(teamsAppCreateCommand)
-    showToast(
-      copied
-        ? 'Teams bot command copied.'
-        : 'Could not copy to clipboard. Select the command and copy it manually.',
-      { tone: copied ? 'success' : 'error' }
-    )
-  }
-
-  async function copyTeamsAppCreatePlaceholderCommand() {
-    if (!teamsAppCreatePlaceholderCommand) return
-    const copied = await copyTextToClipboard(teamsAppCreatePlaceholderCommand)
-    showToast(
-      copied
-        ? 'Teams bot command copied.'
-        : 'Could not copy to clipboard. Select the command and copy it manually.',
-      { tone: copied ? 'success' : 'error' }
-    )
-  }
-
   return (
     <AuthGate>
       <DashboardLayout isDetailPage>
@@ -597,498 +504,150 @@ export default function EditCommunicationChannelPage() {
               </div>
             </div>
           ) : item && draft ? (
-            <form className="cu-create-content cu-channel-edit-form" onSubmit={handleSave}>
-              <div className="cu-field">
-                <label htmlFor="ch-host-ref">Agent reference</label>
-                <SelectionDropdown
-                  id="ch-host-ref"
-                  multiple={false}
-                  value={draft.hostRef ? [draft.hostRef] : []}
-                  onChange={next =>
-                    setDraft(current =>
-                      current
-                        ? {
-                            ...current,
-                            accessTeamIds:
-                              current.hostRef === (next[0] || '') ? current.accessTeamIds : [],
-                            accessUserIds:
-                              current.hostRef === (next[0] || '') ? current.accessUserIds : [],
-                            hostRef: next[0] || '',
-                          }
-                        : current
-                    )
-                  }
-                  options={hosts.map(host => ({
-                    value: host.metadata?.name || '',
-                    label: host.metadata?.name || '-',
-                    description: host.metadata?.namespace || 'default',
-                  }))}
-                  placeholder="Select an agent..."
-                  searchPlaceholder="Search agents..."
-                  emptyLabel="No available agents."
-                  disabled={saving}
-                />
-                <span className="cu-field__hint">
-                  Changing the agent clears communication access until you reselect users or teams.
-                </span>
-              </div>
+            <form className="cu-channel-create-panel" onSubmit={handleSave}>
+              <CreateStepFlow
+                ariaLabel="Channel details steps"
+                currentStep={step}
+                onStepChange={setStep}
+                canSelectStep={() => !saving}
+                steps={CHANNEL_STEP_DETAILS}
+                stepLabels={CHANNEL_STEP_LABELS}
+                titleId="edit-channel-title"
+              >
+                <div hidden={step !== 0}>
+                  <CommunicationChannelIdentity
+                    channelName={item.metadata?.name || name}
+                    agentName={draft.hostRef}
+                    onAgentChange={hostRef =>
+                      setDraft(current =>
+                        current
+                          ? {
+                              ...current,
+                              hostRef,
+                              accessTeamIds:
+                                current.hostRef === hostRef ? current.accessTeamIds : [],
+                              accessUserIds:
+                                current.hostRef === hostRef ? current.accessUserIds : [],
+                            }
+                          : current
+                      )
+                    }
+                    agentOptions={hosts.map(host => ({
+                      value: host.metadata?.name || '',
+                      label: host.metadata?.name || '-',
+                    }))}
+                    disabled={saving}
+                  />
+                </div>
+                <div hidden={step !== 1}>
+                  <CommunicationChannelProviderSetup
+                    channelName={item.metadata?.name || name}
+                    activeProvider={activeTab}
+                    draft={draft}
+                    onChange={(next, field) =>
+                      setDraft(current =>
+                        current
+                          ? {
+                              ...current,
+                              ...next,
+                              slackBotHandleFromAnnotation:
+                                field === 'slackBotHandle'
+                                  ? false
+                                  : current.slackBotHandleFromAnnotation,
+                              teamsAppNameFromAnnotation:
+                                field === 'teamsAppName'
+                                  ? false
+                                  : current.teamsAppNameFromAnnotation,
+                            }
+                          : current
+                      )
+                    }
+                    onProviderChange={setActiveTab}
+                    saving={saving}
+                    slackRequestUrlOverride={slackRequestUrl}
+                    teamsRequestUrlOverride={teamsRequestUrl}
+                    showRequestUrls
+                    credentials={
+                      <ChannelCredentialsPanel
+                        ccName={item.metadata?.name || name}
+                        presentation="inline"
+                        visibleChannelTypes={visibleChannelTypes}
+                        storedKeys={storedCredentialKeys}
+                        storedKeysError={credentialKeysError}
+                        onRetryStoredKeys={() => void loadCredentialKeys(name)}
+                        editStates={credentialEditStates}
+                        onEditStateChange={(key, state) =>
+                          setCredentialEditStates(current => ({ ...current, [key]: state }))
+                        }
+                        saving={saving}
+                      />
+                    }
+                  />
 
-              <SegmentedControl<ChannelProvider>
-                ariaLabel="Communication channel providers"
-                value={activeTab}
-                className="cu-segmented-control--flush cu-segmented-control--full"
-                disabled={saving}
-                onChange={setActiveTab}
-                options={COMMUNICATION_CHANNEL_PROVIDER_OPTIONS}
-              />
+                  <section className="cu-channel-provider-panel">
+                    <div className="cu-channel-provider-panel__head">
+                      <div>
+                        <p className="cu-section-title">Confirmed conversations</p>
+                        <p className="cu-muted">
+                          Conversations are connected from Profile UI and can be removed here.
+                        </p>
+                      </div>
+                    </div>
+                    <CommunicationChannelConversationsTable
+                      conversations={activeConversations}
+                      onDelete={deleteConversation}
+                    />
+                  </section>
+                </div>
+                <div hidden={step !== 2}>
+                  <CommunicationChannelAccessSelector
+                    showHeader={false}
+                    agentName={draft.hostRef}
+                    disabled={saving}
+                    inlineDropdowns
+                    selectedTeamIds={draft.accessTeamIds}
+                    selectedUserIds={draft.accessUserIds}
+                    onSelectedTeamIdsChange={accessTeamIds =>
+                      setDraft(current => (current ? { ...current, accessTeamIds } : current))
+                    }
+                    onSelectedUserIdsChange={accessUserIds =>
+                      setDraft(current => (current ? { ...current, accessUserIds } : current))
+                    }
+                  />
+                </div>
 
-              <section className="cu-channel-provider-panel">
-                <div className="cu-channel-provider-panel__head">
-                  <div>
-                    <p className="cu-section-title">
-                      {communicationChannelProviderServiceLabel(activeTab)}
-                    </p>
-                    <p className="cu-muted">
-                      {activeTab === 'slack'
-                        ? 'Slack app credentials are write-only. Rotate regenerated values here.'
-                        : 'Credentials are write-only. Stored values render masked and can be rotated.'}
-                    </p>
+                {saveError ? (
+                  <div className="cu-banner cu-banner--error" role="alert">
+                    {saveError}
                   </div>
-                </div>
-                <div className="cu-toggle-field">
-                  <label className="cu-toggle-row">
-                    <input
-                      type="checkbox"
-                      checked={
-                        activeTab === 'telegram'
-                          ? draft.telegramReplyOnlyWhenMentioned
-                          : activeTab === 'slack'
-                            ? draft.slackReplyOnlyWhenMentioned
-                            : draft.teamsReplyOnlyWhenMentioned
-                      }
-                      disabled={saving}
-                      onChange={event =>
-                        setDraft(current =>
-                          current
-                            ? activeTab === 'telegram'
-                              ? {
-                                  ...current,
-                                  telegramReplyOnlyWhenMentioned: event.target.checked,
-                                }
-                              : activeTab === 'slack'
-                                ? { ...current, slackReplyOnlyWhenMentioned: event.target.checked }
-                                : { ...current, teamsReplyOnlyWhenMentioned: event.target.checked }
-                            : current
-                        )
-                      }
-                    />
-                    <span>
-                      Answer only when the {activeTab === 'slack' ? 'app' : 'bot'} is mentioned
-                    </span>
-                  </label>
-                  {activeTab === 'slack' ? (
-                    // Operators assume a thread is an implicit mention. It is not:
-                    // with "Reply in threads" on, the app answers in a thread and
-                    // then drops every unmentioned follow-up posted there.
-                    <p className="cu-field__hint cu-toggle-row__hint">
-                      Replies inside a thread still require a mention: even in a thread the app
-                      started, a follow-up that does not mention the app is ignored.
-                    </p>
-                  ) : null}
-                </div>
-                {activeTab === 'slack' ? (
-                  <label className="cu-toggle-row">
-                    <input
-                      type="checkbox"
-                      checked={draft.slackReplyInThreads}
-                      disabled={saving}
-                      onChange={event =>
-                        setDraft(current =>
-                          current
-                            ? { ...current, slackReplyInThreads: event.target.checked }
-                            : current
-                        )
-                      }
-                    />
-                    <span>
-                      Reply in threads{' '}
-                      <span
-                        className="cu-help-tooltip"
-                        tabIndex={0}
-                        aria-label="When enabled, app responses are posted in a Slack thread and follow-up messages in that thread continue there. New top-level messages start a new thread."
-                        data-tooltip="When enabled, app responses are posted in a Slack thread and follow-up messages in that thread continue there. New top-level messages start a new thread."
-                      >
-                        ?
-                      </span>
-                    </span>
-                  </label>
                 ) : null}
-                {activeTab === 'telegram' ? (
-                  <div className="cu-field">
-                    <label htmlFor="telegram-bot-handle">
-                      Telegram bot handle{' '}
-                      <span
-                        className="cu-help-tooltip"
-                        tabIndex={0}
-                        aria-label="We use this handle to show users which Telegram bot to message when connecting their account or a group."
-                        data-tooltip="We use this handle to show users which Telegram bot to message when connecting their account or a group."
-                      >
-                        ?
-                      </span>
-                    </label>
-                    <input
-                      id="telegram-bot-handle"
-                      className="cu-input"
-                      value={draft.telegramBotHandle}
-                      onChange={event =>
-                        setDraft(current =>
-                          current ? { ...current, telegramBotHandle: event.target.value } : current
-                        )
-                      }
-                      placeholder="@your_bot"
-                      disabled={saving}
-                      autoComplete="off"
-                    />
-                    <span className="cu-field__hint">
-                      Public bot username, with or without the leading @.
-                    </span>
-                  </div>
-                ) : activeTab === 'slack' ? (
-                  <>
-                    <div className="cu-banner cu-banner--info">
-                      Store the Slack app Signing Secret and Bot User OAuth token here. The Signing
-                      Secret verifies Slack requests; the bot token lets us read and reply through
-                      the Slack Web API. The workspace is detected when a user verifies a Slack
-                      conversation.
-                    </div>
-                    <div className="cu-field">
-                      <label htmlFor="slack-bot-handle">
-                        Slack App Name{' '}
-                        <span
-                          className="cu-help-tooltip"
-                          tabIndex={0}
-                          aria-label="We use this name to show users which Slack App to message"
-                          data-tooltip="We use this name to show users which Slack App to message"
-                        >
-                          ?
-                        </span>
-                      </label>
-                      <input
-                        id="slack-bot-handle"
-                        className="cu-input"
-                        value={draft.slackBotHandle}
-                        onChange={event =>
-                          setDraft(current =>
-                            current
-                              ? {
-                                  ...current,
-                                  slackBotHandle: event.target.value,
-                                  // Typed, so no longer just an inherited label.
-                                  slackBotHandleFromAnnotation: false,
-                                }
-                              : current
-                          )
-                        }
-                        placeholder="Your Slack App"
-                        disabled={saving}
-                        autoComplete="off"
-                      />
-                      <span className="cu-field__hint">
-                        Slack App name shown in Profile UI setup instructions.
-                      </span>
-                    </div>
-                    <div className="cu-field">
-                      <span className="cu-field__label">Slack Request URL</span>
-                      <div className="cu-copy-field">
-                        <div className="cu-readonly-field cu-copy-field__value">
-                          {slackRequestUrl || 'Available once this channel has a Slack App Name'}
-                        </div>
-                        <button
-                          type="button"
-                          className="cu-btn"
-                          onClick={copySlackRequestUrl}
-                          disabled={!slackRequestUrl || saving}
-                        >
-                          Copy
-                        </button>
-                      </div>
-                      <span className="cu-field__hint">
-                        {slackRequestUrl
-                          ? 'Use this URL for Slack Event Subscriptions and Interactivity.'
-                          : 'Enter the Slack App Name above and this channel gets its Request URL and app manifest.'}
-                      </span>
-                    </div>
-                    {slackRequestUrl ? (
-                      slackManifest ? (
-                        <div className="cu-field">
-                          <span className="cu-field__label">Slack App Manifest</span>
-                          <div className="cu-command-block">
-                            <div className="cu-command-block__toolbar">
-                              <span>YAML</span>
-                              <Button
-                                type="button"
-                                variant="secondary"
-                                size="sm"
-                                className="cu-command-block__copy"
-                                onClick={copySlackAppManifest}
-                                disabled={saving}
-                                aria-label="Copy Slack app manifest"
-                              >
-                                <IconCopy width={15} height={15} />
-                                Copy
-                              </Button>
-                            </div>
-                            <pre className="cu-command-block__pre cu-slack-manifest__pre">
-                              <code>{slackManifest}</code>
-                            </pre>
-                          </div>
-                          <span className="cu-field__hint">
-                            Paste this into Slack, either at Create New App → From an app manifest
-                            for a new app, or in an existing app under Settings → App Manifest. It
-                            fills in both Request URLs, on Event Subscriptions and on Interactivity
-                            &amp; Shortcuts. Setting only Event Subscriptions leaves approval
-                            buttons dead with nothing in the logs.
-                          </span>
-                        </div>
-                      ) : (
-                        <div className="cu-banner cu-banner--warning">
-                          No app manifest: this deployment has no public webhook address, so the
-                          Request URL above is a path and Slack cannot reach it. Expose the webhook
-                          proxy publicly and set NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL to
-                          that address, or prefix the path with it by hand in Slack.
-                        </div>
-                      )
-                    ) : null}
-                  </>
-                ) : (
-                  <>
-                    <TeamsSetupPrerequisites />
 
-                    <div className="cu-banner cu-banner--info">
-                      Store the CLIENT_SECRET value here, not the Microsoft secret ID. CLIENT_ID and
-                      TENANT_ID identify the Microsoft Teams bot that receives messages for this
-                      channel.
-                    </div>
-                    <div className="cu-field">
-                      <label htmlFor="teams-app-name">Name</label>
-                      <input
-                        id="teams-app-name"
-                        className="cu-input"
-                        value={draft.teamsAppName}
-                        onChange={event =>
-                          setDraft(current =>
-                            current
-                              ? {
-                                  ...current,
-                                  teamsAppName: event.target.value,
-                                  // Typed, so no longer just an inherited label.
-                                  teamsAppNameFromAnnotation: false,
-                                }
-                              : current
-                          )
-                        }
-                        placeholder="Evenfire Bot"
-                        disabled={saving}
-                        autoComplete="off"
-                      />
-                      <span className="cu-field__hint">
-                        Display name shown in the Teams bot creation output and Profile UI setup
-                        instructions, up to {TEAMS_APP_NAME_MAX_LENGTH} characters.
-                      </span>
-                    </div>
-                    <div className="cu-field">
-                      <label htmlFor="teams-app-id">CLIENT_ID</label>
-                      <input
-                        id="teams-app-id"
-                        className="cu-input"
-                        value={draft.teamsAppId}
-                        onChange={event =>
-                          setDraft(current =>
-                            current ? { ...current, teamsAppId: event.target.value } : current
-                          )
-                        }
-                        placeholder="00000000-0000-0000-0000-000000000000"
-                        disabled={saving}
-                        autoComplete="off"
-                      />
-                      <span className="cu-field__hint">
-                        CLIENT_ID from the generated .env file.
-                      </span>
-                    </div>
-                    <div className="cu-field">
-                      <label htmlFor="teams-tenant-id">TENANT_ID</label>
-                      <input
-                        id="teams-tenant-id"
-                        className="cu-input"
-                        value={draft.teamsTenantId}
-                        onChange={event =>
-                          setDraft(current =>
-                            current ? { ...current, teamsTenantId: event.target.value } : current
-                          )
-                        }
-                        placeholder="00000000-0000-0000-0000-000000000000"
-                        disabled={saving}
-                        autoComplete="off"
-                      />
-                      <span className="cu-field__hint">
-                        TENANT_ID from the generated .env file.
-                      </span>
-                    </div>
-                    <div className="cu-field">
-                      <span className="cu-field__label">Teams Request URL</span>
-                      <div className="cu-copy-field">
-                        <div className="cu-readonly-field cu-copy-field__value">
-                          {teamsRequestUrl || 'Unavailable'}
-                        </div>
-                        <button
-                          type="button"
-                          className="cu-btn"
-                          onClick={copyTeamsRequestUrl}
-                          disabled={!teamsRequestUrl || saving}
-                        >
-                          Copy
-                        </button>
-                      </div>
-                      <span className="cu-field__hint">
-                        {!teamsRequestUrl
-                          ? 'Enter the Name above and this channel gets its Teams Request URL.'
-                          : canGenerateTeamsCommand(teamsRequestUrl)
-                            ? 'Use this URL as the Messaging endpoint for the Teams bot app.'
-                            : 'This is a path, not a full URL. Prefix it with your public webhook origin before using it as the Messaging endpoint.'}
-                      </span>
-                    </div>
-                    {teamsRequestUrl ? (
-                      teamsAppCreateCommand ? (
-                        <div className="cu-field">
-                          <span className="cu-field__label">Create the Teams bot</span>
-                          <div className="cu-command-block">
-                            <div className="cu-command-block__toolbar">
-                              <span>Bash</span>
-                              <Button
-                                type="button"
-                                variant="secondary"
-                                size="sm"
-                                className="cu-command-block__copy"
-                                onClick={copyTeamsAppCreateCommand}
-                                disabled={saving || Boolean(teamsBotNameError)}
-                                aria-label="Copy Teams bot create command"
-                              >
-                                <IconCopy width={15} height={15} />
-                                Copy
-                              </Button>
-                            </div>
-                            <pre className="cu-command-block__pre">
-                              <code>{teamsAppCreateCommand}</code>
-                            </pre>
-                          </div>
-                          <span className="cu-field__hint">
-                            Run this to create or recreate the Teams bot, then paste the generated
-                            CLIENT_ID, TENANT_ID, and CLIENT_SECRET above. This is also the repair
-                            path when this channel was recreated under a new name.
-                          </span>
-                        </div>
-                      ) : (
-                        <div className="cu-field">
-                          <div className="cu-banner cu-banner--warning">
-                            This deployment has no public webhook origin. The command below uses the
-                            placeholder origin <code>{LOCAL_TEAMS_ENDPOINT_ORIGIN}</code>, which
-                            must be replaced before running it, or set{' '}
-                            <code>NEXT_PUBLIC_WORKFLOW_APPROVAL_READER_BASE_URL</code> to have it
-                            filled in automatically.
-                          </div>
-                          {teamsAppCreatePlaceholderCommand && (
-                            <div className="cu-command-block">
-                              <div className="cu-command-block__toolbar">
-                                <span>Bash</span>
-                                <Button
-                                  type="button"
-                                  variant="secondary"
-                                  size="sm"
-                                  className="cu-command-block__copy"
-                                  onClick={copyTeamsAppCreatePlaceholderCommand}
-                                  disabled={saving || Boolean(teamsBotNameError)}
-                                  aria-label="Copy Teams bot create command"
-                                >
-                                  <IconCopy width={15} height={15} />
-                                  Copy
-                                </Button>
-                              </div>
-                              <pre className="cu-command-block__pre">
-                                <code>{teamsAppCreatePlaceholderCommand}</code>
-                              </pre>
-                            </div>
-                          )}
-                        </div>
-                      )
-                    ) : null}
-                  </>
-                )}
-                <ChannelCredentialsPanel
-                  ccName={item.metadata?.name || name}
-                  visibleChannelTypes={visibleChannelTypes}
-                  storedKeys={storedCredentialKeys}
-                  storedKeysError={credentialKeysError}
-                  onRetryStoredKeys={() => void loadCredentialKeys(name)}
-                  editStates={credentialEditStates}
-                  onEditStateChange={(key, state) =>
-                    setCredentialEditStates(current => ({ ...current, [key]: state }))
-                  }
-                  saving={saving}
-                />
-              </section>
-
-              <CommunicationChannelAccessSelector
-                agentName={draft.hostRef}
-                disabled={saving}
-                inlineDropdowns
-                selectedTeamIds={draft.accessTeamIds}
-                selectedUserIds={draft.accessUserIds}
-                onSelectedTeamIdsChange={accessTeamIds =>
-                  setDraft(current => (current ? { ...current, accessTeamIds } : current))
-                }
-                onSelectedUserIdsChange={accessUserIds =>
-                  setDraft(current => (current ? { ...current, accessUserIds } : current))
-                }
-              />
-
-              <section className="cu-channel-provider-panel">
-                <div className="cu-channel-provider-panel__head">
-                  <div>
-                    <p className="cu-section-title">Confirmed conversations</p>
-                    <p className="cu-muted">
-                      Conversations are connected from Profile UI and can be removed here.
-                    </p>
-                  </div>
+                <div className="cu-create-actions">
+                  <button
+                    type="button"
+                    className="cu-btn cu-btn--ghost"
+                    onClick={backToChannels}
+                    disabled={saving}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="cu-btn cu-btn--secondary"
+                    onClick={() => setStep(step < 2 ? step + 1 : step - 1)}
+                    disabled={saving}
+                  >
+                    {step < 2 ? 'Continue' : 'Back'}
+                  </button>
+                  <button
+                    type="submit"
+                    className="cu-btn cu-btn--primary"
+                    disabled={saving || !formDirty}
+                  >
+                    {saving ? 'Saving...' : 'Save changes'}
+                  </button>
                 </div>
-                <CommunicationChannelConversationsTable
-                  conversations={activeConversations}
-                  onDelete={deleteConversation}
-                />
-              </section>
-
-              {saveError ? (
-                <div className="cu-banner cu-banner--error" role="alert">
-                  {saveError}
-                </div>
-              ) : null}
-
-              <div className="cu-create-actions">
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--ghost"
-                  onClick={backToChannels}
-                  disabled={saving}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="cu-btn cu-btn--primary"
-                  disabled={saving || !formDirty}
-                >
-                  {saving ? 'Saving...' : 'Save changes'}
-                </button>
-              </div>
+              </CreateStepFlow>
             </form>
           ) : null}
         </CreateFlowPanel>

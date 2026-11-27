@@ -663,15 +663,16 @@ export class RpcProxyClient {
     rpcAccessToken: string,
     hostRef: string,
     payload: HostMessageRequest,
-    options?: { async?: boolean }
+    options: { async?: boolean; idempotencyKey: string }
   ): Promise<HostMessageResponse> {
-    const query = options?.async ? '?async=true' : ''
+    const query = options.async ? '?async=true' : ''
     return requestJson<HostMessageResponse>(
       'POST',
       this.url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/messages${query}`),
       {
         token: rpcAccessToken,
         body: payload,
+        headers: { 'Idempotency-Key': options.idempotencyKey },
       }
     )
   }

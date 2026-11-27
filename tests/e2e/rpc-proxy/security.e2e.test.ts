@@ -77,6 +77,15 @@ describe('rpc-proxy e2e security suite', () => {
   let upstreamMode: UpstreamMode = 'ok'
   let initialized = false
   let mcpSessionId = 'sess-e2e-1'
+  // The edge assertion the control-api stub issues with every Host resolve.
+  // rpc-proxy only requires a non-empty string here: no request in this suite
+  // reaches a wake-and-hold retry (the 120 ms first-POST timeout and a Host 500
+  // are not wake-eligible, and no token has host:wake:write), so rpc-proxy
+  // never decodes it.
+  const E2E_EDGE_ASSERTION = 'e2e-edge-assertion-fixture'
+  // x-clerum-edge-assertion of each request the Host stub received on
+  // /host/v1/runtime/messages, in every upstream mode.
+  const hostMessageAssertions: Array<string | undefined> = []
 
   const allowedServersByUser = new Map<string, ServerEntry[]>()
   const allowedHostsByUser = new Map<string, HostEntry[]>()
@@ -135,6 +144,7 @@ describe('rpc-proxy e2e security suite', () => {
             userId,
             hostRef: host.hostRef,
             url: host.url,
+            edgeAssertion: E2E_EDGE_ASSERTION,
           })
           return
         }
@@ -155,6 +165,8 @@ describe('rpc-proxy e2e security suite', () => {
           return
         }
         if (req.url === '/host/v1/runtime/messages') {
+          const assertion = req.headers['x-clerum-edge-assertion']
+          hostMessageAssertions.push(typeof assertion === 'string' ? assertion : undefined)
           if (upstreamMode === 'hostTimeout' || upstreamMode === 'timeout') {
             return
           }
@@ -619,6 +631,7 @@ describe('rpc-proxy e2e security suite', () => {
   it('forwards host message to mcp-host with valid token', async () => {
     upstreamMode = 'ok'
     const token = signRpcJwt({ scopes: ['host:message:invoke'], hostRefs: ['agent2'] })
+    const hostRequestsBefore = hostMessageAssertions.length
     const res = await requestJson(
       rpcProxyBaseUrl,
       '/api/v1/rpc/hosts/agent2/messages',
@@ -633,6 +646,8 @@ describe('rpc-proxy e2e security suite', () => {
       token
     )
     expect(res.status).toBe(200)
+    // The Host received exactly this request, with the assertion control-api issued.
+    expect(hostMessageAssertions.slice(hostRequestsBefore)).toEqual([E2E_EDGE_ASSERTION])
     expect(res.body?.accepted).toBe(true)
     expect(res.body?.hostRef).toBe('agent2')
   })
@@ -640,6 +655,7 @@ describe('rpc-proxy e2e security suite', () => {
   it('maps mcp-host upstream errors safely and does not leak token', async () => {
     upstreamMode = 'hostStatus500'
     const token = signRpcJwt({ scopes: ['host:message:invoke'], hostRefs: ['agent2'] })
+    const hostRequestsBefore = hostMessageAssertions.length
     const res = await requestJson(
       rpcProxyBaseUrl,
       '/api/v1/rpc/hosts/agent2/messages',
@@ -654,6 +670,8 @@ describe('rpc-proxy e2e security suite', () => {
       token
     )
     expect(res.status).toBe(502)
+    // Witness: the 502 comes from the Host's 500, not from a refused resolve.
+    expect(hostMessageAssertions.slice(hostRequestsBefore)).toEqual([E2E_EDGE_ASSERTION])
     expect(JSON.stringify(res.body)).not.toContain(token)
     upstreamMode = 'ok'
   })
@@ -661,6 +679,7 @@ describe('rpc-proxy e2e security suite', () => {
   it('maps mcp-host timeout to 504 gateway timeout', async () => {
     upstreamMode = 'hostTimeout'
     const token = signRpcJwt({ scopes: ['host:message:invoke'], hostRefs: ['agent2'] })
+    const hostRequestsBefore = hostMessageAssertions.length
     const res = await requestJson(
       rpcProxyBaseUrl,
       '/api/v1/rpc/hosts/agent2/messages',
@@ -675,6 +694,8 @@ describe('rpc-proxy e2e security suite', () => {
       token
     )
     expect(res.status).toBe(504)
+    // Witness: the 504 comes from the Host not answering, not from a refused resolve.
+    expect(hostMessageAssertions.slice(hostRequestsBefore)).toEqual([E2E_EDGE_ASSERTION])
     upstreamMode = 'ok'
   })
 })

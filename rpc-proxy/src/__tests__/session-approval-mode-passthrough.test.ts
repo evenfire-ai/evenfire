@@ -10,6 +10,7 @@ import { createRpcRouter } from '../routes/rpc.js'
 const authTokenMock = vi.hoisted(() => ({ verifyRpcToken: vi.fn() }))
 const serviceMock = vi.hoisted(() => ({
   resolveHostConnectionForUser: vi.fn(),
+  refreshV1HostConnection: vi.fn(),
 }))
 const controlApiMock = vi.hoisted(() => ({
   requestHostWakeFromControlApi: vi.fn(),
@@ -111,6 +112,8 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
   beforeEach(() => {
     authTokenMock.verifyRpcToken.mockReturnValue(VALID_CLAIMS)
     serviceMock.resolveHostConnectionForUser.mockResolvedValue(HOST_CONNECTION)
+    serviceMock.refreshV1HostConnection.mockReset()
+    serviceMock.refreshV1HostConnection.mockResolvedValue(null)
     controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({
       kind: 'active',
       wakeGeneration: null,
@@ -263,8 +266,11 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
     expect(serviceMock.resolveHostConnectionForUser).not.toHaveBeenCalled()
   })
 
-  it('returns the rename 403 when the host cannot be resolved, without calling it', async () => {
-    serviceMock.resolveHostConnectionForUser.mockResolvedValue(null)
+  it('returns the rename 403 when the host access is denied, without calling it', async () => {
+    serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+      denied: true,
+      code: 'host_access_denied',
+    })
     const fetchMock = vi.fn()
     globalThis.fetch = fetchMock as unknown as typeof fetch
 
@@ -274,7 +280,10 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
       .send({ mode: 'auto' })
       .expect(403)
 
-    expect(res.body).toEqual({ error: 'Forbidden: user cannot access this host' })
+    expect(res.body).toEqual({
+      error: 'Forbidden: user cannot access this host',
+      code: 'host_access_denied',
+    })
     expect(serviceMock.resolveHostConnectionForUser).toHaveBeenCalledTimes(1)
     expect(fetchMock).not.toHaveBeenCalled()
   })
@@ -458,6 +467,73 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/approval-mode', () =
         'x-clerum-edge-user-id': VALID_CLAIMS.sub,
       })
     }
+  })
+
+  it('re-resolves the edge assertion before the wake retry, as approve does', async () => {
+    authTokenMock.verifyRpcToken.mockReturnValue({
+      ...VALID_CLAIMS,
+      scopes: ['host:approval:write', 'host:wake:write'],
+    })
+    // A connection of its own: the refresh rewrites its headers in place.
+    const host = {
+      ...HOST_CONNECTION,
+      headers: { ...HOST_CONNECTION.headers, 'x-clerum-edge-assertion': 'edge-assertion-first' },
+    }
+    serviceMock.resolveHostConnectionForUser.mockResolvedValueOnce(host)
+    serviceMock.refreshV1HostConnection.mockImplementationOnce(
+      async (held: { headers: Record<string, string> }) => {
+        held.headers['x-clerum-edge-assertion'] = 'edge-assertion-refreshed'
+        return null
+      }
+    )
+    const sentAssertions: string[] = []
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      sentAssertions.push((init.headers as Record<string, string>)['x-clerum-edge-assertion']!)
+      if (sentAssertions.length === 1) throw new TypeError('fetch failed')
+      return jsonResponse(200, { approvalMode: 'auto' })
+    })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    await request(makeApp())
+      .patch(MODE_PATH)
+      .set('authorization', 'Bearer user-token')
+      .send({ mode: 'auto' })
+      .expect(200)
+
+    expect(serviceMock.refreshV1HostConnection).toHaveBeenCalledTimes(1)
+    expect(serviceMock.refreshV1HostConnection).toHaveBeenCalledWith(
+      host,
+      VALID_CLAIMS.sub,
+      'chatllm',
+      'user-token'
+    )
+    expect(sentAssertions).toEqual(['edge-assertion-first', 'edge-assertion-refreshed'])
+  })
+
+  it('answers a denial at the retry re-resolve as the first resolve does, without a retry', async () => {
+    authTokenMock.verifyRpcToken.mockReturnValue({
+      ...VALID_CLAIMS,
+      scopes: ['host:approval:write', 'host:wake:write'],
+    })
+    serviceMock.refreshV1HostConnection.mockResolvedValueOnce({
+      denied: true,
+      code: 'host_access_revoked',
+    })
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const res = await request(makeApp())
+      .patch(MODE_PATH)
+      .set('authorization', 'Bearer user-token')
+      .send({ mode: 'auto' })
+      .expect(403)
+
+    expect(res.body).toEqual({
+      error: 'Forbidden: user cannot access this host',
+      code: 'host_access_revoked',
+    })
+    expect(serviceMock.refreshV1HostConnection).toHaveBeenCalledTimes(1)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('sends the first attempt without a client-side deadline', async () => {

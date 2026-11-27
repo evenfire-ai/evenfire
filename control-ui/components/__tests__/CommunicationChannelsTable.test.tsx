@@ -1,6 +1,9 @@
 import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { parse } from 'yaml'
 import type { CommunicationChannelItem } from '../../lib/communicationChannels'
 import { CommunicationChannelsTable } from '../CommunicationChannelsTable'
 import { ToastProvider } from '../Toast'
@@ -58,7 +61,7 @@ describe('CommunicationChannelsTable', () => {
     expect(screen.getAllByRole('menuitem')[0]).toHaveTextContent('View details')
   })
 
-  it('shows configured provider types in one column', () => {
+  it('shows channel names and agents without a redundant provider column', () => {
     renderTable({
       items: [
         {
@@ -73,11 +76,10 @@ describe('CommunicationChannelsTable', () => {
       ],
     })
 
-    expect(screen.getByRole('columnheader', { name: 'Type' })).toBeInTheDocument()
-    expect(
-      screen.getByRole('cell', { name: 'Telegram, Slack, Microsoft Teams' })
-    ).toBeInTheDocument()
-    for (const removedHeading of ['Telegram', 'Slack', 'Teams']) {
+    expect(screen.getByRole('cell', { name: 'multi-provider-channel' })).toBeInTheDocument()
+    expect(screen.getByRole('cell', { name: 'agent-a' })).toBeInTheDocument()
+    expect(screen.getAllByRole('columnheader')).toHaveLength(3)
+    for (const removedHeading of ['Type', 'Telegram', 'Slack', 'Teams']) {
       expect(screen.queryByRole('columnheader', { name: removedHeading })).not.toBeInTheDocument()
     }
   })
@@ -305,5 +307,114 @@ describe('CommunicationChannelsTable — row actions kebab', () => {
     const telegramCopy = screen.getByRole('menuitem', { name: 'Copy config into Telegram' })
     expect(slackCopy).toBeDisabled()
     expect(telegramCopy).toBeDisabled()
+  })
+})
+
+describe('provider channel tabs', () => {
+  it.each(['telegram', 'slack', 'teams'] as const)(
+    'intentionally hides email-only and providerless records in the %s tab',
+    provider => {
+      const emailChannel = parse(
+        readFileSync(
+          resolve(
+            __dirname,
+            '../../../deploy/overlays/minikube/instances/communicationchannel.yaml'
+          ),
+          'utf8'
+        )
+      ) as CommunicationChannelItem
+      // Copied verbatim from the producer-owned fixture in
+      // control-api/test/routes.adminCommunicationChannelCredentials.test.ts:
+      // "B4: POST CC with NO provider fields (hostRef only)" (head 9df4c4174).
+      // That route test proves the API accepts this legacy providerless record.
+      const providerlessChannel: CommunicationChannelItem = JSON.parse(
+        readFileSync(resolve(__dirname, 'fixtures/communicationChannel.providerless.json'), 'utf8')
+      )
+      const supportedChannel: CommunicationChannelItem = {
+        metadata: { name: 'fixture-supported', namespace: 'channels' },
+        spec: { hostRef: 'agent-a', [provider]: [{ channelId: 'fixture-conversation' }] },
+      }
+      render(
+        <ToastProvider>
+          <CommunicationChannelsTable
+            items={[emailChannel, providerlessChannel, supportedChannel]}
+            provider={provider}
+            onChanged={vi.fn()}
+          />
+        </ToastProvider>
+      )
+
+      expect(screen.getByText('Communication channels (1)')).toBeVisible()
+      expect(screen.getByRole('cell', { name: 'fixture-supported' })).toBeVisible()
+      expect(
+        screen.getByRole('button', { name: 'Actions for channel fixture-supported' })
+      ).toBeEnabled()
+      for (const hidden of [emailChannel, providerlessChannel]) {
+        expect(screen.queryByRole('cell', { name: hidden.metadata!.name })).not.toBeInTheDocument()
+        expect(
+          screen.queryByRole('button', { name: `Actions for channel ${hidden.metadata!.name}` })
+        ).not.toBeInTheDocument()
+      }
+    }
+  )
+
+  it('separates provider references, preserves shared channels, and scopes search', () => {
+    const items: CommunicationChannelItem[] = [
+      {
+        metadata: { name: 'telegram-only' },
+        spec: { telegramSettings: { botHandle: '@fixture_bot' } },
+      },
+      {
+        metadata: { name: 'slack-only' },
+        spec: { slackSettings: { workspaceId: 'fixture-workspace' } },
+      },
+      { metadata: { name: 'teams-only' }, spec: { teamsSettings: { appId: 'fixture-app' } } },
+      {
+        metadata: { name: 'shared' },
+        spec: {
+          telegram: [{ channelId: 'fixture-chat' }],
+          slack: [{ channelId: 'fixture-slack' }],
+          teams: [{ channelId: 'fixture-teams' }],
+        },
+      },
+    ]
+    const view = (provider: 'telegram' | 'slack' | 'teams') => (
+      <ToastProvider>
+        <CommunicationChannelsTable items={items} provider={provider} onChanged={vi.fn()} />
+      </ToastProvider>
+    )
+    const { rerender } = render(view('telegram'))
+    expect(screen.getAllByRole('tab')).toHaveLength(3)
+    expect(screen.getByRole('tab', { name: 'Telegram' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tab', { name: 'Slack' })).toHaveAttribute(
+      'href',
+      '/external-channels/providers/slack'
+    )
+    expect(screen.getByText('telegram-only')).toBeInTheDocument()
+    expect(screen.getByText('shared')).toBeInTheDocument()
+    expect(screen.queryByText('slack-only')).not.toBeInTheDocument()
+    expect(screen.queryByText('teams-only')).not.toBeInTheDocument()
+
+    rerender(view('slack'))
+    expect(screen.getByRole('tab', { name: 'Slack' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByText('slack-only')).toBeInTheDocument()
+    expect(screen.getByText('shared')).toBeInTheDocument()
+    expect(screen.queryByText('telegram-only')).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search communication channels' }), {
+      target: { value: 'telegram-only' },
+    })
+    expect(screen.getByText('No channels match this search.')).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search communication channels' }), {
+      target: { value: '' },
+    })
+    rerender(view('teams'))
+    expect(screen.getByRole('tab', { name: 'Microsoft Teams' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    )
+    expect(screen.getByText('teams-only')).toBeInTheDocument()
+    expect(screen.getByText('shared')).toBeInTheDocument()
+    expect(screen.queryByText('slack-only')).not.toBeInTheDocument()
   })
 })

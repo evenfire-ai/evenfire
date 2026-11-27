@@ -71,7 +71,17 @@ vi.mock('../src/middleware/rpcAccessAuth.js', async importOriginal => {
   type StubReq = { params: Record<string, string>; rpcAuth?: Record<string, unknown> }
   const stubAuth = (req: StubReq, next: () => void) => {
     if (!authState.omitClaims) {
+      // The verified-claims shape `verifyRpcAccessToken` returns, so the route can sign
+      // its Host edge assertion from them.
+      const nowSeconds = Math.floor(Date.now() / 1000)
       req.rpcAuth = {
+        typ: 'user',
+        accessScope: 'user',
+        teamId: null,
+        scopes: ['host:message:invoke'],
+        jti: 'stub-rpc-token',
+        iat: nowSeconds,
+        exp: nowSeconds + 300,
         ...req.rpcAuth,
         sub: req.params.userId,
         hostRefs: [req.params.hostRef],
@@ -203,11 +213,14 @@ describe('POST /rpc/access/users/:userId/mcp-hosts/:hostRef — atomic access an
       .post(`/rpc/access/users/${userId}/mcp-hosts/host-a`)
       .send(DIRECT_BINDING_BODY)
       .expect(200)
-      .expect({
-        userId,
-        hostRef: 'host-a',
-        url: 'http://host-a.mcp-host.svc.cluster.local:8080',
-        bindingStatus: 'recorded',
+      .expect(({ body }) => {
+        expect(body).toEqual({
+          userId,
+          hostRef: 'host-a',
+          url: 'http://host-a.mcp-host.svc.cluster.local:8080',
+          bindingStatus: 'recorded',
+          edgeAssertion: expect.any(String),
+        })
       })
 
     expect(bindingService.bind).toHaveBeenCalledWith({
@@ -418,6 +431,7 @@ describe('removed Host sub-paths are not served', () => {
       userId,
       hostRef,
       url: `http://${hostRef}.${config.hostsNamespace}.svc.cluster.local:8080`,
+      edgeAssertion: expect.any(String),
     })
     expect(svc.getUserAgents).toHaveBeenCalledOnce()
   })
@@ -643,6 +657,7 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — error propagation
       userId: 'u',
       hostRef: 'product',
       url: 'http://product.mcp-host.svc.cluster.local:8080',
+      edgeAssertion: expect.any(String),
     })
     expect(listResource).toHaveBeenCalledTimes(2)
   })

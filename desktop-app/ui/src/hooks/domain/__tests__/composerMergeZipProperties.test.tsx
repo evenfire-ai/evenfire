@@ -11,17 +11,51 @@
  * starts from a VALID composer state, so the invariants are provable against
  * states production can actually hold.
  */
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
-import { FILE_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
+import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
+import {
+  FILE_REFERENCE_MAX_COUNT,
+  LOCATION_REFERENCE_MAX_COUNT,
+} from '@clerum/gfs-interaction-policy'
 import { COMPOSER_MAX_ATTACHMENTS } from '@constants/attachments'
 import { GFS_ZIP_MAX_SEGMENT_NAME_BYTES, sanitizeZipSegment } from '@lib/gfsFolderZip'
 import type { ComposerImageAttachment, ComposerReferenceAttachment } from '@/uiTypes'
 import { ZipEntryNameAllocator, entryNameFitsZipFields } from '../../../../../src/gfs/zipEntryName'
 import {
+  fileView,
+  folderView,
+  pickedReferences,
+  resentReference,
+  suggestedFolderCandidate,
+} from '../../__tests__/__fixtures__/tabReferenceSuggestionFixtures'
+import {
   mergeComposerImageAttachments,
   mergeComposerReferenceAttachments,
 } from '../useComposerAttachments'
+
+const hookMock = vi.hoisted(() => ({ useGfsBrowserController: vi.fn() }))
+vi.mock('@hooks/domain/useGfsBrowserController', () => hookMock)
+
+// Global Files references as the picker attaches them, and folders as the
+// suggestion prefetch builds them and as a resend rebuilds one of them (same
+// folder, another id). Drawn from these pools, so every generated
+// file or folder is one a producer can emit.
+let globalFilePool: ComposerReferenceAttachment[] = []
+let globalFolderPool: ComposerReferenceAttachment[] = []
+
+beforeAll(async () => {
+  const views = await Promise.all(Array.from({ length: 12 }, (_, index) => fileView(100 + index)))
+  globalFilePool = [
+    ...(await pickedReferences(hookMock.useGfsBrowserController, views.slice(0, 6))),
+    ...(await pickedReferences(hookMock.useGfsBrowserController, views.slice(6))),
+  ]
+  // One at a time: the fixture swaps the bridge while its hook resolves.
+  for (const index of [1, 2, 3]) {
+    globalFolderPool.push(await suggestedFolderCandidate(await folderView(100 + index)))
+  }
+  globalFolderPool.push(resentReference(globalFolderPool[0]!))
+})
 
 /**
  * Tens of thousands of cases per property. The properties are small (arrays
@@ -139,7 +173,7 @@ function imageOutputKey(image: ComposerImageAttachment): string {
   return JSON.stringify([image.id, imageIdentityKey(image)])
 }
 
-const referenceArbitrary = fc
+const pluginReferenceArbitrary = fc
   .record({
     id: fc.string({ minLength: 1, maxLength: 12 }),
     label: fc.string({ minLength: 0, maxLength: 12 }),
@@ -150,6 +184,21 @@ const referenceArbitrary = fc
     namespace: 'ns',
     name: record.id,
   }))
+
+const globalFileArbitrary = fc.constant(null).chain(() => fc.constantFrom(...globalFilePool))
+const globalFolderArbitrary = fc.constant(null).chain(() => fc.constantFrom(...globalFolderPool))
+
+const referenceArbitrary: fc.Arbitrary<ComposerReferenceAttachment> = fc.oneof(
+  pluginReferenceArbitrary,
+  globalFileArbitrary,
+  globalFolderArbitrary
+)
+
+const isFolder = (reference: ComposerReferenceAttachment) => reference.type === 'global_folder'
+const folderCount = (references: ComposerReferenceAttachment[]) =>
+  references.filter(isFolder).length
+const nonFolderCount = (references: ComposerReferenceAttachment[]) =>
+  references.length - folderCount(references)
 
 // R1-M6 (round 2): starting states must be VALID composer states. A generator
 // that can produce `existing` above the cap tests states production can never
@@ -178,13 +227,27 @@ const imageMergeInputsWithFileOccupancyArbitrary = fc
       }))
   )
 
+// A valid composer holds, per kind, no more than its cap: up to ten
+// non-folder references and up to one folder, at any position.
 const heldReferencesArbitrary = fc
-  .uniqueArray(referenceArbitrary, {
-    minLength: 0,
-    maxLength: FILE_REFERENCE_MAX_COUNT,
-    selector: item => item.id,
+  .tuple(
+    fc.uniqueArray(fc.oneof(pluginReferenceArbitrary, globalFileArbitrary), {
+      minLength: 0,
+      maxLength: FILE_REFERENCE_MAX_COUNT,
+      selector: item => item.id,
+    }),
+    fc.uniqueArray(globalFolderArbitrary, {
+      minLength: 0,
+      maxLength: LOCATION_REFERENCE_MAX_COUNT,
+      selector: item => item.id,
+    }),
+    fc.nat()
+  )
+  .map(([nonFolders, folders, at]) => {
+    const items: ComposerReferenceAttachment[] = [...nonFolders]
+    items.splice(at % (items.length + 1), 0, ...folders)
+    return items
   })
-  .map(items => items as ComposerReferenceAttachment[])
 
 describe('composer merge invariants (R1-M6)', () => {
   it('counts a cap-time duplicate as a duplicate, not a drop (R2-L1)', () => {
@@ -402,21 +465,46 @@ describe('composer merge invariants (R1-M6)', () => {
     )
   })
 
-  it('reference merge: file cap, count conservation, and id uniqueness', () => {
+  it('reference merge: a cap per kind, count conservation, and id uniqueness', () => {
     fc.assert(
       fc.property(
         heldReferencesArbitrary,
         fc.array(referenceArbitrary, { maxLength: 25 }),
         (existing, incoming) => {
-          const outcome = mergeComposerReferenceAttachments(
-            existing,
-            incoming as ComposerReferenceAttachment[]
-          )
-          expect(existing.length).toBeLessThanOrEqual(FILE_REFERENCE_MAX_COUNT)
-          expect(outcome.next.length).toBeLessThanOrEqual(FILE_REFERENCE_MAX_COUNT)
+          expect(folderCount(existing)).toBeLessThanOrEqual(LOCATION_REFERENCE_MAX_COUNT)
+          expect(nonFolderCount(existing)).toBeLessThanOrEqual(FILE_REFERENCE_MAX_COUNT)
+          const outcome = mergeComposerReferenceAttachments(existing, incoming)
+          expect(folderCount(outcome.next)).toBeLessThanOrEqual(LOCATION_REFERENCE_MAX_COUNT)
+          expect(nonFolderCount(outcome.next)).toBeLessThanOrEqual(FILE_REFERENCE_MAX_COUNT)
           expect(outcome.kept + outcome.duplicates + outcome.dropped).toBe(incoming.length)
+          // Folder drops are a part of the drops, and only folders count there.
+          expect(outcome.droppedFolders).toBeGreaterThanOrEqual(0)
+          expect(outcome.droppedFolders).toBeLessThanOrEqual(outcome.dropped)
+          expect(outcome.droppedFolders).toBeLessThanOrEqual(folderCount(incoming))
+          // A kind loses an item only once its own cap is full: a folder never
+          // takes a file's slot, nor a file a folder's.
+          if (outcome.dropped - outcome.droppedFolders > 0) {
+            expect(nonFolderCount(outcome.next)).toBe(FILE_REFERENCE_MAX_COUNT)
+          }
+          if (outcome.droppedFolders > 0) {
+            expect(folderCount(outcome.next)).toBe(LOCATION_REFERENCE_MAX_COUNT)
+          }
           const ids = new Set(outcome.next.map(item => item.id))
           expect(ids.size).toBe(outcome.next.length)
+          // One folder is one place, whatever id it came back under.
+          const folderUris = outcome.next
+            .filter(item => item.type === 'global_folder')
+            .map(item => normalizeGfsResourceUri(item.gfsUri))
+          expect(new Set(folderUris).size).toBe(folderUris.length)
+          // A folder already in the composer under another id was not lost:
+          // when every incoming folder's place is held, no folder was dropped.
+          const heldUris = new Set(folderUris)
+          const incomingFolderUris = incoming
+            .filter(item => item.type === 'global_folder')
+            .map(item => normalizeGfsResourceUri(item.gfsUri))
+          if (incomingFolderUris.every(uri => heldUris.has(uri))) {
+            expect(outcome.droppedFolders).toBe(0)
+          }
           // Held references are never dropped (dedupe runs first).
           expect(outcome.next.slice(0, existing.length)).toEqual(existing)
         }
@@ -431,21 +519,26 @@ describe('composer merge invariants (R1-M6)', () => {
         heldReferencesArbitrary,
         fc.array(referenceArbitrary, { maxLength: 10 }),
         (existing, incoming) => {
-          const first = mergeComposerReferenceAttachments(
-            existing,
-            incoming as ComposerReferenceAttachment[]
-          )
-          const second = mergeComposerReferenceAttachments(
-            first.next,
-            incoming as ComposerReferenceAttachment[]
-          )
+          const first = mergeComposerReferenceAttachments(existing, incoming)
+          const second = mergeComposerReferenceAttachments(first.next, incoming)
           expect(second.kept).toBe(0)
           expect(second.next).toEqual(first.next)
           expect(second.duplicates + second.dropped).toBe(incoming.length)
+          expect(second.droppedFolders).toBeLessThanOrEqual(second.dropped)
         }
       ),
       { numRuns: PROPERTY_RUNS }
     )
+  })
+
+  it('the reference arbitraries reach folders in both the held set and the restore', () => {
+    const samples = fc.sample(fc.tuple(heldReferencesArbitrary, fc.array(referenceArbitrary)), 500)
+    expect(
+      samples.some(([existing, incoming]) => folderCount(existing) > 0 && folderCount(incoming) > 0)
+    ).toBe(true)
+    expect(
+      samples.some(([existing]) => nonFolderCount(existing) === FILE_REFERENCE_MAX_COUNT)
+    ).toBe(true)
   })
 
   it('image merge: a duplicate arriving AFTER the cap is reached is a duplicate (R4-L1)', () => {

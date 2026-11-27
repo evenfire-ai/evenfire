@@ -13,10 +13,10 @@ KUBECTL_BIN="${KUBECTL_BIN:-kubectl}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 DEADLINE_RUNNER="${RPC_PROXY_EDGE_GATE_DEADLINE_RUNNER:-${SCRIPT_DIR}/run-with-deadline.mjs}"
 PROTOCOL_LABEL='clerum.io/rpc-proxy-edge-protocol'
-STRICT_PROTOCOL='dedicated-header-v1'
+STRICT_PROTOCOL='signed-assertion-v1'
 
 usage() {
-  echo "usage: $0 {wait-proxy|wait-proxy-legacy|wait-hosts-legacy} --context NAME [options]" >&2
+  echo "usage: $0 {wait-proxy|wait-hosts-unsigned} --context NAME [options]" >&2
   echo "options: --rpc-proxy-namespace NAME --host-namespace NAME" >&2
   echo "         --control-plane-namespace NAME --timeout-seconds N --poll-seconds N" >&2
 }
@@ -33,8 +33,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$MODE" != "wait-proxy" && "$MODE" != "wait-proxy-legacy" &&
-      "$MODE" != "wait-hosts-legacy" ]] ||
+if [[ "$MODE" != "wait-proxy" && "$MODE" != "wait-hosts-unsigned" ]] ||
    [[ -z "$CONTEXT" ]] ||
    ! [[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
    ! [[ "$POLL_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
@@ -89,44 +88,11 @@ proxy_cohort_ready() {
     ' <<<"$pods" >/dev/null
 }
 
-# "Legacy-compatible" means the cohort can serve legacy-headers Hosts. A Proxy
-# labelled dedicated-header-v1 can: the label marks that it is able to produce
-# the dedicated header for strict Hosts, and it still sends the legacy context
-# headers on every call that carries no authorized V2 action. So every
-# supported label value passes here and only an unknown value is rejected.
-proxy_cohort_legacy() {
-  local deployment pods
-  deployment="$(bounded_kubectl_get proxy-legacy-deployment deployment rpc-proxy \
-    -n "$RPC_PROXY_NAMESPACE" -o json 2>/dev/null)" || return 1
-  pods="$(bounded_kubectl_get proxy-legacy-pods pods -n "$RPC_PROXY_NAMESPACE" \
-    -l app=rpc-proxy -o json 2>/dev/null)" || return 1
-  jq -e --arg label "$PROTOCOL_LABEL" --arg strict "$STRICT_PROTOCOL" '
-    (.spec.template.metadata.labels // {}) as $templateLabels |
-    (.spec.replicas // 1) as $desired |
-    (.metadata.generation // 0) as $generation |
-    ($desired > 0) and
-    ((.status.observedGeneration // 0) >= $generation) and
-    ((.status.updatedReplicas // 0) == $desired) and
-    ((.status.readyReplicas // 0) == $desired) and
-    ((.status.availableReplicas // 0) == $desired) and
-    ((($templateLabels | has($label)) | not) or
-      $templateLabels[$label] == "legacy-headers" or $templateLabels[$label] == $strict)
-  ' <<<"$deployment" >/dev/null || return 1
-  jq -e --arg label "$PROTOCOL_LABEL" --arg strict "$STRICT_PROTOCOL" \
-    --argjson desired "$(jq -r '.spec.replicas // 1' <<<"$deployment")" '
-      (.items | length) == $desired and
-      all(.items[];
-        .metadata.deletionTimestamp == null and
-        (((.metadata.labels // {}) as $labels |
-          ((($labels | has($label)) | not) or
-            $labels[$label] == "legacy-headers" or $labels[$label] == $strict))) and
-        .status.phase == "Running" and
-        any(.status.conditions[]?; .type == "Ready" and .status == "True")
-      )
-    ' <<<"$pods" >/dev/null
-}
-
-host_cohort_legacy() {
+# Rollback gate: HCC has been rolled back to a revision that does not select
+# signed-assertion-v1, and no HCC-managed Host Deployment or Host pod
+# (terminating pods included) still carries it. Only then may the RPC Proxy
+# roll back to an image that does not forward the edge assertion.
+host_cohort_unsigned() {
   local hcc hcc_pods deployments managed_pods strict_pods
   hcc="$(bounded_kubectl_get host-hcc-deployment deployment host-context-controller \
     -n "$CONTROL_PLANE_NAMESPACE" -o json 2>/dev/null)" || return 1
@@ -141,7 +107,7 @@ host_cohort_legacy() {
   strict_pods="$(bounded_kubectl_get host-strict-pods pods -n "$HOST_NAMESPACE" \
     -l "$PROTOCOL_LABEL=$STRICT_PROTOCOL" -o json 2>/dev/null)" || return 1
   jq -e --arg protocolKey 'CONTEXT_MAPPER_HOST_RPC_PROXY_EDGE_PROTOCOL' \
-    --arg markerKey 'clerum.io/host-runtime-edge-protocol' '
+    --arg markerKey 'clerum.io/host-runtime-edge-protocol' --arg strict "$STRICT_PROTOCOL" '
     (.spec.replicas // 1) as $desired |
     (.metadata.generation // 0) as $generation |
     ($desired > 0) and
@@ -150,13 +116,13 @@ host_cohort_legacy() {
     ((.status.readyReplicas // 0) == $desired) and
     ((.status.availableReplicas // 0) == $desired) and
     (((.spec.template.metadata.labels // {}) as $labels |
-      ((($labels | has($markerKey)) | not) or $labels[$markerKey] == "legacy-headers"))) and
+      ((($labels | has($markerKey)) | not) or $labels[$markerKey] != $strict))) and
     ([.spec.template.spec.containers[]?.env[]?
       | select(.name == $protocolKey)
       | .value] |
-      (length <= 1) and (length == 0 or .[0] == "legacy-headers"))
+      (length <= 1) and (length == 0 or .[0] != $strict))
   ' <<<"$hcc" >/dev/null || return 1
-  jq -e --arg markerKey 'clerum.io/host-runtime-edge-protocol' \
+  jq -e --arg markerKey 'clerum.io/host-runtime-edge-protocol' --arg strict "$STRICT_PROTOCOL" \
     --argjson desired "$(jq -r '.spec.replicas // 1' <<<"$hcc")" '
     (.items | length) == $desired and
     all(.items[];
@@ -164,10 +130,10 @@ host_cohort_legacy() {
       .status.phase == "Running" and
       any(.status.conditions[]?; .type == "Ready" and .status == "True") and
       (((.metadata.labels // {}) as $labels |
-        ((($labels | has($markerKey)) | not) or $labels[$markerKey] == "legacy-headers")))
+        ((($labels | has($markerKey)) | not) or $labels[$markerKey] != $strict)))
     )
   ' <<<"$hcc_pods" >/dev/null || return 1
-  jq -e --arg label "$PROTOCOL_LABEL" '
+  jq -e --arg label "$PROTOCOL_LABEL" --arg strict "$STRICT_PROTOCOL" '
     all(.items[];
       (.spec.replicas // 1) as $desired |
       (.metadata.generation // 0) as $generation |
@@ -176,16 +142,16 @@ host_cohort_legacy() {
       ((.status.readyReplicas // 0) == $desired) and
       ((.status.availableReplicas // 0) == $desired) and
       (((.spec.template.metadata.labels // {}) as $labels |
-        ((($labels | has($label)) | not) or $labels[$label] == "legacy-headers")))
+        ((($labels | has($label)) | not) or $labels[$label] != $strict)))
     )
   ' <<<"$deployments" >/dev/null || return 1
-  jq -e --arg label "$PROTOCOL_LABEL" '
+  jq -e --arg label "$PROTOCOL_LABEL" --arg strict "$STRICT_PROTOCOL" '
     all(.items[];
       .metadata.deletionTimestamp == null and
       .status.phase == "Running" and
       any(.status.conditions[]?; .type == "Ready" and .status == "True") and
       (((.metadata.labels // {}) as $labels |
-        ((($labels | has($label)) | not) or $labels[$label] == "legacy-headers")))
+        ((($labels | has($label)) | not) or $labels[$label] != $strict)))
     )
   ' <<<"$managed_pods" >/dev/null || return 1
   jq -e '.items | length == 0' <<<"$strict_pods" >/dev/null
@@ -193,15 +159,11 @@ host_cohort_legacy() {
 
 while (( SECONDS <= deadline )); do
   if [[ "$MODE" == "wait-proxy" ]] && proxy_cohort_ready; then
-    echo "RPC Proxy dedicated-header cohort is fully Ready in $RPC_PROXY_NAMESPACE"
+    echo "RPC Proxy signed-assertion cohort is fully Ready in $RPC_PROXY_NAMESPACE"
     exit 0
   fi
-  if [[ "$MODE" == "wait-proxy-legacy" ]] && proxy_cohort_legacy; then
-    echo "RPC Proxy legacy-compatible cohort is fully Ready in $RPC_PROXY_NAMESPACE"
-    exit 0
-  fi
-  if [[ "$MODE" == "wait-hosts-legacy" ]] && host_cohort_legacy; then
-    echo "HCC and MCP Host legacy-compatible cohort is fully Ready"
+  if [[ "$MODE" == "wait-hosts-unsigned" ]] && host_cohort_unsigned; then
+    echo "HCC and MCP Host cohort no longer selects signed-assertion-v1 and is fully Ready"
     exit 0
   fi
   if (( SECONDS >= deadline )); then break; fi
@@ -210,9 +172,7 @@ done
 
 if [[ "$MODE" == "wait-proxy" ]]; then
   echo "ERROR: RPC Proxy cohort did not reach the strict authenticated protocol within ${TIMEOUT_SECONDS}s" >&2
-elif [[ "$MODE" == "wait-proxy-legacy" ]]; then
-  echo "ERROR: RPC Proxy legacy-compatible cohort did not become fully Ready within ${TIMEOUT_SECONDS}s" >&2
 else
-  echo "ERROR: strict MCP Host workloads remain or legacy HCC/Host cohort is not Ready within ${TIMEOUT_SECONDS}s" >&2
+  echo "ERROR: signed-assertion MCP Host workloads remain or the rolled-back HCC/Host cohort is not Ready within ${TIMEOUT_SECONDS}s" >&2
 fi
 exit 1
