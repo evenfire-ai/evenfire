@@ -332,7 +332,7 @@ CRON_POD_UID="$(pod_uid "$cron_pod")"
 start_active_cron_pin "$CRON_POD_UID"
 ok "activeCronSchedules heartbeat pin started for pod ${cron_pod}"
 
-log "informational: cron_manage registration, forbid/allow policy, HITL gate, imported-schedule cleanup, and CronScheduler->heartbeat supplier wiring are deterministic local coverage; this T2 phase proves HCC lifecycle response to activeCronSchedules heartbeat without depending on model tool choice"
+log "informational: cron_manage registration, forbid/allow policy, HITL gate, and CronScheduler->heartbeat supplier wiring are deterministic local coverage; this T2 phase proves HCC lifecycle response to activeCronSchedules heartbeat without depending on model tool choice"
 
 # ---- BLOCKED: the schedule pins the host awake -----------------------------
 header "An active schedule pins the host awake (SuspendBlocked: activeCronSchedules)"
