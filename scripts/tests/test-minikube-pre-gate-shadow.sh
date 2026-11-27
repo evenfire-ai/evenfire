@@ -205,14 +205,39 @@ write_manifest() {
 repo_head() { git -C "$1/repo" rev-parse HEAD; }
 
 # A cluster sync marker as pre-gate-sync.sh stamps it, served by the kubectl
-# stub from TEST_MARKER_DIR="$d/marker".
+# stub from TEST_MARKER_DIR="$d/marker". A clean stamp lists no uncommitted
+# path and carries the count "0".
 write_marker() {
-  local d=$1 head=$2 generated=$3 source=$4 tag=$5
+  local d=$1 head=$2 generated=$3 source=$4 tag=$5 count=${6:-0} paths=${7:-}
   mkdir -p "$d/marker"
   printf '%s' "$head" > "$d/marker/gitHead"
   printf '%s' "$generated" > "$d/marker/imagesGeneratedAt"
   printf '%s' "$source" > "$d/marker/imageSource"
   printf '%s' "$tag" > "$d/marker/imageTag"
+  printf '%s' "$count" > "$d/marker/uncommittedPathCount"
+  printf '%s' "$paths" > "$d/marker/uncommittedPaths"
+}
+
+# A git that fails exactly one of the working-tree reads the pre-gate makes,
+# named by TEST_GIT_FAIL, and logs that it did. Every other call is real git.
+make_failing_git_stub() {
+  local d=$1
+  cat > "$d/bin/git" <<'STUB'
+#!/usr/bin/env bash
+read_name=""
+case "$*" in
+  *" diff --name-only HEAD") read_name=tracked ;;
+  *" diff --name-only "*" HEAD") read_name=committed ;;
+  *" ls-files --others --exclude-standard") read_name=untracked ;;
+esac
+if [ -n "$read_name" ] && [ "$read_name" = "${TEST_GIT_FAIL:-}" ]; then
+  printf 'git-fail %s\n' "$read_name" >>"${TEST_LOG_FILE:?}"
+  echo "fatal: simulated ${read_name} read failure" >&2
+  exit 128
+fi
+exec "${TEST_REAL_GIT:?}" "$@"
+STUB
+  chmod +x "$d/bin/git"
 }
 
 # Loads pre-gate-incremental.sh the way pre-gate-sync.sh does, in a subshell the
@@ -667,22 +692,7 @@ assert_an_unreadable_plan_delta_stops_the_sync() {
   local d base out rc mode bad=""
   d="$(mktemp -d)"
   prepare_repo "$d"
-  cat > "$d/bin/git" <<'STUB'
-#!/usr/bin/env bash
-read_name=""
-case "$*" in
-  *" diff --name-only HEAD") read_name=tracked ;;
-  *" diff --name-only "*" HEAD") read_name=committed ;;
-  *" ls-files --others --exclude-standard") read_name=untracked ;;
-esac
-if [ -n "$read_name" ] && [ "$read_name" = "${TEST_GIT_FAIL:-}" ]; then
-  printf 'git-fail %s\n' "$read_name" >>"${TEST_LOG_FILE:?}"
-  echo "fatal: simulated ${read_name} read failure" >&2
-  exit 128
-fi
-exec "${TEST_REAL_GIT:?}" "$@"
-STUB
-  chmod +x "$d/bin/git"
+  make_failing_git_stub "$d"
   mkdir -p "$d/repo/rpc-proxy/src"
   echo "export const y = 1" > "$d/repo/rpc-proxy/src/index.ts"
   git -C "$d/repo" add -A
@@ -912,6 +922,129 @@ assert_a_forced_ghcr_sync_shadows_every_change_since_the_release() {
     fail "expected forced -> control-api from the release commit, plain -> none; rc=$rc_forced/$rc_plain forced=$out_forced plain=$out_plain"
   fi
   cleanup_fixture "$d"
+}
+
+# A sync over an uncommitted control-api edit builds that edit into the image,
+# and its marker names only HEAD. Once the edit is reverted the tree equals HEAD
+# again, so the plan saw no delta, built nothing, and stamped a valid marker over
+# the image still running the reverted code. The marker now lists the paths, and
+# the plan rebuilds each one, in both modes. A clean stamp keeps the empty plan.
+# A marker with no count (stamped before the list existed) or with a count its
+# list does not match is no baseline at all.
+assert_a_reverted_uncommitted_change_is_rebuilt() {
+  local d head out rc bad="" scenario mode tag want
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  head="$(repo_head "$d")"
+  for scenario in local-dirty local-clean local-legacy local-mismatch ghcr-dirty; do
+    mode="${scenario%%-*}"
+    tag=""
+    [ "$mode" = ghcr ] && tag="$PIN_TAG"
+    write_manifest "$d" '{"generated":"g7","imageSource":"'"$mode"'","imageTag":"'"$tag"'","images":{}}'
+    rm -rf "$d/marker"
+    case "$scenario" in
+      *-dirty) write_marker "$d" "$head" g7 "$mode" "$tag" 1 "control-api/src/index.ts" ;;
+      *-clean) write_marker "$d" "$head" g7 "$mode" "$tag" ;;
+      *-legacy)
+        write_marker "$d" "$head" g7 "$mode" "$tag"
+        rm -f "$d/marker/uncommittedPathCount" "$d/marker/uncommittedPaths"
+        ;;
+      *-mismatch) write_marker "$d" "$head" g7 "$mode" "$tag" 2 "control-api/src/index.ts" ;;
+    esac
+    case "$scenario" in
+      local-dirty) want='plan targets=control-api build=false reason= repull=false' ;;
+      local-clean) want='plan targets=none build=false reason= repull=false' ;;
+      local-legacy|local-mismatch) want='plan targets=none build=true reason=no-marker repull=false' ;;
+      ghcr-dirty) want='plan targets=control-api build=false reason= repull=false' ;;
+    esac
+    out="$(
+      PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
+      IMAGE_SOURCE="$mode" IMAGE_TAG="$tag" IMAGES_GENERATED_AT=g7 \
+        run_incremental "$d" 'incremental_plan; echo "plan targets=$(incremental_target_summary) build=${INCREMENTAL_FULL_IMAGE_BUILD} reason=${INCREMENTAL_FULL_IMAGE_BUILD_REASON} repull=${INCREMENTAL_REPULL_ALL}"'
+    )"
+    rc=$?
+    if [ "$rc" -ne 0 ] || ! grep -Fqx "$want" <<< "$out"; then
+      bad+="${scenario}(rc=$rc want='$want' out=$out) "
+    fi
+  done
+  if [ -z "$bad" ] && [ -z "$(git -C "$d/repo" status --porcelain)" ]; then
+    pass "a reverted uncommitted change the marker lists is rebuilt; a marker without the list is no baseline"
+  else
+    fail "the plan ignored the marker's uncommitted paths: ${bad}status=$(git -C "$d/repo" status --porcelain)"
+  fi
+  cleanup_fixture "$d"
+}
+
+# The stamp side: every path uncommitted when the sync planned (reverted since)
+# or when it stamps lands in the marker with its count, a clean tree stamps "0",
+# and a working tree that cannot be read stamps nothing.
+assert_the_marker_records_every_uncommitted_path() {
+  local d c f out rc out_clean rc_clean out_fail rc_fail
+  d="$(mktemp -d)"
+  c="$(mktemp -d)"
+  f="$(mktemp -d)"
+  prepare_repo "$d"
+  prepare_repo "$c"
+  prepare_repo "$f"
+  make_failing_git_stub "$f"
+  for x in "$d" "$c" "$f"; do
+    write_manifest "$x" '{"generated":"g7","imageSource":"ghcr","imageTag":"'"$PIN_TAG"'","images":{}}'
+  done
+  echo "// uncommitted" >> "$d/repo/control-api/src/index.ts"
+  mkdir -p "$d/repo/rpc-proxy/src"
+  echo "export const y = 1" > "$d/repo/rpc-proxy/src/new.ts"
+  echo "// uncommitted" >> "$f/repo/control-api/src/index.ts"
+  out="$(
+    (
+      set +u
+      PATH="$d/bin:$PATH"; TEST_LOG_FILE="$d/ops.log"; TMPDIR="$d/state"
+      export PATH TEST_LOG_FILE TMPDIR
+      source_pre_gate_marker_fns "$d" >/dev/null
+      INCREMENTAL_UNCOMMITTED_PATHS="mcp-host/src/reverted.ts"
+      persist_cluster_marker fingerprint-a fingerprint-b
+    ) 2>&1
+  )"
+  rc=$?
+  out_clean="$(
+    (
+      set +u
+      PATH="$c/bin:$PATH"; TEST_LOG_FILE="$c/ops.log"; TMPDIR="$c/state"
+      export PATH TEST_LOG_FILE TMPDIR
+      source_pre_gate_marker_fns "$c" >/dev/null
+      persist_cluster_marker fingerprint-a fingerprint-b
+    ) 2>&1
+  )"
+  rc_clean=$?
+  out_fail="$(
+    (
+      set +u
+      PATH="$f/bin:$PATH"; TEST_LOG_FILE="$f/ops.log"; TMPDIR="$f/state"
+      export PATH TEST_LOG_FILE TMPDIR
+      source_pre_gate_marker_fns "$f" >/dev/null
+      TEST_GIT_FAIL=untracked
+      export TEST_GIT_FAIL
+      persist_cluster_marker fingerprint-a fingerprint-b
+    ) 2>&1
+  )"
+  rc_fail=$?
+  if [ "$rc" -eq 0 ] \
+     && grep -Fq -- '--from-literal=uncommittedPathCount=3' "$d/ops.log" \
+     && grep -Fqx -- 'mcp-host/src/reverted.ts' "$d/ops.log" \
+     && grep -Fq -- '--from-literal=uncommittedPaths=control-api/src/index.ts' "$d/ops.log" \
+     && grep -Fq -- 'rpc-proxy/src/new.ts --from-literal=gate=' "$d/ops.log" \
+     && [ "$rc_clean" -eq 0 ] \
+     && grep -Fq -- '--from-literal=uncommittedPathCount=0 --from-literal=uncommittedPaths= ' "$c/ops.log" \
+     && [ "$rc_fail" -ne 0 ] \
+     && grep -Fqx 'git-fail untracked' "$f/ops.log" \
+     && grep -Fq 'cannot list the uncommitted paths' <<< "$out_fail" \
+     && ! grep -Fq 'create configmap' "$f/ops.log"; then
+    pass "the marker records every uncommitted path with its count, and a failed read stamps nothing"
+  else
+    fail "the marker's uncommitted paths are wrong; rc=$rc/$rc_clean/$rc_fail log=$(cat "$d/ops.log") clean=$(cat "$c/ops.log") failed=$(cat "$f/ops.log") out=$out out_clean=$out_clean out_fail=$out_fail"
+  fi
+  cleanup_fixture "$d"
+  cleanup_fixture "$c"
+  cleanup_fixture "$f"
 }
 
 # ---------------------------------------------------------------------------
@@ -1431,6 +1564,8 @@ assert_an_untouched_image_set_keeps_the_marker_baseline
 assert_a_tag_override_on_a_synced_profile_re_pulls_and_re_deploys
 assert_a_tag_override_on_an_unsynced_profile_re_deploys
 assert_a_forced_ghcr_sync_shadows_every_change_since_the_release
+assert_a_reverted_uncommitted_change_is_rebuilt
+assert_the_marker_records_every_uncommitted_path
 assert_the_pre_gate_adopts_the_recorded_cluster_mode_over_the_environment
 assert_a_recorded_local_build_renders_the_local_overlay
 assert_the_migration_job_renders_the_overlay_the_cluster_runs

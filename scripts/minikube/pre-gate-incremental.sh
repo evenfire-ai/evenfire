@@ -34,6 +34,11 @@ INCREMENTAL_MARKER_GIT_HEAD=""
 INCREMENTAL_MARKER_IMAGES_GENERATED_AT=""
 INCREMENTAL_MARKER_IMAGE_SOURCE=""
 INCREMENTAL_MARKER_IMAGE_TAG=""
+INCREMENTAL_MARKER_UNCOMMITTED_PATH_COUNT=""
+INCREMENTAL_MARKER_UNCOMMITTED_PATHS=""
+# Paths that differed from HEAD when this run planned. pre-gate-sync.sh stamps
+# them in the marker with the ones that differ when it stamps.
+INCREMENTAL_UNCOMMITTED_PATHS=""
 
 # The image manifest's recorded coordinate stands in for a marker no sync has
 # stamped yet (incremental_deployed_coordinate).
@@ -105,7 +110,10 @@ incremental_read_marker() {
   INCREMENTAL_MARKER_IMAGES_GENERATED_AT=""
   INCREMENTAL_MARKER_IMAGE_SOURCE=""
   INCREMENTAL_MARKER_IMAGE_TAG=""
-  for field in gitHead imagesGeneratedAt imageSource imageTag; do
+  INCREMENTAL_MARKER_UNCOMMITTED_PATH_COUNT=""
+  INCREMENTAL_MARKER_UNCOMMITTED_PATHS=""
+  for field in gitHead imagesGeneratedAt imageSource imageTag \
+               uncommittedPathCount uncommittedPaths; do
     rc=0
     value="$(incremental_marker_field "${field}")" || rc=$?
     case "${rc}" in
@@ -118,6 +126,8 @@ incremental_read_marker() {
       imagesGeneratedAt) INCREMENTAL_MARKER_IMAGES_GENERATED_AT="${value}" ;;
       imageSource) INCREMENTAL_MARKER_IMAGE_SOURCE="${value}" ;;
       imageTag) INCREMENTAL_MARKER_IMAGE_TAG="${value}" ;;
+      uncommittedPathCount) INCREMENTAL_MARKER_UNCOMMITTED_PATH_COUNT="${value}" ;;
+      uncommittedPaths) INCREMENTAL_MARKER_UNCOMMITTED_PATHS="${value}" ;;
     esac
   done
   INCREMENTAL_MARKER_PRESENT=true
@@ -135,6 +145,11 @@ incremental_read_marker() {
 # the established full local build or GHCR recovery path below. So does a
 # different image coordinate: a marker stamped at another tag describes shadows
 # over another release, not over the one this run resolves.
+#
+# gitHead names only the commit. The images the stamping sync built also carry
+# every path that was uncommitted then, which the marker lists with their count.
+# The count is "0" on a clean stamp, so a marker without one (stamped before
+# the list existed) or a list that does not match it cannot be a baseline.
 incremental_marker_baseline() {
   if [[ "${INCREMENTAL_MARKER_PRESENT}" != "true" || -z "${INCREMENTAL_MARKER_GIT_HEAD}" ]]; then
     return 0
@@ -147,7 +162,23 @@ incremental_marker_baseline() {
         "${INCREMENTAL_MARKER_IMAGE_TAG}" != "${IMAGE_TAG:-}" ]]; then
     return 0
   fi
+  if [[ ! "${INCREMENTAL_MARKER_UNCOMMITTED_PATH_COUNT}" =~ ^[0-9]+$ ||
+        "$(incremental_count_lines "${INCREMENTAL_MARKER_UNCOMMITTED_PATHS}")" != \
+          "${INCREMENTAL_MARKER_UNCOMMITTED_PATH_COUNT}" ]]; then
+    return 0
+  fi
   printf '%s' "${INCREMENTAL_MARKER_GIT_HEAD}"
+}
+
+# The number of non-empty lines in $1.
+incremental_count_lines() {
+  local text="$1" line count=0
+  while IFS= read -r line; do
+    if [[ -n "${line}" ]]; then
+      count=$((count + 1))
+    fi
+  done <<< "${text}"
+  printf '%s' "${count}"
 }
 
 # Reads the marker and prints its usable baseline, or nothing. A read error
@@ -335,6 +366,13 @@ incremental_classify_path() {
 
 incremental_plan() {
   local marker_git_head="" path baseline marker_read=ok deployed
+  local previously_uncommitted=""
+
+  # Before any early return: every plan, including a full build, leaves the
+  # list pre-gate-sync.sh stamps in the marker.
+  if ! INCREMENTAL_UNCOMMITTED_PATHS="$(incremental_uncommitted_paths)"; then
+    exit 1
+  fi
 
   if [[ "${FORCE_CLUSTER_SYNC}" == "true" ]]; then
     if [[ "${IMAGE_SOURCE}" == "ghcr" ]]; then
@@ -379,6 +417,10 @@ incremental_plan() {
   # the marker's gitHead.
   if [[ "${marker_read}" == "ok" && "${INCREMENTAL_REPULL_ALL}" != "true" ]]; then
     marker_git_head="$(incremental_marker_baseline)"
+    # The cluster runs what the marker's sync built, including the paths that
+    # were uncommitted then. Each one is part of the delta even when it has
+    # since been reverted to its committed content.
+    previously_uncommitted="${INCREMENTAL_MARKER_UNCOMMITTED_PATHS}"
   fi
   if [[ ! "${marker_git_head}" =~ ^[0-9a-f]{40}$ ]] || \
      ! git -C "${PROJECT_DIR}" cat-file -e "${marker_git_head}^{commit}" 2>/dev/null; then
@@ -402,6 +444,8 @@ incremental_plan() {
       return 0
     fi
     marker_git_head="${baseline}"
+    # The re-pull discards everything the marker's sync built.
+    previously_uncommitted=""
     INCREMENTAL_REPULL_ALL=true
     log "No usable marker baseline; deriving the shadow set from the release images' commit ${baseline:0:12}"
   fi
@@ -410,17 +454,15 @@ incremental_plan() {
   # delta means "nothing changed": the sync would skip the build, the database
   # reconcile and the GFS verification, then stamp a marker over images it never
   # compared with the tree.
-  local committed uncommitted
+  local committed
   if ! committed="$(git -C "${PROJECT_DIR}" diff --name-only "${marker_git_head}" HEAD)"; then
     log "ERROR: PLAN_INPUT_UNREADABLE: git diff ${marker_git_head:0:12}..HEAD failed; refusing to plan from an empty delta" >&2
     exit 1
   fi
-  if ! uncommitted="$(incremental_uncommitted_paths)"; then
-    exit 1
-  fi
   while IFS= read -r path; do
     [[ -z "${path}" ]] || incremental_classify_path "${path}"
-  done < <(printf '%s\n%s\n' "${committed}" "${uncommitted}" | LC_ALL=C sort -u)
+  done < <(printf '%s\n%s\n%s\n' "${committed}" "${INCREMENTAL_UNCOMMITTED_PATHS}" \
+             "${previously_uncommitted}" | LC_ALL=C sort -u)
 }
 
 # Every path whose working-tree content differs from HEAD: tracked edits, staged
@@ -437,6 +479,17 @@ incremental_uncommitted_paths() {
     return 1
   fi
   printf '%s\n%s\n' "${tracked}" "${untracked}" | LC_ALL=C sort -u | awk 'length'
+}
+
+# The paths the marker must list: those uncommitted when this run planned (its
+# builds may hold their content even if they are reverted by now) and those
+# uncommitted when it stamps. Fails when the working tree cannot be read.
+incremental_uncommitted_paths_to_stamp() {
+  local now
+  if ! now="$(incremental_uncommitted_paths)"; then
+    return 1
+  fi
+  printf '%s\n%s\n' "${INCREMENTAL_UNCOMMITTED_PATHS}" "${now}" | LC_ALL=C sort -u | awk 'length'
 }
 
 incremental_has_target() {
