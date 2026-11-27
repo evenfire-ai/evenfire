@@ -122,7 +122,7 @@ test.describe('workflow run cancel from the plugin runs table', () => {
 
     await expect(page.getByText(`Cancel requested for run ${runId.slice(0, 8)}.`)).toBeVisible()
     await expect(phaseCell(row)).toHaveText('Running · Canceling')
-    // The runtime stops at its next signal poll (about 5 seconds), then reports.
+    // The runtime stops at the first step boundary after it receives the signal (normally within 5 s), then reports.
     await expect(phaseCell(row)).toHaveText('Canceled', { timeout: 180_000 })
 
     // Opening the runs tab directly offers no cancel on the canceled run.
