@@ -1,4 +1,5 @@
 import { type MutableRefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ChatDeleteOutcome } from '@contexts/AgentChatActionsContext'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext'
 import { byUpdatedDesc, mergeByUpdatedDesc, mergeCatalogPage } from '@lib/catalogMerge'
 import { agentChatPlaceholder, remotePlaceholder } from '@lib/chatTitle'
@@ -1533,8 +1534,8 @@ export function useChatListController({
       agentRef: string,
       chatId: string,
       deletion: { agentRef: string; fence: ChatDeleteFence; hostAuthorityEpoch: number }
-    ) => {
-      if (!agentRef) return
+    ): Promise<ChatDeleteOutcome> => {
+      if (!agentRef || !chatId) return 'stale-authority'
       if (
         deletion.agentRef !== agentRef ||
         !sameAuthorityScope(deletion.fence.authorityScope, authorityScope) ||
@@ -1547,14 +1548,16 @@ export function useChatListController({
           'Delete cancelled because chat access changed. Please try again.',
           'error'
         )
-        return
+        return 'stale-authority'
       }
       const requestGeneration = requestGenerationRef.current
       const authorityScopeGeneration = authorityScopeGenerationRef.current
       const authorityScopeAtDelete = currentAuthorityScopeRef.current
       const stillOwned = () =>
         authorityScopeGenerationRef.current === authorityScopeGeneration &&
-        currentAuthorityScopeRef.current === authorityScopeAtDelete
+        currentAuthorityScopeRef.current === authorityScopeAtDelete &&
+        deletion.hostAuthorityEpoch === getHostAuthorityEpoch(agentRef) &&
+        !isHostAccessBlocked(agentRef)
       // Stop following any in-flight task for this chat first: ack tears down the
       // SSE + connect/watchdog timers, so a later terminal can't fire onTerminal
       // and resurrect the just-deleted chat file via appendAssistantMessage.
@@ -1568,12 +1571,34 @@ export function useChatListController({
       try {
         result = await chatStore.deleteChat(agentRef, chatId, deletion.fence)
       } catch {
-        if (stillOwned()) {
-          host.current?.pushToast('Could not delete the chat. Please try again.', 'error')
+        if (!stillOwned()) return 'stale-authority'
+        // A storage/IPC rejection can also mean the main-process binding or
+        // session fence changed without a renderer scope change. Verify the
+        // original fence; never refresh the pending deletion onto new authority.
+        let retryable = false
+        try {
+          const liveFence = await chatStore.captureDeleteFence(authorityScope)
+          retryable =
+            stillOwned() &&
+            deletion.hostAuthorityEpoch === getHostAuthorityEpoch(agentRef) &&
+            !isHostAccessBlocked(agentRef) &&
+            sameAuthorityScope(liveFence.authorityScope, deletion.fence.authorityScope) &&
+            liveFence.version === deletion.fence.version &&
+            liveFence.bindingGeneration === deletion.fence.bindingGeneration &&
+            liveFence.sessionGeneration === deletion.fence.sessionGeneration
+        } catch {
+          // An unverifiable fence is ineligible for retry; require a new request.
         }
-        return
+        if (!stillOwned()) return 'stale-authority'
+        host.current?.pushToast(
+          retryable
+            ? 'Could not delete the chat. Please try again.'
+            : 'Delete cancelled because chat access changed. Please try again.',
+          'error'
+        )
+        return retryable ? 'retryable-failure' : 'stale-authority'
       }
-      if (!stillOwned()) return
+      if (!stillOwned()) return 'stale-authority'
       const deleted = deletedChatIdsByAgentRef.current.get(agentRef) ?? new Set<string>()
       deleted.add(chatId)
       deletedChatIdsByAgentRef.current.set(agentRef, deleted)
@@ -1587,11 +1612,11 @@ export function useChatListController({
           'info'
         )
       }
-      if (requestGenerationRef.current !== requestGeneration) return
+      if (requestGenerationRef.current !== requestGeneration) return 'deleted'
       // Post-await guards read the LIVE committed values (selectedAgentRef /
       // getActiveChatId), intentionally — if the user switched agent during the
       // delete IPC we must not yank a reselection into the agent they just left.
-      if (selectedAgentRef.current !== agentRef) return
+      if (selectedAgentRef.current !== agentRef) return 'deleted'
 
       // Functional updater: a concurrent chatList update during the delete IPC
       // await (e.g. a fresh cross-agent sessions load) must not be clobbered by a
@@ -1600,24 +1625,30 @@ export function useChatListController({
       setChatList(prev => prev.filter(c => c.id !== chatId))
       const remaining = chatList.filter(c => c.id !== chatId)
 
-      if (host.current?.getActiveChatId() === chatId) {
-        if (remaining.length > 0) {
-          const sorted = [...remaining].sort(byUpdatedDesc)
-          await host.current?.switchToChat(agentRef, sorted[0]!.id, {
-            onCurrentError: error => {
-              host.current?.pushToast(
-                `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
-                'error'
-              )
-            },
-          })
-        } else {
-          // The removed destination cannot remain the visible transcript when
-          // replacement creation fails. Clear only while it is still active.
-          host.current?.clearActiveChat()
-          await handleCreateChat()
+      try {
+        if (host.current?.getActiveChatId() === chatId) {
+          if (remaining.length > 0) {
+            const sorted = [...remaining].sort(byUpdatedDesc)
+            await host.current?.switchToChat(agentRef, sorted[0]!.id, {
+              onCurrentError: error => {
+                host.current?.pushToast(
+                  `Could not open conversation: ${error instanceof Error ? error.message : String(error)}`,
+                  'error'
+                )
+              },
+            })
+          } else {
+            // The removed destination cannot remain the visible transcript when
+            // replacement creation fails. Clear only while it is still active.
+            host.current?.clearActiveChat()
+            await handleCreateChat()
+          }
         }
+      } catch {
+        // Storage committed. Navigation owns its feedback and cannot make the
+        // deleted conversation eligible for another destructive attempt.
       }
+      return 'deleted'
     },
     [
       authorityScope,

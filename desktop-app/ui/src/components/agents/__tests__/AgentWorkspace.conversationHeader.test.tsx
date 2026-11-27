@@ -198,7 +198,7 @@ describe('AgentWorkspace chat — conversation header', () => {
     actionsMock.handleRenameChatForAgent.mockReset()
     actionsMock.handleRenameChatForAgent.mockResolvedValue(undefined)
     actionsMock.handleDeleteChatForAgent.mockReset()
-    actionsMock.handleDeleteChatForAgent.mockResolvedValue(undefined)
+    actionsMock.handleDeleteChatForAgent.mockResolvedValue('deleted')
   })
 
   afterEach(() => {
@@ -523,6 +523,22 @@ describe('AgentWorkspace chat — conversation header', () => {
       expect(actionsMock.handleDeleteChatForAgent).not.toHaveBeenCalled()
     })
 
+    it('contains keyboard focus and returns it to the header trigger on cancel', async () => {
+      renderChat()
+      const dialog = await requestDelete()
+      const cancel = within(dialog).getByRole('button', { name: 'Cancel' })
+      const confirm = within(dialog).getByRole('button', { name: 'Delete' })
+      expect(document.activeElement).toBe(cancel)
+      fireEvent.keyDown(cancel, { key: 'Tab', shiftKey: true })
+      expect(document.activeElement).toBe(confirm)
+      fireEvent.keyDown(confirm, { key: 'Tab' })
+      expect(document.activeElement).toBe(cancel)
+      fireEvent.click(cancel)
+      expect(document.activeElement).toBe(
+        screen.getByRole('button', { name: `Conversation actions for ${TITLE}` })
+      )
+    })
+
     it('deletes the open conversation with the captured fence once confirmed', async () => {
       renderChat()
 
@@ -537,7 +553,8 @@ describe('AgentWorkspace chat — conversation header', () => {
     it('keeps a failed deletion open and allows retry with the same fence', async () => {
       let attempts = 0
       actionsMock.handleDeleteChatForAgent.mockImplementation(async () => {
-        if (++attempts === 1) throw new Error('delete failed')
+        if (++attempts === 1) return 'retryable-failure'
+        return 'deleted'
       })
       renderChat()
       const dialog = await requestDelete()

@@ -50,11 +50,18 @@ export function useConfirmedChatDelete(): ConfirmedChatDeleteController {
     const target = pending
     if (!target) return
     try {
-      await handleDeleteChatForAgent(target.agentRef, target.chatId, target.deletion)
-      setPending(current => (current === target ? null : current))
+      const outcome = await handleDeleteChatForAgent(
+        target.agentRef,
+        target.chatId,
+        target.deletion
+      )
+      if (outcome !== 'retryable-failure') {
+        setPending(current => (current === target ? null : current))
+      }
     } catch {
-      // The controller reports the failure; retain the confirmation for retry
-      // or cancel, and consume the rejection at this UI event boundary.
+      // Unexpected producer rejection has no verified retry eligibility.
+      // The controller owns feedback; require a fresh request and fence.
+      setPending(current => (current === target ? null : current))
     }
   }, [handleDeleteChatForAgent, pending])
 
