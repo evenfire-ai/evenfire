@@ -73,7 +73,7 @@ function quoteIdentifier(value: string): string {
 }
 
 /**
- * M-84 (8): a run created by approving an approval-gated V2 trigger carries,
+ * A run created by approving an approval-gated V2 trigger carries,
  * as its initiating binding, the trigger binding persisted for the approval
  * request (`entity_type 'workflow_approval'`). workflow-recipes checkpoints
  * that binding at dequeue; this suite reproduces whether the continuation

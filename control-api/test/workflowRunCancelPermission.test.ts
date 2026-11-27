@@ -8,7 +8,7 @@ import {
   runMatchesUserScope,
 } from '../src/services/workflows/workflowRunReadService.js'
 
-// S20: every run `canCancel` accepts is a run the caller can already see, so a
+// Every run `canCancel` accepts is a run the caller can already see, so a
 // cancel never reaches a run that the run read hides.
 
 const USERS = ['user-a', 'user-b', 'user-c'] as const

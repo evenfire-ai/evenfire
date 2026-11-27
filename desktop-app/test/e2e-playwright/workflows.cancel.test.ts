@@ -1,4 +1,4 @@
-// Workflow run cancel from the Desktop Workflows table (C6 PW1 and PW3).
+// Workflow run cancel from the Desktop Workflows table.
 //
 // Fixtures come from scripts/minikube/seed-workflow-triggers-test-data.sh:
 // e2e-cancel-two-step and e2e-cancel-scheduled hold a run in Running on a step
@@ -39,8 +39,8 @@ const RECIPE_SCHEDULED = 'e2e-cancel-scheduled'
 const MEMBER_EMAIL = 'trigger-member-e2e@clerum.io'
 const HOLD_STEP_ID = 'hold-for-approval'
 const SECOND_STEP_ID = 'after-approval'
-// A cron that cannot recur during the test: PW3 forces one fire through
-// next_fire_at, and the worker then advances the cursor to next year.
+// A cron that cannot recur during the test: the team scheduled run test forces
+// one fire through next_fire_at, and the worker then advances the cursor to next year.
 const ONE_SHOT_CRON = '0 0 1 1 *'
 const HOLD_TIMEOUT_MS = 240_000
 const CANCEL_SETTLE_TIMEOUT_MS = 180_000
@@ -227,7 +227,7 @@ function removeSchedule(recipeName: string): void {
   )
 }
 
-test('PW1: cancel a running run from the Workflows table', async () => {
+test('cancel a running run from the Workflows table', async () => {
   test.setTimeout(600_000)
   await clearSession()
   cleanupRecipeRuntimeState(RECIPE_TWO_STEP)
@@ -294,7 +294,7 @@ test('PW1: cancel a running run from the Workflows table', async () => {
   }
 })
 
-test('PW3: a team admin cancels the team scheduled run, not a teammate run', async () => {
+test('a team admin cancels the team scheduled run, not a teammate run', async () => {
   test.setTimeout(900_000)
   await clearSession()
   cleanupRecipeRuntimeState(RECIPE_TWO_STEP)

@@ -269,7 +269,7 @@ describeRealPostgres('workflow run processor SQL on PostgreSQL 16', () => {
     expect(checkpointAuthority).not.toHaveBeenCalled()
   })
 
-  describe('cancel delivery (X9)', () => {
+  describe('cancel delivery', () => {
     it('every tick re-delivers until the run is terminal', async () => {
       const firstInstance = `deliver-a-${randomUUID()}`
       const childName = `child-${randomBytes(4).toString('hex')}`
@@ -417,7 +417,7 @@ describeRealPostgres('workflow run processor SQL on PostgreSQL 16', () => {
     })
   })
 
-  describe('stuck sweep (X13)', () => {
+  describe('stuck sweep', () => {
     const storedDurations = [null, DEFAULT_CAP_SECONDS, 2 * DEFAULT_CAP_SECONDS, 300] as const
 
     it.each([DEFAULT_CAP_SECONDS, 600])(
@@ -489,7 +489,7 @@ describeRealPostgres('workflow run processor SQL on PostgreSQL 16', () => {
     })
   })
 
-  describe('terminal label after a cancel request (X11)', () => {
+  describe('terminal label after a cancel request', () => {
     it('a cancelled report moves a paused run with a request to Canceled and emits run_end', async () => {
       const instanceId = `label-paused-${randomUUID()}`
       const childName = `child-${randomBytes(4).toString('hex')}`

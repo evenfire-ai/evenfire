@@ -58,7 +58,7 @@ import './realPostgres.requirement.ts'
 import { waitForDatabaseConnectionsToClose } from './realPostgresCleanup.ts'
 
 // Both session contracts are accepted, as in an environment that has switched
-// V2 on with V1 still accepted: the cancel route takes them the same way (S14).
+// V2 on with V1 still accepted: the cancel route takes them the same way.
 // Everything else is the real resolved policy.
 vi.mock('../src/services/access/userAccessRuntimePolicy.js', async importOriginal => {
   const actual =
@@ -200,7 +200,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
   const operatorCanceledBy = `operator:${operatorId}`
   let operatorToken: string
 
-  /** One S12 recipe per row, so each list read sees that row's run only. */
+  /** One admin-permission recipe per row, so each list read sees that row's run only. */
   const s12Recipes = [
     'a1',
     'a2',
@@ -292,7 +292,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
       )
     }
 
-    // The trigger producers (S11, S16, S22) read a live recipe and context.
+    // The trigger producers (launcher, phase and resume cases) read a live recipe and context.
     await databasePool.query(`INSERT INTO user_contexts(user_id, context_id) VALUES ($1, $2)`, [
       L.id,
       `${config.contextsNamespace}/${contextName}`,
@@ -821,7 +821,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     expect(paused.rowCount).toBe(1)
   }
 
-  // ── S11 · who is the launcher ───────────────────────────────────────────
+  // ── who is the launcher ─────────────────────────────────────────────────
 
   it('the launcher cancels with either stored id form, and so does an approval requester', async () => {
     const v2 = await v2Session(L)
@@ -976,7 +976,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     expect(await readRun(runId)).toMatchObject({ phase: 'Canceled', canceled_by: L.id })
   }, 60_000)
 
-  // ── S12 · admin permission ──────────────────────────────────────────────
+  // ── admin permission ────────────────────────────────────────────────────
 
   it('admin permission follows run visibility', async () => {
     const tokens = {
@@ -990,7 +990,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     }
     type Caller = keyof typeof tokens
 
-    // R24h: P sees this autonomous team run only as the approval's target.
+    // P sees this autonomous team run only as the approval's target.
     const approval = await createApprovalRequest({
       recipeNamespace: ns,
       recipeName: s12('h'),
@@ -1014,7 +1014,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
       visible?: boolean
     }> = [
       {
-        row: 'R24a scheduled',
+        row: 'scheduled',
         recipe: s12('a1'),
         run: {
           recipe: s12('a1'),
@@ -1027,14 +1027,14 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
         status: 200,
       },
       {
-        row: 'R24a autonomous',
+        row: 'autonomous',
         recipe: s12('a2'),
         run: { recipe: s12('a2'), phase: 'Pending', actorType: 'autonomous', teamId: teamT },
         caller: 'A',
         status: 200,
       },
       {
-        row: 'R24b user run with a NULL actor id',
+        row: 'user run with a NULL actor id',
         recipe: s12('b'),
         run: {
           recipe: s12('b'),
@@ -1047,7 +1047,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
         status: 200,
       },
       {
-        row: "R24c a teammate's manual run",
+        row: "a teammate's manual run",
         recipe: s12('c'),
         run: {
           recipe: s12('c'),
@@ -1062,7 +1062,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
         visible: false,
       },
       {
-        row: 'R24d admin of the run team, session scoped to another team',
+        row: 'admin of the run team, session scoped to another team',
         recipe: s12('d'),
         run: { recipe: s12('d'), phase: 'Pending', actorType: 'scheduled', teamId: teamT },
         caller: 'D',
@@ -1071,7 +1071,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
         visible: false,
       },
       {
-        row: 'R24e member',
+        row: 'member',
         recipe: s12('e-member'),
         run: { recipe: s12('e-member'), phase: 'Pending', actorType: 'scheduled', teamId: teamT },
         caller: 'M',
@@ -1080,7 +1080,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
         visible: true,
       },
       {
-        row: 'R24e inviter',
+        row: 'inviter',
         recipe: s12('e-inviter'),
         run: { recipe: s12('e-inviter'), phase: 'Pending', actorType: 'scheduled', teamId: teamT },
         caller: 'I',
@@ -1089,7 +1089,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
         visible: true,
       },
       {
-        row: 'R24e removed admin',
+        row: 'removed admin',
         recipe: s12('e-removed'),
         run: { recipe: s12('e-removed'), phase: 'Pending', actorType: 'scheduled', teamId: teamT },
         caller: 'X',
@@ -1098,7 +1098,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
         visible: false,
       },
       {
-        row: 'R24f launcher of a run with no team',
+        row: 'launcher of a run with no team',
         recipe: s12('f-launcher'),
         run: {
           recipe: s12('f-launcher'),
@@ -1110,7 +1110,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
         status: 200,
       },
       {
-        row: 'R24f anyone else on a run with no team',
+        row: 'anyone else on a run with no team',
         recipe: s12('f-other'),
         run: {
           recipe: s12('f-other'),
@@ -1124,7 +1124,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
         visible: false,
       },
       {
-        row: 'R24h approval target who is not an admin',
+        row: 'approval target who is not an admin',
         recipe: s12('h'),
         run: {
           recipe: s12('h'),
@@ -1196,12 +1196,12 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     try {
       const unreachable = [
         {
-          row: 'R24g cron run with no team',
+          row: 'cron run with no team',
           run: await insertRun({ recipe: s12('g'), phase: 'Pending', actorType: 'scheduled' }),
           recipe: s12('g'),
         },
         {
-          row: 'R24l admin-UI run',
+          row: 'admin-UI run',
           run: await insertRun({
             recipe: s12('l'),
             phase: 'Pending',
@@ -1277,7 +1277,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
   }, 120_000)
 
   it("an admin cancel needs the scope team's live grant on the run's recipe", async () => {
-    // M-93: the admin path also needs a team_workflow_triggers row for (scope
+    // The admin path also needs a team_workflow_triggers row for (scope
     // team, run recipe). The launcher path does not.
     const recipe = `s12-grant-${suffix}`
     const token = await v1Token(A, teamT, 'admin')
@@ -1366,7 +1366,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     expect((await readRun(targetRun)).phase).toBe('Canceled')
   })
 
-  // ── S13 · run ids ───────────────────────────────────────────────────────
+  // ── run ids ─────────────────────────────────────────────────────────────
 
   it('unknown, foreign-recipe and non-uuid run ids are not found', async () => {
     const token = await v1Token(L, null, 'member')
@@ -1391,7 +1391,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     expect((await readRun(validRun)).phase).toBe('Canceled')
   }, 60_000)
 
-  // ── S14 · session contracts ─────────────────────────────────────────────
+  // ── session contracts ───────────────────────────────────────────────────
 
   it('V1 and V2 sessions cancel the same way and no delegation is read', async () => {
     const recipe = `s14-${suffix}`
@@ -1414,7 +1414,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     }
   }, 60_000)
 
-  // ── S15, S16 · by phase ─────────────────────────────────────────────────
+  // ── by phase ────────────────────────────────────────────────────────────
 
   it('a run without a child is Canceled in the cancel transaction', async () => {
     const recipe = `s15-${suffix}`
@@ -1462,13 +1462,13 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     }
   }, 60_000)
 
-  // ── S19 · repeats and finished runs ─────────────────────────────────────
+  // ── repeats and finished runs ───────────────────────────────────────────
 
   it('cancel is idempotent and refuses finished runs', async () => {
     const recipe = `s19-${suffix}`
     const tokenA = await v1Token(A, teamT, 'admin')
     const tokenA2 = await v1Token(A2, teamT, 'admin')
-    // An admin cancel needs the scope team's live grant on the recipe (M-93).
+    // An admin cancel needs the scope team's live grant on the recipe.
     await databasePool.query(
       `INSERT INTO team_workflow_triggers(team_id, recipe_namespace, recipe_name)
        VALUES ($1, $2, $3)`,
@@ -1520,7 +1520,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     }
   }, 60_000)
 
-  // ── S21 · the pending claim ─────────────────────────────────────────────
+  // ── the pending claim ───────────────────────────────────────────────────
 
   /** A pool whose every transaction runs as the workflow-recipes runtime role. */
   function runtimePool(beforeQuery?: (text: string) => Promise<void>): Pool {
@@ -1797,7 +1797,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     expect(run).toMatchObject({ phase: 'Pending', cancel_requested_at: null, canceled_by: null })
   }, 60_000)
 
-  // ── S22 · resume ────────────────────────────────────────────────────────
+  // ── resume ──────────────────────────────────────────────────────────────
 
   /** The run's phase and how many continuation bindings it holds. */
   async function continuationOf(runId: string) {
@@ -1923,7 +1923,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     }
   }, 120_000)
 
-  // ── S24 · step approvals ────────────────────────────────────────────────
+  // ── step approvals ──────────────────────────────────────────────────────
 
   it("cancel cancels the run's pending step approvals", async () => {
     const recipe = `s24-${suffix}`
@@ -1979,7 +1979,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     })
   }, 60_000)
 
-  // ── S29 · one transaction ───────────────────────────────────────────────
+  // ── one transaction ─────────────────────────────────────────────────────
 
   it('a failure after the run update rolls everything back', async () => {
     const recipe = `s29-${suffix}`
@@ -2018,7 +2018,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     expect(await approvalOf(approval.id)).toEqual(approvalBefore)
   }, 60_000)
 
-  // ── S41 · approvals and cancel on one run ───────────────────────────────
+  // ── approvals and cancel on one run ─────────────────────────────────────
 
   it('an approval and a cancel on the same run serialise on the run row', async () => {
     const recipe = `s41-${suffix}`
@@ -2105,7 +2105,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
       bound_workflow_run_id: open.runId,
     })
 
-    // SAF-j at rest: no pending approval is bound to a run with a cancel request.
+    // At rest: no pending approval is bound to a run with a cancel request.
     const atRest = await databasePool.query<{ bound: number; violating: number }>(
       `SELECT COUNT(*)::int AS bound,
               COUNT(*) FILTER (WHERE war.status = 'pending'
@@ -2118,7 +2118,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     expect(atRest.rows).toEqual([{ bound: 2, violating: 0 }])
   }, 60_000)
 
-  // ── S44 · legacy running row ────────────────────────────────────────────
+  // ── legacy running row ──────────────────────────────────────────────────
 
   it('a running row without a child is not cancellable', async () => {
     const recipe = `s44-${suffix}`
@@ -2139,7 +2139,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     expect(row.cancel_requested_at).toBeInstanceOf(Date)
   }, 60_000)
 
-  // ── S40 · a step held on an approval, end to end ────────────────────────
+  // ── a step held on an approval, end to end ──────────────────────────────
 
   it('cancel during a step held on an approval ends Canceled', async () => {
     const recipe = `s40-${suffix}`
@@ -2208,7 +2208,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
     expect(onRunTerminal).toHaveBeenCalledWith(target.runId, 'Canceled')
   }, 60_000)
 
-  // ── Operator cancel (admin route, OD-4) ─────────────────────────────────
+  // ── Operator cancel (admin route) ───────────────────────────────────────
 
   it('operator cancel is scoped to the recipe in the path', async () => {
     const recipe = `op-s4-${suffix}`
@@ -2301,7 +2301,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
 
   it('operator cancel of a run with a child stores the request', async () => {
     const recipe = `op-s7-${suffix}`
-    // R11 + R19: a running run with a child and a pending step approval.
+    // A running run with a child and a pending step approval.
     const target = await runReadyForApprovals(recipe)
     const proof = await runningStep(target.runId, 'step-op')
     const pending = await requestStepApproval({ ...target, recipe, stepId: 'step-op', proof })
@@ -2310,7 +2310,7 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
       status: 'pending',
       bound_workflow_run_id: target.runId,
     })
-    // R12: a paused scheduled run with a child.
+    // A paused scheduled run with a child.
     const paused = await insertRun({
       recipe,
       phase: 'AuthorizationPaused',

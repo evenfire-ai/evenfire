@@ -87,7 +87,7 @@ const REMAINING_STAGES = [
   'destination',
 ] as const
 
-describe('workflow continuation checkpoint stages (S9)', () => {
+describe('workflow continuation checkpoint stages', () => {
   let budget: AccessExecutionBudget
   let stored: ReturnType<typeof vi.fn>
   let warn: ReturnType<typeof vi.spyOn>

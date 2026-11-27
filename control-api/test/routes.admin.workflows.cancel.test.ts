@@ -6,7 +6,7 @@ import { createWorkflowsAdminRouter } from '../src/routes/admin/workflows/index.
 import { WorkflowRunCancelError } from '../src/services/workflows/workflowRunCancelService.js'
 import { MockGateway } from './mockGateway.js'
 
-// Operator cancel route (X3): authentication, the admin trigger budget, and the
+// Operator cancel route: authentication, the admin trigger budget, and the
 // mapping of path and service errors. The cancel service is mocked here; its
 // statements are covered by workflowRunCancel.realPostgres.integration.test.ts.
 

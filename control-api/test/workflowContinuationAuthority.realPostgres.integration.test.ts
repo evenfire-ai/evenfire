@@ -62,7 +62,7 @@ vi.mock('../src/services/notificationEmitter.js', async importOriginal => ({
 }))
 
 // Pass-through of the live authorizer that can run a hook between the first
-// and the second resolution of one checkpoint (R7: a token renewal lands
+// and the second resolution of one checkpoint (a token renewal that lands
 // between the path listing and the explicit selection).
 const authorizerHook = vi.hoisted(() => ({
   armed: false,

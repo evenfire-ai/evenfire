@@ -48,7 +48,7 @@ const RECIPE_DURATION_SECONDS = 600
 type Producer = 'v1' | 'v2' | 'decision' | 'legacyConsume' | 'cron'
 
 /**
- * S33 (C3 rows R56, R57, R64): every `INSERT INTO workflow_runs` stores a
+ * Every `INSERT INTO workflow_runs` stores a
  * duration. Each producer enters through its production entry point, so the
  * NULL comes from the recipe read, the stored approval run intent or the
  * schedule row, never from a hand-built insert:
