@@ -1,8 +1,9 @@
 /**
- * MIGRATION TEST — delete it once the "hidden → greyed out" change of the
- * EvenDrive resource menu is merged. From then on the permanent shape and
- * monotonicity properties (gfsResourceActionSurfaces.property.test.ts) guard
- * the menu.
+ * MIGRATION TEST — delete it, with `__fixtures__/__migration__/`, once the
+ * "hidden → greyed out" change of the EvenDrive resource menu is merged
+ * (tracked in https://github.com/evenfire-ai/evenfire/issues/1690). From then
+ * on the permanent shape and monotonicity properties
+ * (gfsResourceActionSurfaces.property.test.ts) guard the menu.
  *
  * It proves the migration against the menu model as it was right before the
  * change. `__fixtures__/__migration__/` holds that model, copied verbatim with
