@@ -209,7 +209,7 @@ describeRealPostgres('OIDC attempt sign-in context on real PostgreSQL', () => {
     const attempt = await seedAttempt()
     const invitationId = randomUUID()
     const invitedEmail = `invitee-${randomUUID()}@fixture.test`
-    // PR 2 adds the invitation writer; until then the row is written as admin.
+    // No runtime code writes an invitation context yet, so the test writes the row as admin.
     await pool!.query(
       `INSERT INTO oidc_attempt_sign_in_contexts
          (attempt_id, context_kind, invitation_id, invited_email)

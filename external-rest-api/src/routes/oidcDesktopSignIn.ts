@@ -24,7 +24,11 @@ const REDEEM_PER_CLIENT_LIMIT = 60
 /** The redeem limiter's window; a control-api 429 without a usable Retry-After waits one. */
 const REDEEM_WINDOW_SECONDS = 60
 
-/** The control-api failures relayed with their own status, each with the one code it may carry. */
+/**
+ * control-api failures relayed with their own status, each with the one code it may carry.
+ * relayFailure relays three more outside this map: the 403 refusal with an allowlisted reason,
+ * control-api's limiter 429 and its session deferral 503.
+ */
 const RELAYED_FAILURES: ReadonlyMap<number, string> = new Map([
   [400, 'invalid_desktop_sign_in_code'],
   [409, 'desktop_sign_in_unavailable'],
@@ -92,8 +96,8 @@ function isObject(value: unknown): value is Record<string, unknown> {
 /**
  * `POST /oidc/desktop-sign-in/redeem`: Desktop's main process trades the one-use code from its
  * browser sign-in, with its PKCE verifier, for the `{ token, me }` password login returns.
- * Every answer is rebuilt from the allow-list in design §7.6; nothing control-api sends is
- * passed through as it came.
+ * Every answer is rebuilt from the success check below and relayFailure's allow-list; nothing
+ * control-api sends is passed through as it came.
  */
 export function createOidcDesktopSignInRouter(): Router {
   const router = Router()

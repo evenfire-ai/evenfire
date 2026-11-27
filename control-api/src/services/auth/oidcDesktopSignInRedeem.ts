@@ -184,8 +184,8 @@ async function redeemInTransaction(
 
 /**
  * Trades a one-use Desktop sign-in code and its PKCE verifier for a session,
- * in one transaction (design §7.4). The caller has already selected the
- * session format and loaded the provider configuration.
+ * in one transaction, so a code is redeemed at most once. The caller has
+ * already selected the session format and loaded the provider configuration.
  *
  * - `invalid_code`: the code is unknown, expired or already redeemed, or the
  *   verifier is wrong (`verifierMismatch`). A wrong verifier leaves the code

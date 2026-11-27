@@ -336,10 +336,10 @@ async function signInResolvedMember(
 
 /**
  * Signs a verified OIDC identity in as a member, in one transaction: account
- * resolution (v5 §4), pending invitations for the account's stored email, the
- * team, then the completion: a session, or a one-use Desktop code. A refusal
- * issues no session, mints no code and writes nothing except the connection
- * record.
+ * resolution (resolveOidcAccount), pending invitations for the account's
+ * stored email, the team, then the completion: a session, or a one-use Desktop
+ * code. A refusal issues no session, mints no code and writes nothing except
+ * the connection record.
  *
  * A unique-key conflict means a parallel sign-in committed the same link or
  * account first. PostgreSQL has aborted that transaction, so the whole sign-in

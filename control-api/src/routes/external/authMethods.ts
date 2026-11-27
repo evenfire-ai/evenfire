@@ -34,7 +34,7 @@ export function createExternalAuthMethodsRouter(
       provider = getProvider()
     } catch (error) {
       // Not rethrown: password login keeps working while the OIDC configuration is
-      // broken; the OIDC routes answer 503 themselves, and PR4 revisits this row.
+      // broken, and the OIDC routes answer 503 themselves.
       logConfigurationFailure(error)
       provider = undefined
     }

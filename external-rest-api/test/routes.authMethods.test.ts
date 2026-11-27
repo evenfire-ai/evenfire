@@ -91,7 +91,7 @@ afterEach(() => {
 
 describe('edge GET /auth/methods: the rebuilt answer', () => {
   // `methods` is filtered by name only. An `oidc` name left without a usable block is what
-  // Desktop already treats as absent (design §10.1).
+  // Desktop already treats as absent: it offers a provider only with a usable `oidc` block.
   const methodsRows: Array<[string, ControlApiRecord, number, unknown]> = [
     ['the recorded password answer', password, 200, { methods: ['password'] }],
     [
