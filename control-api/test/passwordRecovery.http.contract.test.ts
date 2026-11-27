@@ -1017,6 +1017,35 @@ describe('invitation/password producer response mappings', () => {
     expect(directory.verifyUserPassword).not.toHaveBeenCalled()
   })
 
+  it('sends a session whose account is not active to sign in, not to a retryable outage', async () => {
+    liveAccount.lifecycle_state = 'retired'
+    try {
+      // control-api's own answer: the route finds no active account row for the session.
+      const producerResponse = await request(producerServer)
+        .post('/api/v1/external/invitations/desktop-authorization')
+        .set('authorization', `Bearer ${internalServiceToken}`)
+        .set('x-service-token', 'external-rest-api')
+        .set('x-user-session-token', 'r6-synthetic-session')
+        .send({})
+      expect(producerResponse.status).toBe(401)
+      expect(producerResponse.body).toEqual({ error: 'Unauthorized' })
+      expect(producerResponse.headers['x-internal-service-auth-refusal']).toBeUndefined()
+
+      const response = await request(await publicApp())
+        .post('/api/v1/invitations/desktop-authorization')
+        .set('authorization', `Bearer ${sessionToken}`)
+        .send({})
+
+      expect(response.status).toBe(401)
+      expect(response.body).toEqual({ error: 'Unauthorized' })
+      expect(response.headers['retry-after']).toBeUndefined()
+      expect(response.headers['set-cookie']).toBeUndefined()
+      expect(desktopFlow.storeDesktopAuthorizationToken).not.toHaveBeenCalled()
+    } finally {
+      liveAccount.lifecycle_state = 'active'
+    }
+  })
+
   it('maps the producer desktop-registration not-found code without leaking details', async () => {
     desktopFlow.storeDesktopAuthorizationToken.mockRejectedValueOnce(
       new Error(

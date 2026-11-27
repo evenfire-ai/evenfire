@@ -40,7 +40,8 @@ function upstream(status: number): ControlApiError {
 // The body control-api sends with every bare 401: requireValidExternalSessionToken for a
 // missing or ended session (control-api/src/middleware/externalSessionAuth.ts) and
 // its service-credential guard (control-api/src/middleware/internalServiceAuth.ts) when it
-// refuses this edge's credential. The two cannot be told apart.
+// refuses this edge's credential. No body tells the two apart; only the guard adds a
+// refusal header.
 const BARE_UNAUTHORIZED_BODY = { error: 'Unauthorized' }
 const BARE_UNAUTHORIZED_REJECTION = { status: 401, body: BARE_UNAUTHORIZED_BODY }
 
