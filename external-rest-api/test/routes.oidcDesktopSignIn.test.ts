@@ -329,8 +329,9 @@ describe('edge POST /oidc/desktop-sign-in/redeem: request and answers', () => {
     expect(res.body).toEqual(body)
     expect(res.headers['set-cookie']).toBeUndefined()
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    // Every generic 503 logs one line; an answer control-api meant is relayed unlogged.
-    expect(errorLog).toHaveBeenCalledTimes(status === 503 ? 1 : 0)
+    // Every generic 503 logs one line; an answer control-api meant is relayed unlogged, and so
+    // is its session deferral, which control-api logs itself.
+    expect(errorLog).toHaveBeenCalledTimes(status === 503 && answer !== issuanceUnavailable ? 1 : 0)
   })
 
   it('answers 503 when control-api cannot be reached', async () => {
@@ -484,8 +485,9 @@ describe('edge POST /oidc/desktop-sign-in/redeem: the fallback log', () => {
     }
   )
 
-  it("logs control-api's own 503 once, by class and status", async () => {
-    controlApiAnswers(issuanceUnavailable)
+  it("logs control-api's own generic 503 once, by class and status", async () => {
+    // control-api's redeem 503 for any failure but the session deferral.
+    controlApiAnswers(derived(issuanceUnavailable, { error: 'oidc_storage_unavailable' }))
     const res = await (await edge()).post(REDEEM).send(redeemBody)
 
     expect(res.status).toBe(503)
@@ -496,6 +498,20 @@ describe('edge POST /oidc/desktop-sign-in/redeem: the fallback log', () => {
       upstreamStatus: 503,
     })
     expectNothingSecret(line)
+  })
+
+  it("relays control-api's session deferral with its Retry-After and logs nothing", async () => {
+    // control-api's error handler logs the deferral at warn; the edge does not log it again.
+    const fetchMock = controlApiAnswers(issuanceUnavailable, {
+      'retry-after': ISSUANCE_DEFERRED_RETRY_AFTER,
+    })
+    const res = await (await edge()).post(REDEEM).send(redeemBody)
+
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual(ISSUANCE_UNAVAILABLE)
+    expect(res.headers['retry-after']).toBe(ISSUANCE_DEFERRED_RETRY_AFTER)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(errorLog).not.toHaveBeenCalled()
   })
 
   it('logs an unusable sign-in once, by its status and never its body', async () => {

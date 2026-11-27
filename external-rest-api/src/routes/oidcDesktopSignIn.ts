@@ -48,9 +48,10 @@ function logIssuanceFallback(fields: ControlApiFailureLogFields): void {
 
 /**
  * Rebuilds a control-api failure from the allow-list. control-api's own 429 stays a 429 with a
- * bounded Retry-After and is not logged: it is a wait, not a failure. Anything not listed is the
- * 503 row, logged by class and upstream status; when it is control-api's session deferral, its
- * bounded Retry-After goes with it.
+ * bounded Retry-After and is not logged: it is a wait, not a failure. control-api's session
+ * deferral stays the 503 row with its bounded Retry-After and is not logged here either:
+ * control-api's error handler already logs it at warn. Anything else not listed is the 503 row,
+ * logged once by class and upstream status.
  */
 function relayFailure(error: ControlApiError, res: Response): void {
   if (isControlApiRateLimited(error)) {
@@ -77,6 +78,8 @@ function relayFailure(error: ControlApiError, res: Response): void {
   if (error.status === 503 && isSessionIssuanceUnavailable(error)) {
     const retryAfterSeconds = controlApiRetryAfterSeconds(error)
     if (retryAfterSeconds !== undefined) res.setHeader('Retry-After', String(retryAfterSeconds))
+    sendIssuanceUnavailable(res)
+    return
   }
   logIssuanceFallback(controlApiFailureLogFields(error))
   sendIssuanceUnavailable(res)
