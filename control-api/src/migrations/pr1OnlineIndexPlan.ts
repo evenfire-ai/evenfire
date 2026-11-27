@@ -184,12 +184,12 @@ function constraintValidation(
   return Object.freeze({ ...entry })
 }
 
-// Constraints that PR2 adds NOT VALID to tables readers already use. Adding a
-// constraint NOT VALID skips the scan that a validating ADD CONSTRAINT runs
-// under ACCESS EXCLUSIVE; each is validated after its migration's schema
-// transaction commits, under SHARE UPDATE EXCLUSIVE, so reads and writes
-// continue during the scan.
-export const PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS: readonly PostSchemaConstraintValidation[] =
+// Constraints added NOT VALID to tables readers already use, in the order the
+// runner validates them. Adding a constraint NOT VALID skips the scan that a
+// validating ADD CONSTRAINT runs under ACCESS EXCLUSIVE; each is validated
+// after its migration's schema transaction commits, under SHARE UPDATE
+// EXCLUSIVE, so reads and writes continue during the scan.
+export const POST_SCHEMA_CONSTRAINT_VALIDATIONS: readonly PostSchemaConstraintValidation[] =
   Object.freeze([
     constraintValidation({
       migrationVersion: '0151_workflow_authority_bindings',
@@ -309,7 +309,7 @@ export function hasPostSchemaWork(version: string): boolean {
   return (
     ONLINE_INDEX_PLAN.some(
       entry => entry.migrationVersion === version && entry.phase === 'after-schema'
-    ) || PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.some(entry => entry.migrationVersion === version)
+    ) || POST_SCHEMA_CONSTRAINT_VALIDATIONS.some(entry => entry.migrationVersion === version)
   )
 }
 
@@ -341,7 +341,7 @@ export async function preparePr1Migration(
     }
   }
   if (phase !== 'after-schema') return
-  const validations = PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.filter(
+  const validations = POST_SCHEMA_CONSTRAINT_VALIDATIONS.filter(
     entry => entry.migrationVersion === version
   )
   for (const validation of validations) {

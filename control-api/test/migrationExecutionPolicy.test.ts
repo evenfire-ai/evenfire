@@ -11,9 +11,9 @@ import {
 } from '../src/migrations/migrationRunner.js'
 import {
   ONLINE_INDEX_PLAN,
+  POST_SCHEMA_CONSTRAINT_VALIDATIONS,
   PR1_ONLINE_INDEX_PLAN,
   PR2_ONLINE_INDEX_PLAN,
-  PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS,
   expectedIndexDefinition,
   hasPostSchemaWork,
   onlineIndex,
@@ -289,7 +289,7 @@ describe('D34 migration execution policy', () => {
     ).toBe(false)
   })
 
-  it('classifies the PR2 online indexes and the eight post-schema constraint validations', () => {
+  it('classifies the PR2 online indexes and the post-schema constraint validations', () => {
     expect(
       PR2_ONLINE_INDEX_PLAN.map(index => [
         index.migrationVersion,
@@ -308,7 +308,7 @@ describe('D34 migration execution policy', () => {
       ['0156_workflow_authorization_pause', 'idx_wr_owner_v2', 'after-schema', 'idx_wr_owner'],
     ])
     expect(
-      PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => [
+      POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => [
         entry.migrationVersion,
         entry.table,
         entry.constraint,

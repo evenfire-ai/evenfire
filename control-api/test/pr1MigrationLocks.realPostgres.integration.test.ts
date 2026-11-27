@@ -8,9 +8,9 @@ import {
   PR2_MIGRATION_VERSIONS,
 } from '../src/migrations/migrationRunner.js'
 import {
+  POST_SCHEMA_CONSTRAINT_VALIDATIONS,
   PR1_ONLINE_INDEX_PLAN,
   PR2_ONLINE_INDEX_PLAN,
-  PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS,
 } from '../src/migrations/pr1OnlineIndexPlan.js'
 import { updateAllowedModel } from '../src/services/llmAllowedModels.js'
 import { type SyncConnector, syncDiscoveredModels } from '../src/services/llmCatalogSync.js'
@@ -535,8 +535,8 @@ describeRealPostgres('PR1 migration locks on real PostgreSQL', () => {
     expect(relations.rows).toEqual([])
   })
 
-  it('adds the eight PR2 constraints NOT VALID on a fresh database and validates each after its schema commit', async () => {
-    const planned = PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => ({
+  it('adds each post-schema constraint NOT VALID on a fresh database and validates it after its schema commit', async () => {
+    const planned = POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => ({
       table: entry.table,
       constraint: entry.constraint,
     }))
@@ -577,7 +577,7 @@ describeRealPostgres('PR1 migration locks on real PostgreSQL', () => {
       expect(receipt, version).toBeGreaterThanOrEqual(0)
       const previous = index > 0 ? PR2_MIGRATION_VERSIONS[index - 1] : undefined
       const after = previous ? fresh.pr2Events.indexOf(`receipt:${previous}`) : -1
-      const ownValidations = PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.filter(
+      const ownValidations = POST_SCHEMA_CONSTRAINT_VALIDATIONS.filter(
         entry => entry.migrationVersion === version
       ).map(entry => `validate:${entry.constraint}`)
       expect(fresh.pr2Events.slice(after + 1, receipt), version).toEqual(ownValidations)
