@@ -2,7 +2,6 @@ import {
   ConfigLoader,
   McpHostClient,
   McpHostNotConfiguredError,
-  type Signal,
   SignalPoller,
   StatusReporter,
   StepCoordinator,
@@ -133,18 +132,14 @@ export class WorkflowSDK {
       steps: {},
       workflowName: cfg.workflowName,
     }
-    const server = createServer(
-      stateRef,
-      (signal: Signal) => signals.pushSignal(signal),
-      async (token: string) => {
-        const currentToken = await requireRuntimeToken(
-          cfg.tokenProvider,
-          'getWrcToken',
-          'WRC_TOKEN_FILE'
-        )
-        return safeEqual(token, currentToken)
-      }
-    )
+    const server = createServer(stateRef, async (token: string) => {
+      const currentToken = await requireRuntimeToken(
+        cfg.tokenProvider,
+        'getWrcToken',
+        'WRC_TOKEN_FILE'
+      )
+      return safeEqual(token, currentToken)
+    })
     await start(server, cfg.restPort)
 
     return new WorkflowSDK({ config, signals, coordinator, status, mcpHost, server, stateRef })

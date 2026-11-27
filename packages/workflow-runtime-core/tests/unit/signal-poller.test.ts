@@ -21,47 +21,41 @@ function makePoller(
   })
 }
 
+// Seeds a poller the way production fills it: one poll whose response
+// carries the given signals. The caller stops the returned poller.
+async function seedByPoll(signals: Signal[]): Promise<SignalPoller> {
+  const fetchMock = vi.fn().mockResolvedValue({
+    ok: true,
+    status: 200,
+    json: async () => ({ signals }),
+  })
+  const poller = makePoller(fetchMock)
+  poller.pollSignals(() => {})
+  await vi.waitFor(() => expect(poller.getSignals()).toHaveLength(signals.length))
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  return poller
+}
+
 describe('SignalPoller', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.useRealTimers()
   })
 
-  describe('pushSignal()', () => {
-    it('stores a signal', () => {
-      const poller = makePoller()
-      const signal: Signal = {
-        type: 'cancel',
-        requestId: OWN_CANCEL_ID,
-        receivedAt: new Date().toISOString(),
-      }
-      poller.pushSignal(signal)
-      expect(poller.getSignals()).toHaveLength(1)
-      expect(poller.getSignals()[0].type).toBe('cancel')
-    })
-
-    it('deduplicates by requestId', () => {
-      const poller = makePoller()
-      const signal: Signal = {
-        type: 'cancel',
-        requestId: OWN_CANCEL_ID,
-        receivedAt: new Date().toISOString(),
-      }
-      poller.pushSignal(signal)
-      poller.pushSignal(signal)
-      expect(poller.getSignals()).toHaveLength(1)
-    })
+  it('has no push entry point', () => {
+    const poller = makePoller()
+    // Witness: the poll entry point exists on the same instance.
+    expect(typeof poller.pollSignals).toBe('function')
+    expect('pushSignal' in poller).toBe(false)
   })
 
   describe('hasSignal()', () => {
-    it('returns true when signal type exists', () => {
-      const poller = makePoller()
-      poller.pushSignal({
-        type: 'pause',
-        requestId: 'r1',
-        receivedAt: new Date().toISOString(),
-      })
+    it('returns true when signal type exists', async () => {
+      const poller = await seedByPoll([
+        { type: 'pause', requestId: 'r1', receivedAt: new Date().toISOString() },
+      ])
       expect(poller.hasSignal('pause')).toBe(true)
+      poller.stop()
     })
 
     it('returns false when signal type not present', () => {
@@ -71,16 +65,14 @@ describe('SignalPoller', () => {
   })
 
   describe('consumeSignal()', () => {
-    it('returns and removes signal of given type', () => {
-      const poller = makePoller()
-      poller.pushSignal({
-        type: 'pause',
-        requestId: 'r1',
-        receivedAt: new Date().toISOString(),
-      })
+    it('returns and removes signal of given type', async () => {
+      const poller = await seedByPoll([
+        { type: 'pause', requestId: 'r1', receivedAt: new Date().toISOString() },
+      ])
       const consumed = poller.consumeSignal('pause')
       expect(consumed?.requestId).toBe('r1')
       expect(poller.hasSignal('pause')).toBe(false)
+      poller.stop()
     })
 
     it('returns undefined when signal type not present', () => {
@@ -109,30 +101,6 @@ describe('SignalPoller', () => {
 
       expect(received).toHaveLength(1)
       expect(received[0].type).toBe('pause')
-      stop()
-    })
-
-    it('does not invoke callback for duplicate signals', async () => {
-      const signal: Signal = {
-        type: 'cancel',
-        requestId: OWN_CANCEL_ID,
-        receivedAt: new Date().toISOString(),
-      }
-      let callCount = 0
-      const fetchMock = vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({ signals: [signal] }),
-      })
-      const poller = makePoller(fetchMock)
-      // Pre-push signal to mark as seen
-      poller.pushSignal(signal)
-
-      const stop = poller.pollSignals(() => {
-        callCount++
-      })
-
-      await new Promise(r => setTimeout(r, 50))
-      expect(callCount).toBe(0)
       stop()
     })
 
@@ -233,7 +201,10 @@ describe('SignalPoller', () => {
       const ownCancel = signal('cancel', OWN_CANCEL_ID)
       const fetchMock = vi
         .fn()
-        .mockResolvedValueOnce({ ok: true, json: async () => ({ signals: [foreignCancel, pause] }) })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ signals: [foreignCancel, pause] }),
+        })
         .mockResolvedValueOnce({ ok: true, json: async () => ({ signals: [ownCancel] }) })
       const poller = makePoller(fetchMock)
       const received: Signal[] = []
@@ -255,17 +226,6 @@ describe('SignalPoller', () => {
       stop()
     })
 
-    it('drops a foreign cancel given to pushSignal and keeps its own', () => {
-      const poller = makePoller()
-      poller.pushSignal(signal('cancel', 'cancel:run-b'))
-      expect(poller.getSignals()).toEqual([])
-      expect(poller.hasSignal('cancel')).toBe(false)
-
-      poller.pushSignal(signal('cancel', OWN_CANCEL_ID))
-      expect(poller.hasSignal('cancel')).toBe(true)
-      expect(poller.getSignals().map(s => s.requestId)).toEqual([OWN_CANCEL_ID])
-    })
-
     it('drops every cancel when the pod has no run id', async () => {
       const fetchMock = vi.fn().mockResolvedValue({
         ok: true,
@@ -277,7 +237,6 @@ describe('SignalPoller', () => {
         received.push(s)
       })
       await new Promise(r => setTimeout(r, 50))
-      poller.pushSignal(signal('cancel', 'cancel:run-c'))
 
       // The poll ran: the pause signal of the same response was accepted.
       expect(received.map(s => s.requestId)).toEqual(['p-2'])
@@ -298,16 +257,13 @@ describe('SignalPoller', () => {
       poller.stop()
     })
 
-    it('preserves pendingSignals after stop so coordinator can drain them', () => {
+    it('preserves pendingSignals after stop so coordinator can drain them', async () => {
       // stop() intentionally does NOT clear pendingSignals — a cancel/approval signal
       // received just before shutdown must remain readable by the coordinator loop.
-      const poller = makePoller()
-      poller.pushSignal({
-        type: 'cancel',
-        requestId: OWN_CANCEL_ID,
-        receivedAt: new Date().toISOString(),
-      })
-      poller.pushSignal({ type: 'pause', requestId: 'req-2', receivedAt: new Date().toISOString() })
+      const poller = await seedByPoll([
+        { type: 'cancel', requestId: OWN_CANCEL_ID, receivedAt: new Date().toISOString() },
+        { type: 'pause', requestId: 'req-2', receivedAt: new Date().toISOString() },
+      ])
       expect(poller.getSignals()).toHaveLength(2)
 
       poller.stop()
