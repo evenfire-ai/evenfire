@@ -849,7 +849,7 @@ assert_a_tag_override_on_a_synced_profile_re_pulls_and_re_deploys() {
   rc_err=$?
   if [ "$rc_new" -eq 0 ] && [ "$rc_same" -eq 0 ] && [ "$rc_err" -eq 0 ] \
      && grep -Fqx 'plan repull=true deploy=true build=false' <<< "$out_new" \
-     && grep -Fq "not ghcr:override-tag" <<< "$out_new" \
+     && grep -Fq "ghcr:override-tag is unproven (marker=ghcr:${PIN_TAG})" <<< "$out_new" \
      && grep -Fqx 'plan repull=false deploy=false build=false' <<< "$out_same" \
      && ! grep -Fq 'No usable marker baseline' <<< "$out_same" \
      && grep -Fqx 'plan repull=true deploy=true build=false' <<< "$out_err" \
@@ -885,11 +885,50 @@ assert_a_tag_override_on_an_unsynced_profile_re_deploys() {
   rc_same=$?
   if [ "$rc_new" -eq 0 ] && [ "$rc_same" -eq 0 ] \
      && grep -Fqx 'plan repull=true deploy=true build=false' <<< "$out_new" \
-     && grep -Fq "last rendered at ghcr:${PIN_TAG}, not ghcr:override-tag" <<< "$out_new" \
+     && grep -Fq "ghcr:override-tag is unproven (manifest=ghcr:${PIN_TAG})" <<< "$out_new" \
      && grep -Fqx 'plan repull=true deploy=false build=false' <<< "$out_same"; then
     pass "a tag override on an unsynced profile re-deploys; setup's own tag only re-pulls"
   else
     fail "expected override -> repull+deploy and the recorded tag -> repull only; rc=$rc_new/$rc_same new=$out_new same=$out_same"
+  fi
+  cleanup_fixture "$d"
+}
+
+# A marker stamped at the tag this run resolves does not prove the render when
+# an image acquisition at another tag has happened since. A sync at one tag, then
+# `MINIKUBE_IMAGE_TAG=<other> make minikube-setup`, then a pre-gate back at the
+# first tag left the pods on <other> under a marker naming the first. The image
+# manifest records that acquisition, so it must agree too. When it records the
+# resolved tag, the stale marker costs a re-pull and no render.
+assert_an_acquisition_at_another_tag_since_the_marker_re_deploys() {
+  local d head out_other out_same rc_other rc_same
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  head="$(repo_head "$d")"
+  write_marker "$d" "$head" g7 ghcr "$PIN_TAG"
+  write_manifest "$d" '{"generated":"g8","imageSource":"ghcr","imageTag":"other-tag","images":{}}'
+  out_other="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
+    TEST_IMAGE_REVISION="$head" \
+    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" IMAGES_GENERATED_AT=g8 \
+      run_incremental "$d" 'incremental_plan; echo "plan repull=${INCREMENTAL_REPULL_ALL} deploy=${INCREMENTAL_FULL_DEPLOYMENT} build=${INCREMENTAL_FULL_IMAGE_BUILD}"'
+  )"
+  rc_other=$?
+  write_manifest "$d" '{"generated":"g8","imageSource":"ghcr","imageTag":"'"$PIN_TAG"'","images":{}}'
+  out_same="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
+    TEST_IMAGE_REVISION="$head" \
+    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" IMAGES_GENERATED_AT=g8 \
+      run_incremental "$d" 'incremental_plan; echo "plan repull=${INCREMENTAL_REPULL_ALL} deploy=${INCREMENTAL_FULL_DEPLOYMENT} build=${INCREMENTAL_FULL_IMAGE_BUILD}"'
+  )"
+  rc_same=$?
+  if [ "$rc_other" -eq 0 ] && [ "$rc_same" -eq 0 ] \
+     && grep -Fqx 'plan repull=true deploy=true build=false' <<< "$out_other" \
+     && grep -Fq "ghcr:${PIN_TAG} is unproven (manifest=ghcr:other-tag)" <<< "$out_other" \
+     && grep -Fqx 'plan repull=true deploy=false build=false' <<< "$out_same"; then
+    pass "an acquisition at another tag since the marker re-deploys; one at the same tag only re-pulls"
+  else
+    fail "expected another-tag acquisition -> repull+deploy, same-tag -> repull only; rc=$rc_other/$rc_same other=$out_other same=$out_same"
   fi
   cleanup_fixture "$d"
 }
@@ -1650,6 +1689,7 @@ assert_a_re_acquisition_invalidates_the_marker_baseline_in_local_mode
 assert_an_untouched_image_set_keeps_the_marker_baseline
 assert_a_tag_override_on_a_synced_profile_re_pulls_and_re_deploys
 assert_a_tag_override_on_an_unsynced_profile_re_deploys
+assert_an_acquisition_at_another_tag_since_the_marker_re_deploys
 assert_a_forced_ghcr_sync_shadows_every_change_since_the_release
 assert_a_reverted_uncommitted_change_is_rebuilt
 assert_the_marker_records_every_uncommitted_path

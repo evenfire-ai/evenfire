@@ -40,8 +40,8 @@ INCREMENTAL_MARKER_UNCOMMITTED_PATHS=""
 # them in the marker with the ones that differ when it stamps.
 INCREMENTAL_UNCOMMITTED_PATHS=""
 
-# The image manifest's recorded coordinate stands in for a marker no sync has
-# stamped yet (incremental_deployed_coordinate).
+# The image manifest's recorded coordinate is the second record of what the
+# cluster was rendered at (incremental_unproven_render).
 # shellcheck source=scripts/minikube/image-mode.sh
 source "${PROJECT_DIR}/scripts/minikube/image-mode.sh"
 
@@ -189,21 +189,31 @@ incremental_marker_git_head() {
   incremental_marker_baseline
 }
 
-# The image coordinate the cluster's Deployments were last rendered at, as
-# `<imageSource>:<imageTag>`. Only a render moves a Deployment to another tag:
-# a re-pull or a shadow build leaves every pod on the tag it was deployed with.
-# The last sync stamped its render in the marker. A profile no sync has stamped
-# yet was rendered by the setup that acquired its images, so the image
-# manifest's record stands in. Fails when the manifest cannot be read.
-incremental_deployed_coordinate() {
-  local source tag
-  if [[ "${INCREMENTAL_MARKER_PRESENT}" == "true" ]]; then
-    printf '%s:%s' "${INCREMENTAL_MARKER_IMAGE_SOURCE}" "${INCREMENTAL_MARKER_IMAGE_TAG}"
+# Why the cluster's Deployments may not be rendered at ghcr:<IMAGE_TAG>, as
+# `<record>=<imageSource>:<imageTag>`, or nothing when every record agrees.
+#
+# Only a render moves a Deployment to another tag: a re-pull or a shadow build
+# leaves every pod on the tag it was deployed with. Two records name a render.
+# The last sync stamped its own in the marker. The last image acquisition wrote
+# its coordinate to the image manifest: setup renders what it pulls, but a bare
+# pull renders nothing, so after an acquisition at another tag either record may
+# be the live one. Both must name the coordinate this run resolves.
+incremental_unproven_render() {
+  local want="ghcr:${IMAGE_TAG}" source tag
+  if [[ "${INCREMENTAL_MARKER_PRESENT}" == "true" &&
+        "${INCREMENTAL_MARKER_IMAGE_SOURCE}:${INCREMENTAL_MARKER_IMAGE_TAG}" != "${want}" ]]; then
+    printf 'marker=%s:%s' "${INCREMENTAL_MARKER_IMAGE_SOURCE}" "${INCREMENTAL_MARKER_IMAGE_TAG}"
     return 0
   fi
-  source="$(image_mode_manifest_field "${PROJECT_DIR}" 1)" || return 1
-  tag="$(image_mode_manifest_field "${PROJECT_DIR}" 2)" || return 1
-  printf '%s:%s' "${source}" "${tag}"
+  # image_mode_read_manifest has already named the unreadable file on stderr.
+  if ! source="$(image_mode_manifest_field "${PROJECT_DIR}" 1)" ||
+     ! tag="$(image_mode_manifest_field "${PROJECT_DIR}" 2)"; then
+    printf 'manifest=unreadable'
+    return 0
+  fi
+  if [[ "${source}:${tag}" != "${want}" ]]; then
+    printf 'manifest=%s:%s' "${source}" "${tag}"
+  fi
 }
 
 # Point the Docker CLI at minikube's daemon, once, so a retag lands where the
@@ -365,7 +375,7 @@ incremental_classify_path() {
 }
 
 incremental_plan() {
-  local marker_git_head="" path baseline marker_read=ok deployed
+  local marker_git_head="" path baseline marker_read=ok unproven
   local previously_uncommitted=""
 
   # Before any early return: every plan, including a full build, leaves the
@@ -402,13 +412,15 @@ incremental_plan() {
   # override, or a coordinate nothing can prove), re-pulling and shadowing are
   # not enough: the pods would keep the old tag under a marker naming the new.
   if [[ "${IMAGE_SOURCE}" == "ghcr" ]]; then
-    if [[ "${marker_read}" != "ok" ]] || ! deployed="$(incremental_deployed_coordinate)"; then
-      deployed="unknown"
+    if [[ "${marker_read}" != "ok" ]]; then
+      unproven="marker=unreadable"
+    else
+      unproven="$(incremental_unproven_render)"
     fi
-    if [[ "${deployed}" != "ghcr:${IMAGE_TAG}" ]]; then
+    if [[ -n "${unproven}" ]]; then
       INCREMENTAL_REPULL_ALL=true
       INCREMENTAL_FULL_DEPLOYMENT=true
-      log "Cluster was last rendered at ${deployed}, not ghcr:${IMAGE_TAG}; re-pulling and re-deploying the release set"
+      log "Cluster render at ghcr:${IMAGE_TAG} is unproven (${unproven}); re-pulling and re-deploying the release set"
     fi
   fi
 
