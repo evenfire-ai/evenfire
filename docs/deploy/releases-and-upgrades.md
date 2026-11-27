@@ -314,11 +314,15 @@ Read the notes for every release you skip over, not only the target release.
    `0152_gfs_upload_authority_bindings` must be applied first; do not bump
    `CONTEXT_MAPPER_GFSC_IMAGE` on its own ahead of control-api. v0.12.1 does
    not include that change. workflow-recipes images of the same release need
-   `0151_workflow_authority_bindings` and `0155_workflow_run_failure_reason` to
-   start a run: roll workflow-recipes after the control-api migration Job. If
-   it rolls first, runs already in progress continue, and new runs stay
-   `Pending` and are retried on each run poll until the migrations are
-   applied.
+   `0151_workflow_authority_bindings`, `0155_workflow_run_failure_reason` and
+   `0160_workflow_run_cancel_request`: roll workflow-recipes after the
+   control-api migration Job. If it rolls before `0151` or `0155`, new runs
+   stay `Pending` and are retried on each run poll until the migrations are
+   applied. If it rolls before `0160`, it cannot record the end of any run:
+   every terminal write, the duration sweep and cancel delivery fail with
+   `column "cancel_requested_at" does not exist`, and runs that finish in that
+   window stay `Running` in the database until a later event for their recipe,
+   a workflow-recipes restart, or the duration sweep after the migration.
 4. **Follow any feature-specific runbook** below.
 
 ### Feature-specific notes
@@ -377,11 +381,36 @@ the runner exits.
 
 #### Workflow run cancellation
 
-This release adds run cancellation: the user who launched a run, or a live admin of the run's
-team while the team holds the recipe, can cancel it from Desktop or the External REST API. control-api stores the request
+This release adds run cancellation. The user who launched a run can cancel it. A team admin can
+cancel the team's scheduled and autonomous runs, and user runs that record no launcher, while
+signed in to that team and while the team holds a grant on the recipe; a team admin cannot cancel a
+teammate's manual run. A platform admin can cancel any run through
+`POST /api/v1/admin/workflows/:ns/:name/runs/:runId/cancel`. Cancel is available from Desktop, the
+Control UI and the External REST API. control-api stores the request
 (`workflow_runs.cancel_requested_at`, migration `0160_workflow_run_cancel_request`) and workflow-recipes delivers it to the
-run's coordinator, which stops before its next step. Only workflow-recipes images of this
-release deliver cancel requests.
+run's coordinator. A running run stops at the first step boundary after its coordinator receives
+the signal (normally within 5 s). A step that starts before then still runs, and steps that already
+ran are not undone. Only workflow-recipes images of this release deliver cancel requests.
+
+Roll external-rest-api before control-api, as for the
+[user access foundation upgrade](user-access-foundation-upgrade.md) (edge before control-api). The
+new external-rest-api works against an older control-api: an older control-api does not mark runs
+as cancellable, so Desktop shows no Cancel. In the opposite order a new control-api marks runs as
+cancellable, so Desktop shows Cancel, but the older external-rest-api has no cancel route and
+answers `404 Not Found`.
+
+**Runs keep running after the user's sessions are revoked.** A run that has started is authorized
+from the user's live account state (active user and a live access path to the recipe: the user's
+own grant, or an active team membership and the team's grant). It is not tied to the session that
+started it. "Sign out everywhere" and a password reset revoke sessions, so they stop new requests
+but do not stop runs already in progress. To stop the runs of a compromised account, retire
+(delete) the user in the Control UI; this cannot be undone. Each run then stops at its next
+authority checkpoint. Removing the user from the team, or removing the user's grant on the recipe,
+also stops the runs that depend on it. You can also cancel the runs: the user who launched a run
+can cancel it from any live session, and a platform admin can cancel any run with
+`POST /api/v1/admin/workflows/<namespace>/<recipe>/runs/<runId>/cancel`. A team admin can cancel
+only the team's scheduled and autonomous runs. Every run also ends at its duration limit (24 hours
+at most).
 
 **The upgrade window.** The deploy rolls control-api before workflow-recipes. For one to two
 minutes the new control-api accepts cancel requests while the old workflow-recipes pod still runs
@@ -392,11 +421,33 @@ and does not deliver them. A run canceled in that window keeps running:
   missing. That `Failed` is the run's own failure (`failure_reason` says which); it is not the
   cancel. The run keeps that phase: the new workflow-recipes does not change it to `Canceled`.
 - Otherwise the new workflow-recipes delivers the request on its next run poll (every 30 s by
-  default) and the run stops before its next step.
+  default), and the run then stops at the first step boundary after its coordinator receives the
+  signal.
 
 Later deploys have no window, because both services then handle cancellation. Deploys with the
 minikube scripts have none either: they stop both services before the migration and start
 workflow-recipes last.
+
+**Before the first deploy of this release: runs older than the duration limit.** From this
+release every run has a duration limit of at most 24 hours (86400 s). A run that stores no limit,
+or a longer one, is treated as having 24 hours. Earlier releases did not end a run that stores no
+limit, so such a run can be more than 24 hours old today. List them, read-only, before the first
+deploy of this release:
+
+```sql
+SELECT run_id, recipe_namespace, recipe_name, actor_id, phase, started_at, max_duration_seconds
+  FROM workflow_runs
+ WHERE phase IN ('Running', 'AuthorizationPaused')
+   AND (max_duration_seconds IS NULL OR max_duration_seconds > 86400)
+   AND started_at < now() - interval '24 hours'
+ ORDER BY started_at;
+```
+
+After the deploy, the duration sweep of workflow-recipes marks each listed run `Failed` the first
+time it reaches it (`Canceled` if the run has a cancel request). This cannot be undone: a `Failed`
+run cannot be resumed, and rolling the release back does not restore the row. A paused run in the
+list loses what it was waiting for (an approval or a resume), and its user has to start it again.
+Run the query before the first deploy, not after it, and tell the users of the listed runs.
 
 **Before the deploy (optional).** Check how many runs are in progress:
 
@@ -409,18 +460,30 @@ With no run in progress, only a run started and canceled during the window can b
 **After the deploy.** List the runs whose cancel request did not take effect:
 
 ```sql
-SELECT run_id, recipe_namespace, recipe_name, actor_id, phase, failure_reason,
-       cancel_requested_at, completed_at
+SELECT 'live' AS source, run_id, recipe_namespace, recipe_name, actor_id::text AS user_id,
+       phase, failure_reason, cancel_requested_at, completed_at
   FROM workflow_runs
  WHERE cancel_requested_at IS NOT NULL
    AND phase IN ('Succeeded', 'Failed')
    AND completed_at >= cancel_requested_at
    AND completed_at <= '<time the workflow-recipes rollout finished>'
+UNION ALL
+SELECT 'archived', run_id, recipe_namespace, recipe_name,
+       COALESCE(triggerer_user_id, triggerer_admin_user_id)::text,
+       final_phase, error_message, cancel_requested_at, completed_at
+  FROM workflow_runs_audit
+ WHERE cancel_requested_at IS NOT NULL
+   AND final_phase IN ('Succeeded', 'Failed')
+   AND completed_at >= cancel_requested_at
+   AND completed_at <= '<time the workflow-recipes rollout finished>'
  ORDER BY completed_at;
 ```
 
-Run both queries read-only (`PGOPTIONS='-c default_transaction_read_only=on'`). Do not rewrite
-the phase of the listed rows: it records what the run did.
+Finished runs move to `workflow_runs_audit` after their `ttlSecondsAfterFinished` (30 days when
+unset), so the query reads both tables.
+
+Run all three queries read-only (`PGOPTIONS='-c default_transaction_read_only=on'`). Do not
+rewrite the phase of the listed rows: it records what the run did.
 
 **What to tell the users of those runs.** Your cancel arrived while the platform was being
 upgraded and did not stop the run. The run finished on its own, and its status shows how it

@@ -43,8 +43,9 @@
  *         (workflows/workflowRunDuration.ts). Every run insert stores that cap
  *         when the recipe gives no duration; rows written before it may hold NULL.
  *     Nothing terminalises a `Pending` row whose child CR never got created,
- *     and the WRC only reaps `Running` rows that carry max_duration_seconds, so
- *     without these bounds one stuck row would block the schedule forever.
+ *     and the WRC's duration sweep reaps a `Running` or `AuthorizationPaused`
+ *     row only from the instance that owns it, so without these bounds one
+ *     stuck row would block the schedule forever.
  *     Past the bound the row no longer blocks (a liveness escape hatch: a stuck
  *     but unreaped run can then overlap one new run).
  *     The skip is recorded (result reason `concurrency_forbidden`, metric
