@@ -518,6 +518,25 @@ describe('OIDC member sign-in configuration', () => {
     }
   })
 
+  it('refuses a claim name or value that contains a format character', () => {
+    for (const name of ['groups\u200b', 'gro\u200cups', 'groups\u2060']) {
+      const message = refusal({ ...OIDC_ENV, ...requiredClaim(CLAIM_VALUE, name) })
+      expect(message).toBe(CLAIM_NAME_REFUSED)
+      expect(message).not.toContain(CLAIM_VALUE)
+      expect(message).not.toContain('groups')
+    }
+    const value = `${CLAIM_VALUE}\u200b`
+    const message = refusal({ ...OIDC_ENV, ...requiredClaim(value) })
+    expect(message).toBe(CLAIM_VALUE_REFUSED)
+    expect(message).not.toContain(CLAIM_VALUE)
+    expect(
+      loadOidcProviderConfiguration(
+        { ...OIDC_ENV, ...requiredClaim(CLAIM_VALUE, 'groups') },
+        GENERATION_KEY
+      )!.memberEligibility.requiredClaim
+    ).toEqual({ name: 'groups', value: CLAIM_VALUE })
+  })
+
   it('refuses a claim name with leading or trailing whitespace', () => {
     for (const name of [' roles', 'roles ', ' groups', 'groups ']) {
       const message = refusal({ ...OIDC_ENV, ...requiredClaim(CLAIM_VALUE, name) })
