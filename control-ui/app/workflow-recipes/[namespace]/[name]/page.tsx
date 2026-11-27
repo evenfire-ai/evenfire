@@ -521,7 +521,7 @@ function WorkflowRecipeDetailContent() {
     const shouldCancel = await confirm({
       title: `Cancel run ${shortId}?`,
       message:
-        'A running run stops at its next signal poll (about 5 seconds). A step that starts before then still runs, and steps that already ran are not undone.',
+        'A running run stops at the first step boundary after its coordinator receives the signal (normally within 5 s). A step that starts before then still runs, and steps that already ran are not undone.',
       confirmLabel: 'Cancel run',
       cancelLabel: 'Keep running',
       tone: 'danger',
