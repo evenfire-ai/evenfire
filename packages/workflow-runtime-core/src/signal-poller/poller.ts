@@ -141,24 +141,6 @@ export class SignalPoller {
 
   private static readonly MAX_PENDING_SIGNALS = 200
 
-  pushSignal(signal: Signal): void {
-    if (this.dropForeignCancel(signal)) return
-    if (this.seenIds.has(signal.requestId)) return
-    this.trackSeen(signal.requestId)
-    if (this.pendingSignals.length >= SignalPoller.MAX_PENDING_SIGNALS) {
-      const dropped = this.pendingSignals.shift()
-      emitLog(
-        'warn',
-        `Signal queue full (cap ${SignalPoller.MAX_PENDING_SIGNALS}), dropped oldest signal`,
-        {
-          droppedType: dropped?.type,
-          droppedRequestId: dropped?.requestId,
-        }
-      )
-    }
-    this.pendingSignals.push(signal)
-  }
-
   getSignals(): Signal[] {
     return [...this.pendingSignals]
   }
