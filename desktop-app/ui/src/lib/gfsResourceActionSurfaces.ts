@@ -12,9 +12,12 @@ import type { GfsRowActionAvailability } from './gfsRowActionAvailability.types'
  * it in as plain data; nothing here reads hooks, context or stores.
  *
  * A handler is withheld only when the action does not apply to the resource
- * (its kind, its format, a missing parent, a missing action host). A missing
- * permission travels as a `can*` gate instead, so the menu keeps the same
- * shape while bits load or are refused and greys the action out.
+ * (its kind, its format, a missing parent, a missing action host, or, in the
+ * preview tab, an authority that cannot be resolved yet, so the URI's kind is
+ * still unknown). A missing permission travels as a `can*` gate instead, so
+ * once those are fixed the menu keeps the same shape while bits load or are
+ * refused and greys the action out. The preview menu therefore grows from its
+ * route actions to the file's own actions when its authority resolves.
  */
 
 type Handler = GfsResourceActionHandler

@@ -152,6 +152,10 @@ export function currentGates(state: CurrentState) {
 export type PreviewShape = {
   /** Denied, unavailable or revoked. */
   accessBlocked: boolean
+  /**
+   * Shape, not a bit: until the session's authority resolves, the file's own
+   * actions do not apply yet and the builder withholds them.
+   */
   authorityPending: boolean
   /**
    * What the preview's URI resolved to: null until it resolves (its parent is
