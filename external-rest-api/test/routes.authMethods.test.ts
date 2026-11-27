@@ -254,6 +254,22 @@ describe('edge GET /auth/methods: the rebuilt answer', () => {
       expect(errorLog).not.toHaveBeenCalled()
     }
   )
+
+  it.each([
+    ['the lowest', 1],
+    ['the highest', 86_400],
+  ])(
+    "relays %s Retry-After the bound allows, %i, from control-api's 429",
+    async (_label, seconds) => {
+      const limited = controlApiRateLimits(String(seconds))
+      const res = await (await edge()).get(METHODS)
+
+      expect(res.status).toBe(429)
+      expect(res.body).toEqual({ error: 'rate_limited', retryAfterSeconds: seconds })
+      expect(res.headers['retry-after']).toBe(String(seconds))
+      expect(limited).toHaveBeenCalledTimes(1)
+    }
+  )
 })
 
 describe('edge GET /auth/methods: the fallback log', () => {

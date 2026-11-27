@@ -23,14 +23,13 @@ export function controlApiRetryAfterSeconds(error: ControlApiError): number | un
 }
 
 /**
- * A 429 control-api answered. Its external route limiters answer with a text body, which the
- * client turns into a ControlApiNonJsonResponseError carrying the status that came back.
+ * The 429 control-api's external route limiter answers on redeem and /auth/methods. That limiter
+ * writes a text body, which the client turns into a ControlApiNonJsonResponseError carrying the
+ * status that came back. Neither route answers a JSON 429: redeem hands control-api's error
+ * handler only its session deferral (a 503), and /auth/methods never reaches that handler.
  */
 export function isControlApiRateLimited(error: ControlApiError): boolean {
-  return (
-    error.status === 429 ||
-    (error instanceof ControlApiNonJsonResponseError && error.upstreamStatus === 429)
-  )
+  return error instanceof ControlApiNonJsonResponseError && error.upstreamStatus === 429
 }
 
 /**

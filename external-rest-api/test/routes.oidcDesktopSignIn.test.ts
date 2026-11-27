@@ -391,6 +391,22 @@ describe('edge POST /oidc/desktop-sign-in/redeem: request and answers', () => {
     }
   )
 
+  it.each([
+    ['the lowest', 1],
+    ['the highest', 86_400],
+  ])(
+    "relays %s Retry-After the bound allows, %i, from control-api's 429",
+    async (_label, seconds) => {
+      const fetchMock = controlApiRateLimits(String(seconds))
+      const res = await (await edge()).post(REDEEM).send(redeemBody)
+
+      expect(res.status).toBe(429)
+      expect(res.body).toEqual({ error: 'rate_limited', retryAfterSeconds: seconds })
+      expect(res.headers['retry-after']).toBe(String(seconds))
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    }
+  )
+
   it("relays the Retry-After of control-api's session deferral with the 503", async () => {
     const fetchMock = controlApiAnswers(issuanceUnavailable, {
       'retry-after': ISSUANCE_DEFERRED_RETRY_AFTER,
