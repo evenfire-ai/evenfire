@@ -242,11 +242,14 @@ STUB
 }
 
 # Loads pre-gate-incremental.sh the way pre-gate-sync.sh does, in a subshell the
-# caller controls, and runs $2 with the callers' contract satisfied.
+# caller controls, and runs $2 with the callers' contract satisfied. That
+# includes pre-gate-sync.sh's set -euo pipefail, so a set -u or errexit failure
+# the sync would hit fails the case too. Call it as a plain assignment and read
+# $? after: on the left of `||`, bash 4.4 and later ignore errexit inside it.
 run_incremental() {
   local d=$1 fn=$2
   (
-    set +u
+    set -euo pipefail
     PROJECT_DIR="$d/repo"
     PROFILE="clerum-test"
     KC="kubectl --context=${PROFILE}"
@@ -657,7 +660,9 @@ assert_no_marker_and_no_revision_label_fails_closed() {
 
 # The baseline read runs inside a command substitution, so a diagnostic printed
 # on stdout there would be captured AS the baseline and then diffed against.
-# A daemon this pre-gate cannot reach must produce no baseline at all.
+# A daemon this pre-gate cannot reach must produce no baseline at all. Under
+# pre-gate-sync.sh's errexit the failed read stops the plan where it happens,
+# naming the daemon, before any delta is derived.
 assert_an_unreachable_docker_daemon_cannot_become_a_baseline() {
   local d out rc
   d="$(mktemp -d)"
@@ -676,10 +681,14 @@ STUB
       run_incremental "$d" 'incremental_plan; echo "full=${INCREMENTAL_FULL_IMAGE_BUILD} reason=${INCREMENTAL_FULL_IMAGE_BUILD_REASON}"'
   )"
   rc=$?
-  if grep -Fq 'full=true' <<< "$out" && grep -Fq 'reason=no-baseline' <<< "$out"; then
-    pass "an unreachable Docker daemon produces no baseline instead of a diagnostic-shaped one"
+  if [ "$rc" -ne 0 ] \
+     && grep -Fq 'minikube -p clerum-test docker-env' "$d/ops.log" \
+     && grep -Fq 'DOCKER_ENV_UNRESOLVED' <<< "$out" \
+     && ! grep -Fq 'deriving the shadow set' <<< "$out" \
+     && ! grep -q '^full=' <<< "$out"; then
+    pass "an unreachable Docker daemon stops the plan instead of becoming a baseline"
   else
-    fail "expected full=true reason=no-baseline from an unreachable daemon; rc=$rc out=$out"
+    fail "expected the plan to stop on DOCKER_ENV_UNRESOLVED from an unreachable daemon; rc=$rc out=$out"
   fi
   cleanup_fixture "$d"
 }
@@ -1461,7 +1470,7 @@ assert_the_touched_scripts_parse() {
 }
 
 assert_incremental_runtime_calls_are_bounded() {
-  local d out rc=0
+  local d out rc
   d="$(mktemp -d)"
   prepare_repo "$d"
   out="$(
@@ -1470,7 +1479,8 @@ assert_incremental_runtime_calls_are_bounded() {
     INCREMENTAL_RUNTIME_TIMEOUT_SECONDS=1 \
     MINIKUBE_DOCKER_KILL_GRACE_SECONDS=1 \
       run_incremental "$d" 'incremental_use_minikube_docker'
-  )" || rc=$?
+  )"
+  rc=$?
   if [ "$rc" -ne 0 ] \
      && grep -Fq '[HARNESS_DEADLINE] label=incremental-docker-env event=timeout' <<< "$out"; then
     pass "incremental Docker daemon selection terminates at its explicit deadline"
@@ -1481,11 +1491,12 @@ assert_incremental_runtime_calls_are_bounded() {
 }
 
 assert_empty_incremental_docker_env_fails_closed() {
-  local d out rc=0
+  local d out rc
   d="$(mktemp -d)"
   prepare_repo "$d"
   export TEST_EMPTY_DOCKER_ENV=1
-  out="$(run_incremental "$d" 'incremental_use_minikube_docker')" || rc=$?
+  out="$(run_incremental "$d" 'incremental_use_minikube_docker')"
+  rc=$?
   unset TEST_EMPTY_DOCKER_ENV
   if [ "$rc" -ne 0 ] && grep -Fq 'DOCKER_ENV_UNRESOLVED' <<<"$out"; then
     pass "empty incremental minikube docker-env output fails closed"
@@ -1498,8 +1509,9 @@ assert_empty_incremental_docker_env_fails_closed() {
 # A full setup leaves INCREMENTAL_TARGETS empty, and pre-gate-sync.sh runs with
 # set -u. On bash 3.2 (macOS /bin/bash) "${arr[@]}" on an empty array is an
 # unbound variable there, so the sync dies before writing its marker. This case
-# loads the file with set -eu on, which run_incremental turns off. Its witness is
-# a run of this file under /bin/bash 3.2; bash 4.4 and later accept the old form.
+# loads the file directly under set -eu and needs no fixture repository. Its
+# witness is a run of this file under /bin/bash 3.2; bash 4.4 and later accept
+# the old form.
 #
 # Each witness has to prove its function ran. The three functions are declared
 # before any call, because an undefined incremental_has_target would also print
