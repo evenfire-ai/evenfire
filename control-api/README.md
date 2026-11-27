@@ -316,20 +316,22 @@ Settings:
 - `CONTROL_API_OIDC_ACCOUNT_CREATION`: what a first sign-in that finds no
   account does. Unset, a non-Entra issuer signs in only existing accounts.
   The setting is refused for Entra ID, which always creates accounts for the
-  pinned tenant. Two values turn creation on for other issuers:
+  pinned tenant. Two values turn creation on for other issuers. With either,
+  an account is created only when the ID token has an `email` claim and
+  `email_verified` is `true`; a first sign-in without them is refused.
   - `enabled` creates an account for each person whose ID token holds the
     required claim, and needs `CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE`. Without
     a value it is refused. Use a group or app role your administrators
     assign, not a profile claim people can edit.
   - `any_issuer_account` creates an account for every person the issuer signs
-    in, with no claim check, and is refused when a required claim value is
-    set. Use it only when the issuer cannot sign in anyone outside your
-    company: the application requires assignment, and self-service sign-up
-    and social or external logins are off at the issuer. Sign in with Apple,
-    Entra External ID user flows with sign-up on, and Auth0 tenants with
-    sign-up on sign in people who registered themselves. With this value each
-    of them gets an active account, and joins
-    `CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID` if it is set. Google's
+    in with a verified email, with no claim check, and is refused when a
+    required claim value is set. Use it only when the issuer cannot sign in
+    anyone outside your company: the application requires assignment, and
+    self-service sign-up and social or external logins are off at the
+    issuer. Sign in with Apple, Entra External ID user flows with sign-up on,
+    and Auth0 tenants with sign-up on sign in people who registered
+    themselves. With this value each of them gets an active account, and
+    joins `CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID` if it is set. Google's
     `accounts.google.com` needs the `hd` required claim, so only `enabled`
     can turn creation on there.
 - `CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID`: a team UUID that each account the
