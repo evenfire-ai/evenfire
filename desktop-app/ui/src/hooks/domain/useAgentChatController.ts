@@ -557,6 +557,8 @@ export function useAgentChatController({
     clearList,
     markUnreadInList,
     clearUnreadInList,
+    beginLatestUnreadAcknowledgment,
+    markUnreadInLatestWindow,
     upsertProvisionalEntry,
     applyEntryTitle,
     applyLatestTitle,
@@ -1080,18 +1082,25 @@ export function useAgentChatController({
   // effect descriptors — unread mirror to disk (GAP-N2), approval-notification
   // emission with (taskId,requestId) dedupe (GAP-N3), coordinator release (R5).
   const runSessionEffects = useCallback(
-    (chatKey: string, effects: SessionFsmEffect[]) => {
+    (
+      chatKey: string,
+      effects: SessionFsmEffect[],
+      observeUnreadClear?: (operation: Promise<void>) => void
+    ) => {
       for (const effect of effects) {
         switch (effect.type) {
           case 'mark_unread': {
             const { agentRef, chatId } = parseTaskKey(chatKey)
             void chatStore.markUnreadTerminal(agentRef, chatId)
             markUnreadInList(chatId)
+            markUnreadInLatestWindow(agentRef, chatId)
             break
           }
           case 'clear_unread': {
             const { agentRef, chatId } = parseTaskKey(chatKey)
-            void chatStore.clearUnreadTerminal(agentRef, chatId)
+            const operation = chatStore.clearUnreadTerminal(agentRef, chatId)
+            observeUnreadClear?.(operation)
+            void operation
             clearUnreadInList(chatId)
             break
           }
@@ -1125,6 +1134,7 @@ export function useAgentChatController({
       chatStore.markUnreadTerminal,
       chatStore.clearUnreadTerminal,
       markUnreadInList,
+      markUnreadInLatestWindow,
       clearUnreadInList,
       pushApprovalNotification,
       tracker,
@@ -1132,9 +1142,13 @@ export function useAgentChatController({
   )
 
   const dispatchSession = useCallback(
-    (chatKey: string, event: SessionFsmEvent) => {
+    (
+      chatKey: string,
+      event: SessionFsmEvent,
+      observeUnreadClear?: (operation: Promise<void>) => void
+    ) => {
       const effects = fsm.dispatch(chatKey, event)
-      if (effects.length) runSessionEffects(chatKey, effects)
+      if (effects.length) runSessionEffects(chatKey, effects, observeUnreadClear)
       // B14 (§4.1 cleanup): a task terminal is the natural GC point — prune the
       // agent's per-message activity/progress maps back under the cap.
       if (event.type === 'STREAM_TERMINAL') {
@@ -1498,8 +1512,15 @@ export function useAgentChatController({
       // unconditional clear below ALSO runs because on a cold reload the FSM flag
       // is fresh-`false` while the persisted disk badge is `true` — CHAT_OPENED's
       // flag-gated effect wouldn't fire, so the badge must still be cleared here.
-      dispatchSession(key, { type: 'CHAT_OPENED' })
-      void chatStore.clearUnreadTerminal(agentRef, chatId)
+      const acknowledgment = beginLatestUnreadAcknowledgment(agentRef, chatId)
+      try {
+        dispatchSession(key, { type: 'CHAT_OPENED' }, acknowledgment.observeUnreadClear)
+        const fallbackClear = chatStore.clearUnreadTerminal(agentRef, chatId)
+        acknowledgment.observeUnreadClear(fallbackClear)
+        void fallbackClear
+      } finally {
+        acknowledgment.close()
+      }
       clearUnreadInList(chatId)
       scrollChatToBottom()
 
@@ -1543,6 +1564,7 @@ export function useAgentChatController({
       isHostAccessBlocked,
       isChatDeleted,
       dispatchSession,
+      beginLatestUnreadAcknowledgment,
       tracker,
       reconcileChat,
       scrollChatToBottom,

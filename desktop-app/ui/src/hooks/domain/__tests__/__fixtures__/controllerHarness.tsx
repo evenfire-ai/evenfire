@@ -1,6 +1,8 @@
-import { type ReactNode, useLayoutEffect } from 'react'
+import { type ReactNode, StrictMode, Suspense, useLayoutEffect } from 'react'
 import { vi } from 'vitest'
 import { AgentTaskTrackerProvider } from '@contexts/AgentTaskTrackerContext'
+import type { TaskTracker } from '@contexts/AgentTaskTrackerContext'
+import { useAgentTaskTracker } from '@contexts/AgentTaskTrackerContext'
 import { act, renderHook } from '@testing-library/react'
 import type { HostAuthorityHoldKind } from '../../../../lib/hostAuthorityStore'
 import type { Tone } from '../../../../uiTypes'
@@ -16,6 +18,7 @@ export interface RenderControllerResult {
   >['result']
   rerender: (props?: Partial<ControllerParams>) => void
   unmount: () => void
+  tracker: TaskTracker
   params: Partial<ControllerParams>
   /**
    * The mount's Host authority, from the production store factory. Only
@@ -40,6 +43,10 @@ export interface RenderControllerResult {
 }
 
 export interface RenderControllerOptions {
+  /** Mount under React.StrictMode for updater replay assertions. */
+  strictMode?: boolean
+  /** Catch a test's intentional render suspension without replacing the hook. */
+  suspenseBoundary?: boolean
   /** Observe committed controller state before its passive effects synchronize refs. */
   onLayoutCommit?: (controller: ReturnType<typeof useAgentChatController>) => void
   /** Called with the controller's return value on every render, for frame-level assertions. */
@@ -92,6 +99,7 @@ export function renderController(
   }
 
   let authority: HarnessHostAuthority | null = null
+  let taskTracker: TaskTracker | undefined
   const currentAuthority = (): HarnessHostAuthority => {
     if (!authority) throw new Error('controller is not mounted')
     return authority
@@ -113,6 +121,7 @@ export function renderController(
         hostAuthorityRevision: hostAuthority.revision,
         ...p,
       } as ControllerParams)
+      taskTracker = useAgentTaskTracker()
       options.onRender?.(controller)
       useLayoutEffect(() => {
         options.onLayoutCommit?.(controller)
@@ -126,9 +135,15 @@ export function renderController(
     },
     {
       initialProps: params,
-      wrapper: ({ children }: { children: ReactNode }) => (
-        <AgentTaskTrackerProvider>{children}</AgentTaskTrackerProvider>
-      ),
+      wrapper: ({ children }: { children: ReactNode }) => {
+        const content = options.suspenseBoundary ? (
+          <Suspense fallback={null}>{children}</Suspense>
+        ) : (
+          children
+        )
+        const provider = <AgentTaskTrackerProvider>{content}</AgentTaskTrackerProvider>
+        return options.strictMode ? <StrictMode>{provider}</StrictMode> : provider
+      },
     }
   )
 
@@ -137,6 +152,7 @@ export function renderController(
     rerender: (props?: Partial<ControllerParams>) =>
       utils.rerender({ ...params, ...(props ?? {}) }),
     unmount: utils.unmount,
+    tracker: taskTracker!,
     params,
     hostAuthority: {
       hold: (agentRef, kind) =>
