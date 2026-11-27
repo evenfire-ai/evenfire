@@ -60,16 +60,50 @@ export function controlApiRecordNames(): string[] {
 
 /**
  * Stubs `fetch` so control-api answers each call with the record, or with what the function
- * returns at call time. A function that throws stands for an unreachable control-api.
+ * returns at call time. A function that throws stands for an unreachable control-api. A record
+ * keeps no headers; `headers` adds the ones control-api sends beside that body.
  */
-export function controlApiAnswers(answer: ControlApiRecord | (() => ControlApiRecord)) {
+export function controlApiAnswers(
+  answer: ControlApiRecord | (() => ControlApiRecord),
+  headers: Readonly<Record<string, string>> = {}
+) {
   const fetchMock = vi.fn(async (_url: string | URL, _init?: RequestInit) => {
     const { status, body } = typeof answer === 'function' ? answer() : answer
     return new Response(JSON.stringify(body), {
       status,
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...headers },
     })
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
 }
+
+/**
+ * control-api's external route limiter refusing a call (createExternalClientRateLimiters in
+ * control-api/src/middleware/externalClientIdentity.ts), as that limiter answered when driven
+ * past its default 120 calls a minute: express-rate-limit's default handler, a text body with
+ * Retry-After and the draft-7 RateLimit headers. `retryAfter` replaces its Retry-After; `null`
+ * leaves it out.
+ */
+export function controlApiRateLimits(retryAfter: string | null = '60') {
+  const fetchMock = vi.fn(
+    async (_url: string | URL, _init?: RequestInit) =>
+      new Response('Too many requests, please try again later.', {
+        status: 429,
+        headers: {
+          'content-type': 'text/html; charset=utf-8',
+          ratelimit: 'limit=120, remaining=0, reset=60',
+          'ratelimit-policy': '120;w=60',
+          ...(retryAfter === null ? {} : { 'retry-after': retryAfter }),
+        },
+      })
+  )
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+/**
+ * The Retry-After control-api's error handler sets beside its
+ * session_issuance_temporarily_unavailable 503 (control-api/src/http/errorHandler.ts).
+ */
+export const ISSUANCE_DEFERRED_RETRY_AFTER = '2'

@@ -3,6 +3,7 @@ import request from 'supertest'
 import {
   type ControlApiRecord,
   controlApiAnswers,
+  controlApiRateLimits,
   controlApiRecord,
 } from './helpers/controlApiDesktopSignInRecords.js'
 
@@ -90,7 +91,7 @@ afterEach(() => {
 
 describe('edge GET /auth/methods: the rebuilt answer', () => {
   // `methods` is filtered by name only. An `oidc` name left without a usable block is what
-  // Desktop already treats as absent (design §10.1).
+  // Desktop already treats as absent: it offers a provider only with a usable `oidc` block.
   const methodsRows: Array<[string, ControlApiRecord, number, unknown]> = [
     ['the recorded password answer', password, 200, { methods: ['password'] }],
     [
@@ -211,6 +212,64 @@ describe('edge GET /auth/methods: the rebuilt answer', () => {
     expect(res.body).toEqual(METHODS_UNAVAILABLE)
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
+
+  it("relays control-api's own 429 as 429 with its Retry-After, uncached and unlogged", async () => {
+    // Part-way through control-api's window, its limiter's Retry-After is below the window.
+    const limited = controlApiRateLimits('17')
+    const app = await edge()
+    const res = await app.get(METHODS)
+
+    expect(res.status).toBe(429)
+    expect(res.body).toEqual({ error: 'rate_limited', retryAfterSeconds: 17 })
+    expect(res.headers['retry-after']).toBe('17')
+    expect(res.text).not.toContain('Too many requests')
+    expect(limited).toHaveBeenCalledTimes(1)
+    expect(String(limited.mock.calls[0]![0])).toMatch(/\/external\/auth\/methods$/)
+    // A wait, not an outage.
+    expect(errorLog).not.toHaveBeenCalled()
+
+    // Not cached: the next read asks control-api again.
+    const recovered = controlApiAnswers(password)
+    const next = await app.get(METHODS)
+    expect(next.status).toBe(200)
+    expect(next.body).toEqual({ methods: ['password'] })
+    expect(recovered).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['none', null],
+    ['an HTTP date', 'Wed, 25 Nov 2026 12:01:00 GMT'],
+    ['zero', '0'],
+    ['more than a day', '86401'],
+  ])(
+    "waits one 60-second window when control-api's 429 carries %s as Retry-After",
+    async (_label, retryAfter) => {
+      const limited = controlApiRateLimits(retryAfter)
+      const res = await (await edge()).get(METHODS)
+
+      expect(res.status).toBe(429)
+      expect(res.body).toEqual({ error: 'rate_limited', retryAfterSeconds: 60 })
+      expect(res.headers['retry-after']).toBe('60')
+      expect(limited).toHaveBeenCalledTimes(1)
+      expect(errorLog).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    ['the lowest', 1],
+    ['the highest', 86_400],
+  ])(
+    "relays %s Retry-After the bound allows, %i, from control-api's 429",
+    async (_label, seconds) => {
+      const limited = controlApiRateLimits(String(seconds))
+      const res = await (await edge()).get(METHODS)
+
+      expect(res.status).toBe(429)
+      expect(res.body).toEqual({ error: 'rate_limited', retryAfterSeconds: seconds })
+      expect(res.headers['retry-after']).toBe(String(seconds))
+      expect(limited).toHaveBeenCalledTimes(1)
+    }
+  )
 })
 
 describe('edge GET /auth/methods: the fallback log', () => {
@@ -345,6 +404,18 @@ describe('edge GET /auth/methods: cache and limit', () => {
     expect(first.status).toBe(200)
     expect(second.body).toEqual(first.body)
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("reports no budget left on a relayed 429, as the edge limiter's own 429 does", async () => {
+    const limited = controlApiRateLimits('17')
+    const res = await (await edge()).get(METHODS)
+
+    expect(res.status).toBe(429)
+    expect(limited).toHaveBeenCalledTimes(1)
+    // The request passed the edge limiter, which stamped its own budget before control-api
+    // refused it.
+    expect(res.headers['x-ratelimit-limit']).toBe('60')
+    expect(res.headers['x-ratelimit-remaining']).toBe('0')
   })
 
   it('answers 429 rate_limited after 60 reads a minute from one client', async () => {

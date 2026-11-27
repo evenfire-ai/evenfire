@@ -1,4 +1,8 @@
-import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
+import {
+  ControlApiError,
+  controlApiRequest,
+  isControlApiServiceCredentialRejection,
+} from '../controlApiClient.js'
 
 type AuthContext = {
   userId: string
@@ -101,7 +105,7 @@ export async function acceptInvitation(
 // control-api reads the member from the session token alone, so the body is
 // empty.
 export async function createDesktopAuthorization(auth: AuthContext): Promise<{
-  error?: 'not_found'
+  error?: 'not_found' | 'unauthorized'
   data?: {
     authorizationToken: string
     expiresInSeconds: number
@@ -120,6 +124,16 @@ export async function createDesktopAuthorization(auth: AuthContext): Promise<{
     if (error instanceof ControlApiError && [429, 503].includes(error.status)) throw error
     if (error instanceof ControlApiError && error.status === 404 && error.code === 'not_found') {
       return { error: 'not_found' }
+    }
+    // control-api's 401 for an ended session, or for a session whose account row is missing
+    // or not active: signing in again is the remedy. A refusal of this edge's own service
+    // credential is an outage instead, which signing in cannot fix.
+    if (
+      error instanceof ControlApiError &&
+      error.status === 401 &&
+      !isControlApiServiceCredentialRejection(error)
+    ) {
+      return { error: 'unauthorized' }
     }
     throw passwordAuthorityUnavailable()
   }

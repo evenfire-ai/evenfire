@@ -119,6 +119,35 @@ describe('POST /external/invitations/desktop-authorization', () => {
     )
   })
 
+  it("refuses another member's user id in the body and authorizes no other account", async () => {
+    // Another member with an active account: a route that read the body's user id would find
+    // this row and store a token under its email.
+    const otherMember = { id: 'other-member', email: 'other-member@example.invalid' }
+    accounts.rows.set(otherMember.id, accountRow(otherMember))
+
+    const refused = await request(app())
+      .post('/external/invitations/desktop-authorization')
+      .send({ userId: otherMember.id })
+
+    expect(refused.status).toBe(403)
+    expect(refused.body).toEqual({ error: 'Forbidden' })
+    expect(accounts.query).not.toHaveBeenCalledWith(expect.anything(), [otherMember.id])
+    expect(flow.storeDesktopAuthorizationToken).not.toHaveBeenCalled()
+
+    // Witness: the same session, without the other member's id, authorizes its own account.
+    const own = await request(app()).post('/external/invitations/desktop-authorization').send({})
+
+    expect(own.status).toBe(200)
+    expect(accounts.query).toHaveBeenCalledWith(expect.stringMatching(/FROM users/), [
+      SESSION_CLAIMS.userId,
+    ])
+    expect(flow.storeDesktopAuthorizationToken).toHaveBeenCalledOnce()
+    expect(flow.storeDesktopAuthorizationToken).toHaveBeenCalledWith(
+      SESSION_CLAIMS.email,
+      own.body.authorizationToken
+    )
+  })
+
   it('authorizes without a password', async () => {
     const response = await request(app())
       .post('/external/invitations/desktop-authorization')

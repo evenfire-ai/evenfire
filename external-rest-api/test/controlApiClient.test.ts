@@ -7,6 +7,7 @@ import {
   controlApiRequest,
   controlApiRequestWithStatus,
   controlApiStreamRequest,
+  isControlApiServiceCredentialRejection,
 } from '../src/controlApiClient.js'
 import { withExternalRequestContext } from '../src/requestContext.js'
 
@@ -72,6 +73,53 @@ describe('controlApiClient error headers', () => {
     expect(error.headers).not.toHaveProperty('set-cookie')
     expect(error.headers).not.toHaveProperty('server')
     expect(error.headers).not.toHaveProperty('x-internal-debug')
+  })
+})
+
+describe("controlApiClient: control-api's service-credential refusal header", () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  const REFUSAL_HEADER = 'x-internal-service-auth-refusal'
+
+  /** control-api's bare 401 body with the gate's refusal header, at `status` and `value`. */
+  function answersWithRefusalHeader(status: number, value: string) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status,
+          headers: { 'content-type': 'application/json', [REFUSAL_HEADER]: value },
+        })
+      )
+    )
+  }
+
+  const request = () =>
+    controlApiRequest('POST', '/external/invitations/desktop-authorization', { body: {} })
+
+  it('keeps it on a 401 with its one value, and reads that 401 as a credential refusal', async () => {
+    answersWithRefusalHeader(401, 'service_credential_rejected')
+
+    const error = await captureError(request)
+
+    expect(error.status).toBe(401)
+    expect(error.headers).toEqual({ [REFUSAL_HEADER]: 'service_credential_rejected' })
+    expect(isControlApiServiceCredentialRejection(error)).toBe(true)
+  })
+
+  it.each([
+    ['a 403', 403, 'service_credential_rejected'],
+    ['a 503', 503, 'service_credential_rejected'],
+    ['a 401 with another value', 401, 'session_rejected'],
+    ['a 401 with the value in another case', 401, 'Service_Credential_Rejected'],
+  ])('drops it on %s', async (_label, status, value) => {
+    answersWithRefusalHeader(status, value)
+
+    const error = await captureError(request)
+
+    expect(error.status).toBe(status)
+    expect(error.headers).not.toHaveProperty(REFUSAL_HEADER)
+    expect(isControlApiServiceCredentialRejection(error)).toBe(false)
   })
 })
 

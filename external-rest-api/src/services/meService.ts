@@ -147,8 +147,9 @@ export async function getMe(userId: string, teamId: string, sessionToken: string
     // - a 503 outage is forwarded as is.
     // Everything else, a bare 401 included, reads as "not found" as on dev. A bare
     // 401 is dev control-api's answer for an ended session; this edge's control-api
-    // sends a bare 401 only when it refuses the edge's own service credential, and
-    // no header or body tells the two apart, so neither is answered as an outage.
+    // sends a bare 401 only when it refuses the edge's own service credential. No body
+    // tells the two apart, and this route does not read the refusal's header
+    // (isControlApiServiceCredentialRejection), so neither is answered as an outage.
     if (isControlApiInvalidSession(error)) throw error
     if (error instanceof ControlApiError && error.status === 503) throw error
     return null

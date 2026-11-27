@@ -413,6 +413,11 @@ export function createInvitationsRouter(): Router {
           res.status(404).json({ error: 'Invitation setup not found' })
           return
         }
+        if (result.error === 'unauthorized') {
+          // Profile UI answers any 401 by sending the member to sign in again.
+          res.status(401).json({ error: 'Unauthorized' })
+          return
+        }
         res.status(200).json(result.data)
       } catch (error) {
         if (sendPasswordAuthorityError(error, res)) return

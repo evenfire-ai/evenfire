@@ -2250,7 +2250,7 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
       expect(await sessionCount(userId)).toBe(0)
     })
 
-    it('records the PR2 team choice, or null for a teamless member', async () => {
+    it('records the team member sign-in chose, or null for a teamless member', async () => {
       // An existing member keeps their team; an invitation to a new team is still applied.
       const keptEmail = `${uniqueLabel('desktop-kept')}@fixture.test`
       const keptUser = await seedUser(keptEmail)

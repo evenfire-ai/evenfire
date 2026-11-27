@@ -139,11 +139,14 @@ function defaultEngine(provider: Provider): OidcProtocolEngine {
 }
 
 /**
- * A Desktop sign-in attempt mints a one-use code bound to the Desktop's code
- * challenge. It issues no session here, so no session format is selected: the
- * Desktop's redeem selects one. Any other attempt issues the Profile UI session
- * exactly as password login does: no requested contract and no client version,
- * so the same representation is selected.
+ * Completes an attempt by what it was started for. A plain attempt (no
+ * context) issues the Profile UI session exactly as password login does: no
+ * requested contract and no client version, so the same representation is
+ * selected. A Desktop sign-in attempt mints a one-use code bound to the
+ * Desktop's code challenge. It issues no session here, so no session format is
+ * selected: the Desktop's redeem selects one. An invitation attempt has no
+ * completion yet and throws, so it can never complete as an ordinary sign-in;
+ * the route answers that with the terminal 503.
  *
  * `signInOidcMember` runs in its own default transaction runner: it retries a
  * unique-key conflict only when the PostgreSQL error code reaches it unchanged.
@@ -154,13 +157,27 @@ async function defaultSignInMember(
 ): Promise<OidcMemberSignInResult> {
   const policy = provider.memberSignIn
   if (!policy) throw new Error('OIDC member sign-in is switched off')
-  if (proof.signInContext?.kind === 'desktop_sign_in') {
-    return signInOidcMember({
-      proof,
-      provider,
-      policy,
-      completion: { kind: 'desktop_code', codeChallenge: proof.signInContext.codeChallenge },
-    })
+  const context = proof.signInContext
+  if (context !== null) {
+    switch (context.kind) {
+      case 'desktop_sign_in':
+        return signInOidcMember({
+          proof,
+          provider,
+          policy,
+          completion: { kind: 'desktop_code', codeChallenge: context.codeChallenge },
+        })
+      case 'invitation':
+        // Fails closed until invitation sign-in adds its own completion: an
+        // invitation attempt must not become an ordinary Profile session.
+        throw new Error('OIDC invitation sign-in has no completion')
+      default: {
+        const unhandled: never = context
+        throw new Error(
+          `OIDC sign-in context ${(unhandled as { kind: string }).kind} has no completion`
+        )
+      }
+    }
   }
   const sessionPolicy = await resolveEffectiveUserAccessPolicy()
   const selection = selectExternalSessionRepresentation({}, sessionPolicy)

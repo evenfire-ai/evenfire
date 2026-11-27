@@ -347,12 +347,12 @@ async function signInResolvedMember(
 
 /**
  * Signs a verified OIDC identity in as a member, in one transaction: account
- * resolution (v5 §4), pending invitations for the account's stored email, the
- * team, then the completion: a session, or a one-use Desktop code. A refusal
- * issues no session, mints no code and writes nothing except the connection
- * record. The one exception is an invitation withdrawn while the sign-in
- * waited on it (OidcInvitationWithdrawnError): its transaction rolls back
- * whole, so the connection record is undone too, and the answer is
+ * resolution (resolveOidcAccount), pending invitations for the account's
+ * stored email, the team, then the completion: a session, or a one-use Desktop
+ * code. A refusal issues no session, mints no code and writes nothing except
+ * the connection record. The one exception is an invitation withdrawn while
+ * the sign-in waited on it (OidcInvitationWithdrawnError): its transaction
+ * rolls back whole, so the connection record is undone too, and the answer is
  * `no_account`. It is never retried.
  *
  * A unique-key conflict means a parallel sign-in committed the same link or

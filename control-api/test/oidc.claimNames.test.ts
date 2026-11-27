@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   OIDC_ELIGIBILITY_RESERVED_CLAIMS,
   OIDC_PROTOCOL_CLAIMS,
+  hasDisallowedClaimCharacters,
   isAcceptableEvidenceClaimName,
 } from '../src/oidc/claimNames.js'
 
@@ -52,6 +53,22 @@ describe('OIDC evidence claim names', () => {
       expect(isAcceptableEvidenceClaimName(name)).toBe(false)
     }
     expect(isAcceptableEvidenceClaimName('roles')).toBe(true)
+  })
+
+  it('refuses a name with a format character', () => {
+    // U+200B zero width space, U+200C zero width non-joiner, U+2060 word joiner, U+FEFF byte order mark.
+    for (const name of [
+      'groups\u200b',
+      'gro\u200cups',
+      '\u200bgroups',
+      'groups\u2060',
+      'groups\ufeff',
+    ]) {
+      expect(isAcceptableEvidenceClaimName(name)).toBe(false)
+    }
+    expect(hasDisallowedClaimCharacters('groups\u200b')).toBe(true)
+    expect(hasDisallowedClaimCharacters('groups')).toBe(false)
+    expect(isAcceptableEvidenceClaimName('groups')).toBe(true)
   })
 
   it('reserves the claims eligibility already reads, apart from roles', () => {

@@ -6,6 +6,12 @@ import {
   controlApiFailureLogFields,
   controlApiRequestWithStatus,
 } from '../controlApiClient.js'
+import {
+  controlApiRetryAfterSeconds,
+  isControlApiRateLimited,
+  sendControlApiRateLimited,
+} from '../http/controlApiRetry.js'
+import { isSessionIssuanceUnavailable } from '../http/passwordAdmissionError.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import { requestedSessionContract } from './auth.js'
 import { DESKTOP_SIGN_IN_CODE_RE, clientRateKey } from './oidcProfileFlow.js'
@@ -15,6 +21,8 @@ const CODE_VERIFIER_RE = /^[A-Za-z0-9._~-]{43,128}$/
 const SESSION_TOKEN_MAX_LENGTH = 4096
 /** Redeems per minute for one client (forwarded IP). */
 const REDEEM_PER_CLIENT_LIMIT = 60
+/** The redeem limiter's window; a control-api 429 without a usable Retry-After waits one. */
+const REDEEM_WINDOW_SECONDS = 60
 
 /**
  * The refusal reasons redeem relays in its 403: exactly Desktop's closed set
@@ -33,7 +41,11 @@ export const DESKTOP_SIGN_IN_REFUSAL_REASONS: ReadonlySet<string> = new Set([
   'provider_configuration',
 ])
 
-/** The control-api failures relayed with their own status, each with the one code it may carry. */
+/**
+ * control-api failures relayed with their own status, each with the one code it may carry.
+ * relayFailure relays three more outside this map: the 403 refusal with a reason in
+ * DESKTOP_SIGN_IN_REFUSAL_REASONS, control-api's limiter 429 and its session deferral 503.
+ */
 const RELAYED_FAILURES: ReadonlyMap<number, string> = new Map([
   [400, 'invalid_desktop_sign_in_code'],
   [409, 'desktop_sign_in_unavailable'],
@@ -56,10 +68,17 @@ function logIssuanceFallback(fields: ControlApiFailureLogFields): void {
 }
 
 /**
- * Rebuilds a control-api failure from the allow-list. Anything not listed is the 503 row,
- * logged by class and upstream status.
+ * Rebuilds a control-api failure from the allow-list. control-api's own 429 stays a 429 with a
+ * bounded Retry-After and is not logged: it is a wait, not a failure. control-api's session
+ * deferral stays the 503 row with its bounded Retry-After and is not logged here either:
+ * control-api's error handler already logs it at warn. Anything else not listed is the 503 row,
+ * logged once by class and upstream status.
  */
 function relayFailure(error: ControlApiError, res: Response): void {
+  if (isControlApiRateLimited(error)) {
+    sendControlApiRateLimited(error, res, REDEEM_WINDOW_SECONDS)
+    return
+  }
   const code = error.code
   if (code !== null && RELAYED_FAILURES.get(error.status) === code) {
     res.status(error.status).json({ error: code })
@@ -77,6 +96,12 @@ function relayFailure(error: ControlApiError, res: Response): void {
     res.status(403).json({ error: 'desktop_sign_in_refused', reason })
     return
   }
+  if (error.status === 503 && isSessionIssuanceUnavailable(error)) {
+    const retryAfterSeconds = controlApiRetryAfterSeconds(error)
+    if (retryAfterSeconds !== undefined) res.setHeader('Retry-After', String(retryAfterSeconds))
+    sendIssuanceUnavailable(res)
+    return
+  }
   logIssuanceFallback(controlApiFailureLogFields(error))
   sendIssuanceUnavailable(res)
 }
@@ -88,15 +113,15 @@ function isObject(value: unknown): value is Record<string, unknown> {
 /**
  * `POST /oidc/desktop-sign-in/redeem`: Desktop's main process trades the one-use code from its
  * browser sign-in, with its PKCE verifier, for the `{ token, me }` password login returns.
- * Every answer is rebuilt from the allow-list in design §7.6; nothing control-api sends is
- * passed through as it came.
+ * Every answer is rebuilt from the success check below and relayFailure's allow-list; nothing
+ * control-api sends is passed through as it came.
  */
 export function createOidcDesktopSignInRouter(): Router {
   const router = Router()
   // On the route itself: the router is mounted without a path, so a bare `router.use` would
   // count every later /api/v1 request against this budget.
   const perClient = createRateLimiter({
-    windowMs: 60_000,
+    windowMs: REDEEM_WINDOW_SECONDS * 1000,
     maxRequests: REDEEM_PER_CLIENT_LIMIT,
     keyFn: clientRateKey,
     errorCode: 'rate_limited',
