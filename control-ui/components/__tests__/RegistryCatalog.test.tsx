@@ -503,3 +503,42 @@ describe('RegistryCatalog - capability-gated controls (§5.1)', () => {
     expect(screen.queryByRole('columnheader', { name: 'Edit or remove' })).not.toBeInTheDocument()
   })
 })
+
+describe('Marketplace connector presentation', () => {
+  const sheets = { ...MOCK_MCP_ENTRY, name: '@evenfire/mcp-google-sheets' }
+
+  it('shows a friendly name and local icon while retaining the registry detail route', async () => {
+    mockApiSuccess([sheets])
+    render(<RegistryCatalog />)
+    const name = await screen.findByText('Google Sheets')
+    const row = name.closest('tr')!
+    expect(row.querySelector('img')).toHaveAttribute('src', '/connector-icons/google-sheets.svg')
+    expect(row.querySelector('img')).toHaveAttribute('alt', '')
+    fireEvent.click(name)
+    expect(navigation.push).toHaveBeenCalledWith(
+      '/marketplace/entries/%40evenfire%2Fmcp-google-sheets/1.0.0'
+    )
+  })
+
+  it('searches friendly names and raw identifiers, retaining both versions', async () => {
+    mockApiSuccess([sheets, { ...sheets, id: 'second-version', version: '2.0.0' }])
+    render(<RegistryCatalog />)
+    await screen.findAllByText('Google Sheets')
+    const search = screen.getByPlaceholderText('Search connectors...')
+    fireEvent.change(search, { target: { value: 'Google Sheets' } })
+    expect(screen.getAllByText('Google Sheets')).toHaveLength(2)
+    fireEvent.change(search, { target: { value: '@evenfire/mcp-google-sheets' } })
+    expect(screen.getAllByText('Google Sheets')).toHaveLength(2)
+  })
+
+  it('keeps installation bound to the scoped registry name', async () => {
+    mockApiSuccess([sheets])
+    render(<RegistryCatalog />)
+    const row = (await screen.findByText('Google Sheets')).closest('tr')!
+    fireEvent.click(within(row).getByRole('button', { name: 'Actions for Google Sheets v1.0.0' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Install' }))
+    const url = new URL(navigation.push.mock.calls.at(-1)![0], 'https://example.com')
+    expect(url.searchParams.get('entry')).toBe(sheets.name)
+    expect(url.searchParams.get('version')).toBe(sheets.version)
+  })
+})
