@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080" role="img" aria-labelledby="title desc">
+  <title id="title">Bring your agents into the conversation — visual placeholder</title>
+  <desc id="desc">Reserved for a branded product composition: Slack or Microsoft Teams conversation. This is not a product screenshot.</desc>
+  <defs>
+    <linearGradient id="background" x2="1" y2="1">
+      <stop stop-color="#061024"/>
+      <stop offset="0.6" stop-color="#103a7d"/>
+      <stop offset="1" stop-color="#040b1c"/>
+    </linearGradient>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#background)"/>
+  <rect x="110" y="110" width="1700" height="860" rx="32" fill="#ffffff" fill-opacity="0.035" stroke="#96bfff" stroke-opacity="0.5" stroke-width="2" stroke-dasharray="14 14"/>
+  <g text-anchor="middle" fill="#ffffff">
+    <text x="960" y="350" font-family="Arial, sans-serif" font-size="26" letter-spacing="5" fill="#b8d1ff">VISUAL PLACEHOLDER</text>
+    <text x="960" y="500" font-family="Georgia, serif" font-size="66">Bring your agents into the conversation</text>
+    <text x="960" y="595" font-family="Arial, sans-serif" font-size="32" fill="#d5e3fa">Slack or Microsoft Teams conversation</text>
+    <text x="960" y="790" font-family="Arial, sans-serif" font-size="25" fill="#b8d1ff">Final asset: 08-team-channels.png</text>
+  </g>
+</svg>

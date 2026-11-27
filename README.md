@@ -47,6 +47,20 @@ produces from the same conversation.
   <img src="docs/assets/readme/01-desktop-conversation.png" alt="Marketing agent in Evenfire Desktop with a downloadable draft campaign brief" width="100%">
 </p>
 
+### Work with agents in Slack and Microsoft Teams
+
+Bring agents into the conversations where your team already works. Connect
+Slack or Microsoft Teams to an agent, send it a task, and follow its replies
+and tool progress in chat.
+
+<!-- Visual slot: replace 08-team-channels.svg with 08-team-channels.png when ready. -->
+<p align="center">
+  <img src="docs/assets/readme/08-team-channels.svg" alt="Visual placeholder for an agent conversation in Slack or Microsoft Teams" width="100%">
+</p>
+
+[Connect Slack](docs/how-to/connect-slack.md) ·
+[Connect Microsoft Teams](docs/how-to/connect-teams.md).
+
 ### Approve tool actions before execution
 
 Configure which tool actions require approval, then review a request before
@@ -59,6 +73,35 @@ directly in the conversation.
 
 [Configure approval policies](docs/how-to/configure-approvals.md).
 
+### Choose how your agent takes action
+
+Choose Manual, Auto-approve or Allow all for a Desktop conversation, within
+the limits set by your administrator. Manual keeps approval prompts;
+Auto-approve reduces prompts for eligible shell commands and HTTP requests;
+Allow all skips most approval prompts. Guardrail blocks and required guardrail
+reviews still apply, and scheduled-task management retains its approval rules.
+
+<!-- Visual slot: replace 09-approval-modes.svg with 09-approval-modes.png when ready. -->
+<p align="center">
+  <img src="docs/assets/readme/09-approval-modes.svg" alt="Visual placeholder for the Desktop approval mode picker: Manual, Auto-approve and Allow all" width="100%">
+</p>
+
+[Understand approval modes](docs/how-to/configure-approvals.md#approval-modes).
+
+### Set boundaries with configurable guardrails
+
+Add opt-in rules that allow, pause for review or block tool calls. Install
+hooks to moderate model calls or redact results at supported lifecycle points.
+Guardrail policies work alongside approvals, access controls and workload
+isolation; an allow decision does not bypass those controls.
+
+<!-- Visual slot: replace 10-guardrails.svg with 10-guardrails.png when ready. -->
+<p align="center">
+  <img src="docs/assets/readme/10-guardrails.svg" alt="Visual placeholder for an agent's installed guardrail hook and a tool action blocked by policy" width="100%">
+</p>
+
+[Configure guardrails](docs/how-to/configure-guardrails.md).
+
 ### Configure each agent's instructions and tools
 
 Choose an agent's model and instructions in the Control UI, assign its
@@ -69,15 +112,29 @@ and access it needs for its role.
   <img src="docs/assets/readme/03-agent-configuration.png" alt="Control UI agent overview showing its model, assigned connectors, members and teams" width="100%">
 </p>
 
-### Extend agents with connectors and plugins
+### Connect agents to the tools you use
 
-Browse the Marketplace to discover and install connectors and plugins.
-Connectors expose tools through MCP; plugins can add workflows and their own
-interfaces. Manage installed capabilities in the Control UI.
+Browse the Marketplace to discover and install MCP connectors. Give agents
+access to the tools they need, and manage installed connectors in the Control
+UI.
 
 <p align="center">
   <img src="docs/assets/readme/04-marketplace.png" alt="Evenfire Marketplace listing connectors including Figma, Firecrawl, GitHub and Google Sheets" width="100%">
 </p>
+
+### Build plugins with interfaces, workflows and services
+
+Build plugins that combine their own interface, multi-step workflows,
+background services, databases, webhooks and MCP tools. Open a plugin's
+interface in Desktop, and let agents interact with the tools it exposes.
+Install and manage plugins through the Control UI.
+
+<p align="center">
+  <img src="docs/assets/readme/07-plugins.png" alt="EvenPages plugin open in Evenfire Desktop alongside a Blog Post Creator agent listing blog posts found in the workspace" width="100%">
+</p>
+
+[Build a plugin](docs/agents/CLERUM_WORKFLOW_RECIPE_GUIDE.md) ·
+[Install from the Marketplace](docs/get-started/registry-quickstart.md#4-install-a-plugin).
 
 ### Share files with your team and agents
 
@@ -155,9 +212,8 @@ Agents in Evenfire can:
 - **Call tools** over the [Model Context Protocol](https://modelcontextprotocol.io) (MCP)
 - **Share** teams, files, and cost budgets
 - **Compose** multi-step workflows
-- **Configure guardrails** through approval thresholds, budget caps, network
-  deny-rules, and tool-level scopes so risky actions automatically pause
-  for human review
+- **Apply guardrails** with opt-in allow, ask and deny rules and model hooks;
+  configure approvals, budgets and tool access alongside them
 - **Install plugins** that ship their own UX and expose themselves as MCP server tools, so agents can interact
   with them through chat
 
@@ -210,11 +266,18 @@ to its deep dive.
 ## Security model
 
 We never fully trust the model. It can be steered, misled, or simply wrong, so
-four layers constrain what it can do:
+five layers constrain what it can do:
 
-- **Risky actions wait for a human.** Commands, outbound HTTP, and browser
-  control are approval-gated: the task suspends until someone approves from the
-  channel, and callbacks are signature-verified.
+- **Approval-gated actions wait for a human.** Tool calls follow the agent's
+  approval policy and the session's effective approval mode, bounded by
+  administrator limits. Calls that require review suspend until an authorized
+  person approves or denies them.
+- **Configurable guardrails.** Opt-in tool rules can allow, require review or
+  deny a call; installed hooks can moderate model calls or redact outputs at
+  supported lifecycle points. A guardrail deny blocks the call, and a guardrail
+  ask still requires review even in Allow all mode. Guardrails complement
+  workload isolation; they are not a sandbox.
+  See [Configure guardrails](docs/how-to/configure-guardrails.md).
 - **Least privilege.** Each agent reaches only the connectors its `Context`
   grants, through short-lived, scope-narrowed tokens that can't widen
   themselves. Connector images can be restricted to an allowlist, but the check
