@@ -470,6 +470,15 @@ describe('OIDC member sign-in configuration', () => {
     expect(refusal({ ...ENTRA_ENV, CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled' })).toBe(
       'Invalid OIDC provider configuration field(s): CONTROL_API_OIDC_ACCOUNT_CREATION'
     )
+    // Without a claim value, `enabled` is refused on any issuer, so only this
+    // row shows the Entra rule refusing it.
+    expect(
+      refusal({
+        ...ENTRA_ENV,
+        ...requiredClaim(CLAIM_VALUE),
+        CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
+      })
+    ).toBe(ACCOUNT_CREATION_REFUSED)
     // Positive control: the same setting loads on a non-Entra issuer, which
     // needs a required claim value for it.
     expect(
