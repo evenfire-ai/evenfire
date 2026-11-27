@@ -899,11 +899,14 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 3: Scheduler timing', () => {
     const runId = Date.now()
     const targetUser = phase3UserId()
     const controlUser = phase3UserId()
-    const target = await createEveryMinuteJob(`toggle-target-${runId}`, targetUser, since)
-    const control = await createEveryMinuteJob(`toggle-control-${runId}`, controlUser, since)
 
     await withCronJobs(since, async jobs => {
-      jobs.push([target, targetUser], [control, controlUser])
+      // Register each job right after its create, so a failed second create
+      // still deletes the first job.
+      const target = await createEveryMinuteJob(`toggle-target-${runId}`, targetUser, since)
+      jobs.push([target, targetUser])
+      const control = await createEveryMinuteJob(`toggle-control-${runId}`, controlUser, since)
+      jobs.push([control, controlUser])
 
       await waitForCronLog(
         since,
