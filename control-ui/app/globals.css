@@ -2222,6 +2222,7 @@ textarea.cu-input {
   container-type: inline-size;
 }
 
+/* Name, description, authentication, managed, enabled, status, actions. */
 .cu-connectors-table {
   min-width: 62rem;
   table-layout: fixed;
@@ -2240,21 +2241,23 @@ textarea.cu-input {
 
 .cu-connectors-table th:nth-child(3),
 .cu-connectors-table td:nth-child(3) {
-  width: 6rem;
+  width: 10rem;
 }
 
 .cu-connectors-table th:nth-child(4),
-.cu-connectors-table td:nth-child(4) {
-  width: 6rem;
-}
-
+.cu-connectors-table td:nth-child(4),
 .cu-connectors-table th:nth-child(5),
 .cu-connectors-table td:nth-child(5) {
-  width: 7rem;
+  width: 6rem;
 }
 
 .cu-connectors-table th:nth-child(6),
 .cu-connectors-table td:nth-child(6) {
+  width: 7rem;
+}
+
+.cu-connectors-table th:nth-child(7),
+.cu-connectors-table td:nth-child(7) {
   width: 3.5rem;
   text-align: right;
 }
@@ -15415,4 +15418,67 @@ button.cu-gfs-tree__button:focus-visible,
   overscroll-behavior-y: contain;
   scrollbar-gutter: stable;
   scrollbar-color: var(--cu-border-hover) var(--cu-surface);
+}
+
+/* Catalog-linked connector names use local, decorative SVGs beside the label. */
+.cu-connector-identity {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.cu-connector-icon {
+  width: var(--cu-space-6);
+  height: var(--cu-space-6);
+  flex: none;
+  object-fit: contain;
+}
+
+.cu-connector-identity .cu-registry-name {
+  overflow-wrap: anywhere;
+}
+
+.cu-connector-icon img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.cu-connector-icon .cu-connector-icon__base--themed,
+:root[data-theme='light'] .cu-connector-icon .cu-connector-icon__on-dark {
+  display: none;
+}
+
+:root[data-theme='light'] .cu-connector-icon .cu-connector-icon__base--themed {
+  display: block;
+}
+
+.cu-connector-identity__text {
+  display: grid;
+  min-width: 0;
+}
+
+.cu-connector-identity__instance {
+  /* Reserve space so revealing identity never moves row controls. */
+  visibility: hidden;
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-xs);
+  font-weight: var(--cu-font-weight-regular);
+  overflow-wrap: anywhere;
+}
+
+.cu-connector-identity:hover .cu-connector-identity__instance,
+.cu-connectors-table tr:hover .cu-connector-identity__instance,
+.cu-connectors-table tr:focus-within .cu-connector-identity__instance {
+  visibility: visible;
+}
+
+/* Touch users must be able to distinguish instances before opening a row. */
+@media (hover: none), (pointer: coarse) {
+  .cu-connector-identity__instance {
+    visibility: visible;
+  }
 }
