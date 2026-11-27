@@ -120,9 +120,19 @@ case "$*" in
   *"get nodes"*) echo "minikube  Ready  control-plane  1d  v1.30.0"; exit 0 ;;
   *"get configmap"*jsonpath*)
     key="$(printf '%s' "$*" | sed -n 's/.*{\.data\.\([A-Za-z]*\)}.*/\1/p')"
-    file="${TEST_MARKER_DIR:-/nonexistent}/${key}"
     [ -n "$key" ] || exit 1
-    [ -f "$file" ] || exit 1
+    if [ "${TEST_KUBECTL_MARKER_ERROR:-0}" = "1" ]; then
+      echo "The connection to the server was refused" >&2
+      exit 1
+    fi
+    # As the real CLI answers: a missing ConfigMap is NotFound, and a key the
+    # ConfigMap does not carry prints nothing and succeeds.
+    if [ ! -d "${TEST_MARKER_DIR:-/nonexistent}" ]; then
+      echo 'Error from server (NotFound): configmaps "clerum-pre-gate-sync-state" not found' >&2
+      exit 1
+    fi
+    file="${TEST_MARKER_DIR}/${key}"
+    [ -f "$file" ] || exit 0
     cat "$file"
     exit 0
     ;;
@@ -169,6 +179,10 @@ exit 0
 STUB
   mkdir -p "$d/repo/control-api/src"
   echo "export const x = 1" > "$d/repo/control-api/src/index.ts"
+  # The real ignore rules, so the generated image manifest and API-IP patch are
+  # ignored here as they are in a clone and never reach the plan as untracked
+  # paths.
+  cp "$REPO_ROOT/.gitignore" "$d/repo/.gitignore"
   (
     cd "$d/repo"
     git init -q .
@@ -189,6 +203,17 @@ write_manifest() {
 }
 
 repo_head() { git -C "$1/repo" rev-parse HEAD; }
+
+# A cluster sync marker as pre-gate-sync.sh stamps it, served by the kubectl
+# stub from TEST_MARKER_DIR="$d/marker".
+write_marker() {
+  local d=$1 head=$2 generated=$3 source=$4 tag=$5
+  mkdir -p "$d/marker"
+  printf '%s' "$head" > "$d/marker/gitHead"
+  printf '%s' "$generated" > "$d/marker/imagesGeneratedAt"
+  printf '%s' "$source" > "$d/marker/imageSource"
+  printf '%s' "$tag" > "$d/marker/imageTag"
+}
 
 # Loads pre-gate-incremental.sh the way pre-gate-sync.sh does, in a subshell the
 # caller controls, and runs $2 with the callers' contract satisfied.
@@ -706,9 +731,7 @@ assert_a_re_acquisition_invalidates_the_marker_baseline_in_ghcr_mode() {
   d="$(mktemp -d)"
   prepare_repo "$d"
   head="$(repo_head "$d")"
-  mkdir -p "$d/marker"
-  printf '%s' "$head" > "$d/marker/gitHead"
-  printf '%s' "2026-08-06T00:00:00Z" > "$d/marker/imagesGeneratedAt"
+  write_marker "$d" "$head" "2026-08-06T00:00:00Z" ghcr "$PIN_TAG"
   write_manifest "$d" '{"generated":"2026-08-06T09:99:99Z","imageSource":"ghcr","imageTag":"'"$PIN_TAG"'","images":{}}'
   out="$(
     PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
@@ -732,9 +755,7 @@ assert_a_re_acquisition_invalidates_the_marker_baseline_in_local_mode() {
   d="$(mktemp -d)"
   prepare_repo "$d"
   head="$(repo_head "$d")"
-  mkdir -p "$d/marker"
-  printf '%s' "$head" > "$d/marker/gitHead"
-  printf '%s' "2026-08-06T00:00:00Z" > "$d/marker/imagesGeneratedAt"
+  write_marker "$d" "$head" "2026-08-06T00:00:00Z" local ""
   write_manifest "$d" '{"generated":"2026-08-06T09:99:99Z","imageSource":"local","imageTag":"","images":{}}'
   out="$(
     PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
@@ -757,9 +778,7 @@ assert_an_untouched_image_set_keeps_the_marker_baseline() {
   d="$(mktemp -d)"
   prepare_repo "$d"
   head="$(repo_head "$d")"
-  mkdir -p "$d/marker"
-  printf '%s' "$head" > "$d/marker/gitHead"
-  printf '%s' "2026-08-06T00:00:00Z" > "$d/marker/imagesGeneratedAt"
+  write_marker "$d" "$head" "2026-08-06T00:00:00Z" ghcr "$PIN_TAG"
   out="$(
     PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
     IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" IMAGES_GENERATED_AT="2026-08-06T00:00:00Z" \
@@ -770,6 +789,87 @@ assert_an_untouched_image_set_keeps_the_marker_baseline() {
     pass "an untouched image set keeps the marker's gitHead as the shadow baseline"
   else
     fail "expected baseline=[${head}]; rc=$rc out=$out"
+  fi
+  cleanup_fixture "$d"
+}
+
+# A MINIKUBE_IMAGE_TAG override changes the tag a run resolves without pulling
+# or rendering anything. The plan compared only gitHead and the acquisition
+# stamp, found nothing to do, and the marker was stamped with the new tag while
+# every pod kept the old one. A re-pull alone leaves the Deployments on the old
+# tag, so the full deployment is asserted with it. The same-tag run keeps the
+# marker baseline, and a marker that cannot be read proves no render either.
+assert_a_tag_override_on_a_synced_profile_re_pulls_and_re_deploys() {
+  local d head out_new out_same out_err rc_new rc_same rc_err
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  head="$(repo_head "$d")"
+  write_manifest "$d" '{"generated":"g7","imageSource":"ghcr","imageTag":"'"$PIN_TAG"'","images":{}}'
+  write_marker "$d" "$head" g7 ghcr "$PIN_TAG"
+  out_new="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
+    TEST_IMAGE_REVISION="$head" \
+    IMAGE_SOURCE=ghcr IMAGE_TAG=override-tag IMAGES_GENERATED_AT=g7 \
+      run_incremental "$d" 'incremental_plan; echo "plan repull=${INCREMENTAL_REPULL_ALL} deploy=${INCREMENTAL_FULL_DEPLOYMENT} build=${INCREMENTAL_FULL_IMAGE_BUILD}"'
+  )"
+  rc_new=$?
+  out_same="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
+    TEST_IMAGE_REVISION="$head" \
+    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" IMAGES_GENERATED_AT=g7 \
+      run_incremental "$d" 'incremental_plan; echo "plan repull=${INCREMENTAL_REPULL_ALL} deploy=${INCREMENTAL_FULL_DEPLOYMENT} build=${INCREMENTAL_FULL_IMAGE_BUILD}"'
+  )"
+  rc_same=$?
+  out_err="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
+    TEST_KUBECTL_MARKER_ERROR=1 TEST_IMAGE_REVISION="$head" \
+    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" IMAGES_GENERATED_AT=g7 \
+      run_incremental "$d" 'incremental_plan; echo "plan repull=${INCREMENTAL_REPULL_ALL} deploy=${INCREMENTAL_FULL_DEPLOYMENT} build=${INCREMENTAL_FULL_IMAGE_BUILD}"'
+  )"
+  rc_err=$?
+  if [ "$rc_new" -eq 0 ] && [ "$rc_same" -eq 0 ] && [ "$rc_err" -eq 0 ] \
+     && grep -Fqx 'plan repull=true deploy=true build=false' <<< "$out_new" \
+     && grep -Fq "not ghcr:override-tag" <<< "$out_new" \
+     && grep -Fqx 'plan repull=false deploy=false build=false' <<< "$out_same" \
+     && ! grep -Fq 'No usable cluster marker' <<< "$out_same" \
+     && grep -Fqx 'plan repull=true deploy=true build=false' <<< "$out_err" \
+     && grep -Fq 'WARNING: unable to read' <<< "$out_err"; then
+    pass "a tag override on a synced profile re-pulls and re-deploys; the same tag keeps the baseline"
+  else
+    fail "expected override -> repull+deploy, same tag -> neither, unreadable marker -> repull+deploy; rc=$rc_new/$rc_same/$rc_err new=$out_new same=$out_same err=$out_err"
+  fi
+  cleanup_fixture "$d"
+}
+
+# The same override on a profile no sync has stamped yet: setup rendered the
+# tag it recorded in the image manifest, and the override names another.
+assert_a_tag_override_on_an_unsynced_profile_re_deploys() {
+  local d base out_new out_same rc_new rc_same
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  base="$(repo_head "$d")"
+  write_manifest "$d" '{"generated":"g7","imageSource":"ghcr","imageTag":"'"$PIN_TAG"'","images":{}}'
+  out_new="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/nomarker" \
+    TEST_IMAGE_REVISION="$base" \
+    IMAGE_SOURCE=ghcr IMAGE_TAG=override-tag IMAGES_GENERATED_AT=g7 \
+      run_incremental "$d" 'incremental_plan; echo "plan repull=${INCREMENTAL_REPULL_ALL} deploy=${INCREMENTAL_FULL_DEPLOYMENT} build=${INCREMENTAL_FULL_IMAGE_BUILD}"'
+  )"
+  rc_new=$?
+  out_same="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/nomarker" \
+    TEST_IMAGE_REVISION="$base" \
+    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" IMAGES_GENERATED_AT=g7 \
+      run_incremental "$d" 'incremental_plan; echo "plan repull=${INCREMENTAL_REPULL_ALL} deploy=${INCREMENTAL_FULL_DEPLOYMENT} build=${INCREMENTAL_FULL_IMAGE_BUILD}"'
+  )"
+  rc_same=$?
+  if [ "$rc_new" -eq 0 ] && [ "$rc_same" -eq 0 ] \
+     && grep -Fqx 'plan repull=true deploy=true build=false' <<< "$out_new" \
+     && grep -Fq "last rendered at ghcr:${PIN_TAG}, not ghcr:override-tag" <<< "$out_new" \
+     && grep -Fqx 'plan repull=true deploy=false build=false' <<< "$out_same"; then
+    pass "a tag override on an unsynced profile re-deploys; setup's own tag only re-pulls"
+  else
+    fail "expected override -> repull+deploy and the recorded tag -> repull only; rc=$rc_new/$rc_same new=$out_new same=$out_same"
   fi
   cleanup_fixture "$d"
 }
@@ -1288,6 +1388,8 @@ assert_an_unreadable_plan_delta_stops_the_sync
 assert_a_re_acquisition_invalidates_the_marker_baseline_in_ghcr_mode
 assert_a_re_acquisition_invalidates_the_marker_baseline_in_local_mode
 assert_an_untouched_image_set_keeps_the_marker_baseline
+assert_a_tag_override_on_a_synced_profile_re_pulls_and_re_deploys
+assert_a_tag_override_on_an_unsynced_profile_re_deploys
 assert_the_pre_gate_adopts_the_recorded_cluster_mode_over_the_environment
 assert_a_recorded_local_build_renders_the_local_overlay
 assert_the_migration_job_renders_the_overlay_the_cluster_runs

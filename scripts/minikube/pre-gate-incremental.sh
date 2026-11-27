@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # Incremental image planning for pre-gate-sync.sh. The caller supplies
-# PROJECT_DIR, PROFILE, KC, FORCE_CLUSTER_SYNC, IMAGE_SOURCE, IMAGE_TAG,
-# IMAGES_GENERATED_AT, log(), and rollout_if_present().
+# PROJECT_DIR, PROFILE, KC, CLUSTER_SYNC_STATE_CONFIGMAP, FORCE_CLUSTER_SYNC,
+# IMAGE_SOURCE, IMAGE_TAG, IMAGES_GENERATED_AT, log(), and rollout_if_present().
 #
 # IN GHCR MODE EVERY POD RUNS A RELEASE IMAGE. Building clerum/<svc>:test here
 # would produce an image nothing references: the pod restarts onto the same
@@ -28,6 +28,17 @@ INCREMENTAL_DOCKER_ENV_APPLIED=false
 INCREMENTAL_DEADLINE_RUNNER="${INCREMENTAL_DEADLINE_RUNNER:-${PROJECT_DIR}/scripts/minikube/run-with-deadline.mjs}"
 INCREMENTAL_RUNTIME_TIMEOUT_SECONDS="${INCREMENTAL_RUNTIME_TIMEOUT_SECONDS:-30}"
 INCREMENTAL_IMAGE_LOAD_TIMEOUT_SECONDS="${INCREMENTAL_IMAGE_LOAD_TIMEOUT_SECONDS:-1800}"
+# The cluster sync marker as incremental_read_marker last read it.
+INCREMENTAL_MARKER_PRESENT=false
+INCREMENTAL_MARKER_GIT_HEAD=""
+INCREMENTAL_MARKER_IMAGES_GENERATED_AT=""
+INCREMENTAL_MARKER_IMAGE_SOURCE=""
+INCREMENTAL_MARKER_IMAGE_TAG=""
+
+# The image manifest's recorded coordinate stands in for a marker no sync has
+# stamped yet (incremental_deployed_coordinate).
+# shellcheck source=scripts/minikube/image-mode.sh
+source "${PROJECT_DIR}/scripts/minikube/image-mode.sh"
 
 incremental_validate_deadline() {
   local name="$1" value="$2" maximum="$3"
@@ -68,7 +79,52 @@ incremental_add_target() {
   INCREMENTAL_TARGETS+=("${target}")
 }
 
-# The commit the cluster's images were last synced to, or nothing.
+# One field of the cluster sync marker. Returns 0 with the value, 3 when the
+# marker does not exist, and 1 on any other read error, so no caller can read a
+# failed read as "no marker".
+incremental_marker_field() {
+  local field="$1" output
+  if output="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane \
+    -o "jsonpath={.data.${field}}" 2>&1)"; then
+    printf '%s' "${output}"
+    return 0
+  fi
+  if [[ "${output}" == *NotFound* || "${output}" == *"not found"* ]]; then
+    return 3
+  fi
+  log "WARNING: unable to read ${CLUSTER_SYNC_STATE_CONFIGMAP}.${field}: ${output}" >&2
+  return 1
+}
+
+# Fills the INCREMENTAL_MARKER_* fields. Fails on a read error; a missing marker
+# is a successful read with INCREMENTAL_MARKER_PRESENT=false.
+incremental_read_marker() {
+  local field value rc
+  INCREMENTAL_MARKER_PRESENT=false
+  INCREMENTAL_MARKER_GIT_HEAD=""
+  INCREMENTAL_MARKER_IMAGES_GENERATED_AT=""
+  INCREMENTAL_MARKER_IMAGE_SOURCE=""
+  INCREMENTAL_MARKER_IMAGE_TAG=""
+  for field in gitHead imagesGeneratedAt imageSource imageTag; do
+    rc=0
+    value="$(incremental_marker_field "${field}")" || rc=$?
+    case "${rc}" in
+      0) ;;
+      3) return 0 ;;
+      *) return 1 ;;
+    esac
+    case "${field}" in
+      gitHead) INCREMENTAL_MARKER_GIT_HEAD="${value}" ;;
+      imagesGeneratedAt) INCREMENTAL_MARKER_IMAGES_GENERATED_AT="${value}" ;;
+      imageSource) INCREMENTAL_MARKER_IMAGE_SOURCE="${value}" ;;
+      imageTag) INCREMENTAL_MARKER_IMAGE_TAG="${value}" ;;
+    esac
+  done
+  INCREMENTAL_MARKER_PRESENT=true
+}
+
+# The commit the cluster's images were last synced to, or nothing, from the
+# fields incremental_read_marker filled.
 #
 # The marker is only a usable baseline while the image set it was stamped
 # against is still the set the profile can prove. Both a GHCR acquisition and a
@@ -76,21 +132,47 @@ incremental_add_target() {
 # head after a newer acquisition would compute an empty delta and gate without
 # proving that the running pods use the newly acquired images. A stamp mismatch
 # therefore invalidates the baseline in every image mode; the caller chooses
-# the established full local build or GHCR recovery path below.
+# the established full local build or GHCR recovery path below. So does a
+# different image coordinate: a marker stamped at another tag describes shadows
+# over another release, not over the one this run resolves.
+incremental_marker_baseline() {
+  if [[ "${INCREMENTAL_MARKER_PRESENT}" != "true" || -z "${INCREMENTAL_MARKER_GIT_HEAD}" ]]; then
+    return 0
+  fi
+  if [[ -z "${INCREMENTAL_MARKER_IMAGES_GENERATED_AT}" || -z "${IMAGES_GENERATED_AT:-}" ||
+        "${INCREMENTAL_MARKER_IMAGES_GENERATED_AT}" != "${IMAGES_GENERATED_AT}" ]]; then
+    return 0
+  fi
+  if [[ "${INCREMENTAL_MARKER_IMAGE_SOURCE}" != "${IMAGE_SOURCE}" ||
+        "${INCREMENTAL_MARKER_IMAGE_TAG}" != "${IMAGE_TAG:-}" ]]; then
+    return 0
+  fi
+  printf '%s' "${INCREMENTAL_MARKER_GIT_HEAD}"
+}
+
+# Reads the marker and prints its usable baseline, or nothing. A read error
+# prints nothing: with no baseline the plan takes the full local build or the
+# ghcr re-pull, which assume nothing about what the cluster runs.
 incremental_marker_git_head() {
-  local git_head marker_generated
-  git_head="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane \
-    -o jsonpath='{.data.gitHead}' 2>/dev/null || true)"
-  if [[ -z "${git_head}" ]]; then
+  incremental_read_marker || return 0
+  incremental_marker_baseline
+}
+
+# The image coordinate the cluster's Deployments were last rendered at, as
+# `<imageSource>:<imageTag>`. Only a render moves a Deployment to another tag:
+# a re-pull or a shadow build leaves every pod on the tag it was deployed with.
+# The last sync stamped its render in the marker. A profile no sync has stamped
+# yet was rendered by the setup that acquired its images, so the image
+# manifest's record stands in. Fails when the manifest cannot be read.
+incremental_deployed_coordinate() {
+  local source tag
+  if [[ "${INCREMENTAL_MARKER_PRESENT}" == "true" ]]; then
+    printf '%s:%s' "${INCREMENTAL_MARKER_IMAGE_SOURCE}" "${INCREMENTAL_MARKER_IMAGE_TAG}"
     return 0
   fi
-  marker_generated="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane \
-    -o jsonpath='{.data.imagesGeneratedAt}' 2>/dev/null || true)"
-  if [[ -z "${marker_generated}" || -z "${IMAGES_GENERATED_AT:-}" ||
-        "${marker_generated}" != "${IMAGES_GENERATED_AT}" ]]; then
-    return 0
-  fi
-  printf '%s' "${git_head}"
+  source="$(image_mode_manifest_field "${PROJECT_DIR}" 1)" || return 1
+  tag="$(image_mode_manifest_field "${PROJECT_DIR}" 2)" || return 1
+  printf '%s:%s' "${source}" "${tag}"
 }
 
 # Point the Docker CLI at minikube's daemon, once, so a retag lands where the
@@ -252,7 +334,7 @@ incremental_classify_path() {
 }
 
 incremental_plan() {
-  local marker_git_head path baseline
+  local marker_git_head="" path baseline marker_read=ok deployed
 
   if [[ "${FORCE_CLUSTER_SYNC}" == "true" ]]; then
     if [[ "${IMAGE_SOURCE}" == "ghcr" ]]; then
@@ -271,7 +353,30 @@ incremental_plan() {
     fi
   fi
 
-  marker_git_head="$(incremental_marker_git_head)"
+  # A failed read leaves no baseline and no proven render, so the plan below
+  # takes the paths that assume nothing about what the cluster runs.
+  if ! incremental_read_marker; then
+    marker_read=failed
+  fi
+
+  # A ghcr Deployment names its release tag, and only a render changes it. When
+  # this run resolves a tag the cluster was not rendered at (a MINIKUBE_IMAGE_TAG
+  # override, or a coordinate nothing can prove), re-pulling and shadowing are
+  # not enough: the pods would keep the old tag under a marker naming the new.
+  if [[ "${IMAGE_SOURCE}" == "ghcr" ]]; then
+    if [[ "${marker_read}" != "ok" ]] || ! deployed="$(incremental_deployed_coordinate)"; then
+      deployed="unknown"
+    fi
+    if [[ "${deployed}" != "ghcr:${IMAGE_TAG}" ]]; then
+      INCREMENTAL_REPULL_ALL=true
+      INCREMENTAL_FULL_DEPLOYMENT=true
+      log "Cluster was last rendered at ${deployed}, not ghcr:${IMAGE_TAG}; re-pulling and re-deploying the release set"
+    fi
+  fi
+
+  if [[ "${marker_read}" == "ok" ]]; then
+    marker_git_head="$(incremental_marker_baseline)"
+  fi
   if [[ ! "${marker_git_head}" =~ ^[0-9a-f]{40}$ ]] || \
      ! git -C "${PROJECT_DIR}" cat-file -e "${marker_git_head}^{commit}" 2>/dev/null; then
     if [[ "${IMAGE_SOURCE}" != "ghcr" ]]; then
