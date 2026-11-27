@@ -54,8 +54,8 @@ export async function insertInvitationSignInContext(
  * Maps the claim row's context columns. No context row (null columns from the
  * LEFT JOIN, or no columns at all) is a plain attempt. A row the schema's
  * kind/columns CHECK should have refused throws instead of passing as plain,
- * so a Desktop or invitation attempt can never complete as an ordinary
- * sign-in.
+ * so a Desktop or invitation attempt never passes as a plain attempt, without
+ * its context.
  */
 export function signInContextFromClaimRow(
   row: OidcAttemptSignInContextColumns

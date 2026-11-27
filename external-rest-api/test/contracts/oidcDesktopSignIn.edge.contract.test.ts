@@ -249,7 +249,7 @@ const replays: Readonly<Record<string, Replay>> = {
       body: { outcome: 'refused', memberAuthenticationActivated: true, reason: up.body.reason },
     }),
   },
-  // The same row for the reason PR 2 adds (design §9): 200, reason kept.
+  // The same row for the invitation email mismatch reason: 200, reason kept.
   'POST /external/oidc/profile-flow/complete refused-invitation-email-mismatch': {
     route: routes.complete,
     row: () => ({

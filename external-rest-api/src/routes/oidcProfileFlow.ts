@@ -28,7 +28,7 @@ const DESKTOP_SIGN_IN_CODE_MAX_TTL_SECONDS = 120
 /**
  * Refusal reasons /complete relays to Profile UI. Anything else is an upstream contract break.
  * `invitation_email_mismatch` comes only from an invitation sign-in: an attempt is never both
- * for Desktop and from an invitation (design §9). Desktop sign-in redeem relays its own set,
+ * for Desktop and from an invitation. Desktop sign-in redeem relays its own set,
  * Desktop's eight reasons (DESKTOP_SIGN_IN_REFUSAL_REASONS in oidcDesktopSignIn.ts).
  */
 const REFUSAL_REASONS: ReadonlySet<string> = new Set([

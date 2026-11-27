@@ -192,7 +192,7 @@ const cases: readonly ContractCase[] = [
     body: { outcome: 'refused', memberAuthenticationActivated: true, reason: 'not_eligible' },
   },
   {
-    // An invitation sign-in whose email is not the invited address (design §9).
+    // An invitation sign-in whose email is not the invited address.
     key: 'POST /external/oidc/profile-flow/complete refused-invitation-email-mismatch',
     dependencies: {
       provider: activated,

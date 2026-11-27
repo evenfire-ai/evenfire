@@ -289,15 +289,18 @@ describe('/complete for an invitation attempt', () => {
 
 describe('/complete for a sign-in context of an unknown kind', () => {
   it('fails closed with the terminal 503 instead of issuing a Profile session', async () => {
-    // A context kind this route has no completion for, as a newer writer could store.
+    // Defence in depth: a proof whose context kind the route does not know. The
+    // claim cannot produce one: signInContextFromClaimRow throws on any kind
+    // but the two, and the table's CHECK admits only those two. So the proof
+    // is built by hand here.
     const unknownProof = proofWith({
       kind: 'unknown_fixture_kind',
-      invitedEmail: 'member@fixture.test',
+      email: 'member@fixture.test',
     } as never)
     // What member sign-in answers for an ordinary attempt: a session for this member.
     signInOidcMember.mockResolvedValue({
       status: 'signed_in',
-      userId: 'user-invited-1',
+      userId: 'user-unknown-context-1',
       token: SESSION_TOKEN,
       contract: 'v1',
       created: { account: false, link: false },
@@ -306,7 +309,7 @@ describe('/complete for a sign-in context of an unknown kind', () => {
 
     const response = await request(appCompleting(unknownProof))
       .post(COMPLETE_PATH)
-      .set('x-request-id', 'request-fixture-invitation')
+      .set('x-request-id', 'request-fixture-unknown-context')
       .send(completeBody)
 
     expect(response.status).toBe(503)
@@ -323,7 +326,7 @@ describe('/complete for a sign-in context of an unknown kind', () => {
       registrationId: provider.registrationId,
       issuer: provider.issuer,
       subjectFingerprint: expect.stringMatching(/^[0-9a-f]{16}$/),
-      requestId: 'request-fixture-invitation',
+      requestId: 'request-fixture-unknown-context',
       errorClass: 'Error',
     })
     expect(loggedText()).not.toContain('member@fixture.test')
