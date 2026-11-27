@@ -56,6 +56,11 @@ Hooks are not called for that extra check. A `preToolUse` hook receives the
 real call, named `json_transform`, so a hook that polices file reads must
 handle `json_transform` too.
 
+**Before you upgrade:** if a `preToolUse` hook enforces your file-read policy by
+matching `file_read`, it does not see `json_transform {file}` reads. Extend the
+hook to `json_transform` calls that carry a `file` argument, or express the
+policy as `file_read` rules, which cover those reads.
+
 ### How `ask` interacts with approvals
 
 - In an **interactive** run, a guardrail `ask` creates a pending approval
