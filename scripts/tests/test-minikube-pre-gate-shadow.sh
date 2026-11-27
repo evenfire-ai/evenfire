@@ -19,6 +19,10 @@ FAIL=0
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GHCR_COMPONENT="$REPO_ROOT/deploy/components/ghcr-images/kustomization.yaml"
+# Resolved before any case prepends a stub directory to PATH, so a git stub can
+# hand every call it does not fail on to the real binary.
+TEST_REAL_GIT="$(command -v git)"
+export TEST_REAL_GIT
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
@@ -629,6 +633,71 @@ STUB
   cleanup_fixture "$d"
 }
 
+# The plan's delta is three git reads. Read as empty, a failed one says "nothing
+# changed": the sync builds nothing, skips the database reconcile and the GFS
+# verification, and stamps a marker. Each read must stop the plan instead. The
+# positive control gives each read a path of its own, so the three selectors in
+# its plan prove all three reads ran.
+assert_an_unreadable_plan_delta_stops_the_sync() {
+  local d base out rc mode bad=""
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  cat > "$d/bin/git" <<'STUB'
+#!/usr/bin/env bash
+read_name=""
+case "$*" in
+  *" diff --name-only HEAD") read_name=tracked ;;
+  *" diff --name-only "*" HEAD") read_name=committed ;;
+  *" ls-files --others --exclude-standard") read_name=untracked ;;
+esac
+if [ -n "$read_name" ] && [ "$read_name" = "${TEST_GIT_FAIL:-}" ]; then
+  printf 'git-fail %s\n' "$read_name" >>"${TEST_LOG_FILE:?}"
+  echo "fatal: simulated ${read_name} read failure" >&2
+  exit 128
+fi
+exec "${TEST_REAL_GIT:?}" "$@"
+STUB
+  chmod +x "$d/bin/git"
+  mkdir -p "$d/repo/rpc-proxy/src"
+  echo "export const y = 1" > "$d/repo/rpc-proxy/src/index.ts"
+  git -C "$d/repo" add -A
+  git -C "$d/repo" -c user.email=t@t -c user.name=t commit -qm release
+  base="$(repo_head "$d")"
+  echo "// committed" >> "$d/repo/control-api/src/index.ts"
+  git -C "$d/repo" -c user.email=t@t -c user.name=t commit -qam committed
+  echo "// edited" >> "$d/repo/rpc-proxy/src/index.ts"
+  mkdir -p "$d/repo/mcp-host/src"
+  echo "export const z = 1" > "$d/repo/mcp-host/src/new.ts"
+  for mode in none committed tracked untracked; do
+    out="$(
+      PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_GIT_FAIL="$mode" \
+      TEST_IMAGE_REVISION="$base" TEST_MARKER_DIR="$d/nomarker" \
+      IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" \
+        run_incremental "$d" 'incremental_plan; echo "targets=$(incremental_target_summary)"'
+    )"
+    rc=$?
+    if [ "$mode" = none ]; then
+      if [ "$rc" -ne 0 ] \
+         || ! grep -Eq '^targets=.*control-api' <<< "$out" \
+         || ! grep -Eq '^targets=.*rpc-proxy' <<< "$out" \
+         || ! grep -Eq '^targets=.*mcp-host' <<< "$out"; then
+        bad+="control(rc=$rc out=$out) "
+      fi
+    elif [ "$rc" -eq 0 ] \
+         || ! grep -Fqx "git-fail ${mode}" "$d/ops.log" \
+         || ! grep -Fq 'PLAN_INPUT_UNREADABLE' <<< "$out" \
+         || grep -q '^targets=' <<< "$out"; then
+      bad+="${mode}(rc=$rc out=$out) "
+    fi
+  done
+  if [ -z "$bad" ]; then
+    pass "each unreadable git read in the plan's delta stops the sync before it plans"
+  else
+    fail "an unreadable plan delta did not stop the sync: ${bad}log=$(cat "$d/ops.log")"
+  fi
+  cleanup_fixture "$d"
+}
+
 # A `make minikube-setup` between two pre-gates re-pulls every release image and
 # DISCARDS the shadows, while leaving the marker untouched. Trusting the
 # marker's gitHead there computes an empty delta and gates on release code.
@@ -1215,6 +1284,7 @@ assert_an_unresolvable_baseline_hard_fails_in_ghcr_mode
 assert_the_release_image_revision_label_supplies_the_missing_baseline
 assert_no_marker_and_no_revision_label_fails_closed
 assert_an_unreachable_docker_daemon_cannot_become_a_baseline
+assert_an_unreadable_plan_delta_stops_the_sync
 assert_a_re_acquisition_invalidates_the_marker_baseline_in_ghcr_mode
 assert_a_re_acquisition_invalidates_the_marker_baseline_in_local_mode
 assert_an_untouched_image_set_keeps_the_marker_baseline

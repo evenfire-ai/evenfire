@@ -298,15 +298,37 @@ incremental_plan() {
     log "No usable cluster marker; deriving the shadow set from the release images' commit ${baseline:0:12}"
   fi
 
+  # Each read is checked before the plan iterates. Read as empty, an unreadable
+  # delta means "nothing changed": the sync would skip the build, the database
+  # reconcile and the GFS verification, then stamp a marker over images it never
+  # compared with the tree.
+  local committed uncommitted
+  if ! committed="$(git -C "${PROJECT_DIR}" diff --name-only "${marker_git_head}" HEAD)"; then
+    log "ERROR: PLAN_INPUT_UNREADABLE: git diff ${marker_git_head:0:12}..HEAD failed; refusing to plan from an empty delta" >&2
+    exit 1
+  fi
+  if ! uncommitted="$(incremental_uncommitted_paths)"; then
+    exit 1
+  fi
   while IFS= read -r path; do
     [[ -z "${path}" ]] || incremental_classify_path "${path}"
-  done < <(
-    {
-      git -C "${PROJECT_DIR}" diff --name-only "${marker_git_head}" HEAD
-      git -C "${PROJECT_DIR}" diff --name-only HEAD
-      git -C "${PROJECT_DIR}" ls-files --others --exclude-standard
-    } | LC_ALL=C sort -u
-  )
+  done < <(printf '%s\n%s\n' "${committed}" "${uncommitted}" | LC_ALL=C sort -u)
+}
+
+# Every path whose working-tree content differs from HEAD: tracked edits, staged
+# or not, and untracked files git does not ignore. Logs to stderr because callers
+# capture stdout as the list. An unreadable list is not an empty one.
+incremental_uncommitted_paths() {
+  local tracked untracked
+  if ! tracked="$(git -C "${PROJECT_DIR}" diff --name-only HEAD)"; then
+    log "ERROR: PLAN_INPUT_UNREADABLE: git diff HEAD failed; the working-tree changes are unknown" >&2
+    return 1
+  fi
+  if ! untracked="$(git -C "${PROJECT_DIR}" ls-files --others --exclude-standard)"; then
+    log "ERROR: PLAN_INPUT_UNREADABLE: git ls-files failed; the untracked files are unknown" >&2
+    return 1
+  fi
+  printf '%s\n%s\n' "${tracked}" "${untracked}" | LC_ALL=C sort -u | awk 'length'
 }
 
 incremental_has_target() {
