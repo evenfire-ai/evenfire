@@ -51,8 +51,10 @@ export function useConfirmedChatDelete(): ConfirmedChatDeleteController {
     if (!target) return
     try {
       await handleDeleteChatForAgent(target.agentRef, target.chatId, target.deletion)
-    } finally {
-      setPending(null)
+      setPending(current => (current === target ? null : current))
+    } catch {
+      // The controller reports the failure; retain the confirmation for retry
+      // or cancel, and consume the rejection at this UI event boundary.
     }
   }, [handleDeleteChatForAgent, pending])
 

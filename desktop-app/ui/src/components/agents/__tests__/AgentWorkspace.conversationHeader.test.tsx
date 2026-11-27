@@ -534,6 +534,27 @@ describe('AgentWorkspace chat — conversation header', () => {
       expect(actionsMock.handleDeleteChatForAgent).toHaveBeenCalledWith('alpha', 'chat-1', deletion)
     })
 
+    it('keeps a failed deletion open and allows retry with the same fence', async () => {
+      let attempts = 0
+      actionsMock.handleDeleteChatForAgent.mockImplementation(async () => {
+        if (++attempts === 1) throw new Error('delete failed')
+      })
+      renderChat()
+      const dialog = await requestDelete()
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
+      await waitFor(() => expect(dialog.getAttribute('aria-busy')).toBe('false'))
+      expect(attempts).toBe(1)
+      expect(screen.getByRole('dialog')).toBe(dialog)
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+      expect(attempts).toBe(2)
+      expect(actionsMock.handleDeleteChatForAgent).toHaveBeenLastCalledWith(
+        'alpha',
+        'chat-1',
+        deletion
+      )
+    })
+
     it('keeps the confirmation until the deletion has completed', async () => {
       let finishDeletion: () => void = () => undefined
       actionsMock.handleDeleteChatForAgent.mockImplementation(
