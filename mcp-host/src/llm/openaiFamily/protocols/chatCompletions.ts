@@ -8,6 +8,7 @@ import type {
   ChatMessage as CoreChatMessage,
   ToolCompletionResponse,
 } from '../../../core/types'
+import type { ReasoningEffortOption } from '../../types'
 import type { ResolvedModelParams } from '../modelParamPolicy'
 import { isUsageReported, mapFinishReason, parseArguments } from '../shared'
 import type { EncodeContext, WireProtocol } from './types'
@@ -30,6 +31,17 @@ function temperatureField(
   params: ResolvedModelParams
 ): { temperature?: number } {
   return params.temperature === 'pass' ? { temperature } : {}
+}
+
+/**
+ * The API accepts `none` and `xhigh`. The SDK union is only
+ * `low` | `medium` | `high` | null, so the value is cast here.
+ */
+function reasoningEffortField(effort: ReasoningEffortOption | undefined): {
+  reasoning_effort?: ChatPayload['reasoning_effort']
+} {
+  if (!effort) return {}
+  return { reasoning_effort: effort as 'low' | 'medium' | 'high' }
 }
 
 function convertMessages(
@@ -119,6 +131,7 @@ export const chatCompletionsProtocol: WireProtocol<ChatPayload, ChatResult> = {
       messages,
       ...tokenLimit(input.max_tokens, ctx.params),
       ...temperatureField(input.temperature, ctx.params),
+      ...reasoningEffortField(input.reasoning_effort),
     }
   },
 

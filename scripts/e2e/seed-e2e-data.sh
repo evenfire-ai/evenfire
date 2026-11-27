@@ -304,7 +304,10 @@ DEFAULT_ALLOWED_CONTEXTS=(
   "gke_your-gcp-project_us-central1-a_example-dev"             # GKE dev
 )
 IFS=',' read -r -a EXTRA_ALLOWED <<<"${ALLOWED_CONTEXTS:-}"
-ALLOWED=("${DEFAULT_ALLOWED_CONTEXTS[@]}" "${EXTRA_ALLOWED[@]}")
+# An empty override is a zero-length array. Bash 3.2 with set -u treats
+# "${EXTRA_ALLOWED[@]}" as unbound, which aborts a branch-profile seed
+# before the branch-context check below.
+ALLOWED=("${DEFAULT_ALLOWED_CONTEXTS[@]}" ${EXTRA_ALLOWED[@]+"${EXTRA_ALLOWED[@]}"})
 
 CONTEXT_OK=0
 for allowed in "${ALLOWED[@]}"; do

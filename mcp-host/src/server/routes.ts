@@ -1,11 +1,18 @@
 import type { Request, Response } from 'express'
 import {
+  HOST_EDGE_RPC_PROXY_ROUTE_SCOPES,
   validateHostActivityLimit,
   validateHostApprovalRequestId,
   validateHostModelSelectionRequest,
 } from '@clerum/action-context-contracts'
-import { parseIncomingFileReferences } from '../agent/fileReferenceResolver'
+import { LOCATION_REFERENCE_MAX_COUNT } from '@clerum/gfs-interaction-policy'
+import {
+  parseIncomingFileReferences,
+  parseIncomingLocationReferences,
+} from '../agent/fileReferenceResolver'
 import { config } from '../config'
+import { approvalLogId } from '../core/approval/grantMemory'
+import type { ShellAction } from '../core/approval/shellCard'
 import { ConversationError, ConversationErrorCode } from '../core/errors'
 import type { ApprovalDecision } from '../core/extensions/approvalTypes'
 import { isTraceContextV1 } from '../core/types'
@@ -15,6 +22,7 @@ import {
   assertRuntimeActionCurrent,
   authorityBindingFromTrustedEdge,
 } from '../runtime/actionAuthority'
+import { serializeSessionKey } from '../session/types'
 import { getRuntimeCallerContext, runtimeActionTargetMatches } from './edgeRuntimeAuth'
 import { badRequest, json } from './httpUtils'
 import type {
@@ -41,6 +49,7 @@ import type {
   SessionMessagesHandler,
   SessionSearchHandler,
   SessionsListHandler,
+  SetApprovalModeHandler,
   SetModelHandler,
   SetTitleHandler,
   StatusHandler,
@@ -82,6 +91,7 @@ export type RouteHandlers = {
   modelsListHandler?: ModelsListHandler | null
   setModelHandler?: SetModelHandler | null
   setTitleHandler?: SetTitleHandler | null
+  setApprovalModeHandler?: SetApprovalModeHandler | null
 }
 
 function isSessionOwnershipError(error: unknown): boolean {
@@ -167,7 +177,8 @@ export function runtimeApiInfo() {
       'GET /v1/runtime/health': 'Health check endpoint',
       'GET /v1/runtime/live': 'Liveness check endpoint',
       'GET /metrics': 'Prometheus metrics endpoint',
-      'GET /v1/runtime/status': 'Get agent and queue status (includes pendingApprovals)',
+      'GET /v1/runtime/status':
+        'Get agent and queue status (includes the start time of each pending approval)',
       'GET /v1/runtime/activity': 'Get host activity timeline snapshot',
       'GET /v1/runtime/activity/stream': 'Read-only host activity stream (SSE)',
       'POST /v1/runtime/messages': 'Submit a message for processing',
@@ -195,6 +206,8 @@ export function runtimeApiInfo() {
       'GET /v1/runtime/sessions/:agent/:chatId/messages': 'Get message history for a session',
       'PATCH /v1/runtime/sessions/:agent/:chatId/name':
         'Rename a session (server-authoritative title)',
+      'PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode':
+        'Set the stored approval mode for a session',
       'GET /v1/runtime/sessions/search':
         'Full-text search across past messages of the authenticated user',
       'GET /v1/runtime/models': 'List selectable models for the session (per-session selection)',
@@ -226,6 +239,7 @@ export function runtimeApiInfo() {
       'GET /v1/runtime/sessions': 'onSessionsList(handler)',
       'GET /v1/runtime/sessions/:agent/:chatId/messages': 'onSessionMessages(handler)',
       'PATCH /v1/runtime/sessions/:agent/:chatId/name': 'onSetTitle(handler)',
+      'PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode': 'onSetApprovalMode(handler)',
       'GET /v1/runtime/sessions/search': 'onSessionSearch(handler)',
       'GET /v1/runtime/models': 'onModelsList(handler)',
       'POST /v1/runtime/model': 'onSetModel(handler)',
@@ -358,6 +372,20 @@ export async function handleMessageRoute(
           badRequest(res, 'V2 authority requires authenticated V2 runtime context')
           return
         }
+        // A body that carries its own approval mode also needs the approval-mode scope, as
+        // rpc-proxy requires before forwarding it. The check is on the key, not on its value; a
+        // caller context without verified assertion scopes is refused.
+        if (
+          Object.prototype.hasOwnProperty.call(message, 'approvalMode') &&
+          !caller.edgeAssertionScopes?.includes(
+            HOST_EDGE_RPC_PROXY_ROUTE_SCOPES[
+              'PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode'
+            ]
+          )
+        ) {
+          json(res, 403, { error: 'Forbidden: missing scope' })
+          return
+        }
         message.sender = caller.userId
         if (caller.actionContextV2) {
           const target = caller.actionContextV2.target
@@ -393,9 +421,13 @@ export async function handleMessageRoute(
             }
             message.metadata = sanitized
           }
-        } else if (caller.teamId) {
-          // Explicit v1 compatibility adapter. V2 never copies team metadata.
-          message.metadata = { ...(message.metadata ?? {}), teamId: caller.teamId }
+        } else {
+          // V1: the verified caller is the only source of access scope. Body
+          // metadata is discarded and rebuilt as rpc-proxy sends it.
+          message.metadata =
+            typeof caller.teamId === 'string'
+              ? { accessScope: 'team', teamId: caller.teamId }
+              : { accessScope: 'user' }
         }
       } else {
         json(res, 401, { error: 'Missing rpc edge caller context' })
@@ -445,6 +477,28 @@ export async function handleMessageRoute(
     }
     message.fileReferences = fileReferences.references.length
       ? fileReferences.references
+      : undefined
+
+    // A folder reference is refused the same way: a request to create or save
+    // in that folder must not run without it.
+    const locationReferences = parseIncomingLocationReferences(
+      message.locationReferences,
+      LOCATION_REFERENCE_MAX_COUNT
+    )
+    if (!locationReferences.ok) {
+      json(res, 200, {
+        success: false,
+        error: {
+          code: locationReferences.code,
+          message: locationReferences.message,
+          retryable: false,
+          provider: 'unknown',
+        },
+      })
+      return
+    }
+    message.locationReferences = locationReferences.references.length
+      ? locationReferences.references
       : undefined
 
     logger.info(
@@ -843,6 +897,11 @@ export async function handleApprovalRoute(
       badRequest(res, 'alwaysApprove must be a boolean')
       return
     }
+    const shellAction = readShellAction(parsed.shellAction)
+    if (shellAction === 'invalid') {
+      badRequest(res, 'shellAction must be once, command, or shell')
+      return
+    }
 
     const decision: ApprovalDecision = {
       userId,
@@ -851,6 +910,7 @@ export async function handleApprovalRoute(
       alwaysApprove: approved && alwaysApprove,
       channelType,
       channelId,
+      ...(approved && shellAction ? { shellAction } : {}),
     }
 
     logger.info(
@@ -869,6 +929,12 @@ export async function handleApprovalRoute(
       error: error instanceof Error ? error.message : 'Unknown error',
     })
   }
+}
+
+function readShellAction(value: unknown): ShellAction | undefined | 'invalid' {
+  if (value === undefined) return undefined
+  if (value === 'once' || value === 'command' || value === 'shell') return value
+  return 'invalid'
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -1551,8 +1617,7 @@ export async function handleSessionsListRoute(
 /**
  * T3.1 — GET /v1/runtime/sessions/search. Authenticated full-text search over
  * the trusted-edge user's history. `userSub` comes from rpc-proxy's validated
- * action context (or its isolated v1 edge adapter); caller-supplied `?user=`
- * is silently ignored.
+ * action context; caller-supplied `?user=` is silently ignored.
  *
  * Status codes:
  *   - 200: results returned (possibly empty).
@@ -1913,6 +1978,78 @@ export async function handleSetTitleRoute(
   } catch (error) {
     logger.error({ err: error }, '[Server] Error setting session title')
     json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
+  }
+}
+
+/**
+ * PATCH /v1/runtime/sessions/:agent/:chatId/approval-mode `{ mode }`.
+ * Same ownership as rename: a missing session and another user's session are
+ * both 404, and no row is created. The body is validated again here. The
+ * stored mode is the requested value; the response also carries the live
+ * ceiling, channel cap, and effective mode. The raw body is not logged.
+ */
+export async function handleSetApprovalModeRoute(
+  req: Request,
+  res: Response,
+  handlers: RouteHandlers
+): Promise<void> {
+  // Hash of the rpc session key, set once the target is validated. It is not
+  // the `session` of the approval logs, which hash Conversation.id; the route
+  // never sees that id.
+  let sessionKeyLogId: string | undefined
+  try {
+    const caller = getRuntimeCallerContext(req)
+    if (caller?.caller !== 'rpc-proxy' || !caller.userId) {
+      json(res, 401, { error: 'Missing rpc edge caller context' })
+      return
+    }
+    const agent = String(req.params.agent || '').trim()
+    const chatId = String(req.params.chatId || '').trim()
+    if (!isSafeAgentRouteSegment(agent) || !isSafeRouteSegment(chatId)) {
+      badRequest(res, 'Invalid agent or chatId')
+      return
+    }
+    if (!handlers.setApprovalModeHandler) {
+      json(res, 501, { error: 'Set approval mode handler not configured' })
+      return
+    }
+    sessionKeyLogId = approvalLogId(
+      serializeSessionKey({
+        userId: caller.userId,
+        channelType: 'rpc',
+        channelId: agent,
+        threadId: chatId,
+      })
+    )
+    const body = (req.body as Record<string, unknown>) || {}
+    const rawMode = typeof body.mode === 'string' ? body.mode : ''
+    const result = await handlers.setApprovalModeHandler(caller.userId, agent, chatId, rawMode)
+    if (!result.ok) {
+      if (result.reason === 'not_found') {
+        json(res, 404, { error: 'session not found' })
+        return
+      }
+      json(res, 400, { error: 'invalid mode' })
+      return
+    }
+    json(res, 200, {
+      approvalMode: result.approvalMode,
+      modeCeiling: result.modeCeiling,
+      channelCap: result.channelCap,
+      effectiveApprovalMode: result.effectiveApprovalMode,
+    })
+  } catch (error) {
+    // Not `err`: a store error's message can carry Conversation.id, which
+    // embeds the user id. Only the class and the hashed session key are kept.
+    logger.error(
+      {
+        errorClass: error instanceof Error ? error.constructor.name : typeof error,
+        ...(sessionKeyLogId ? { sessionKey: sessionKeyLogId } : {}),
+      },
+      '[Server] Error setting approval mode'
+    )
+    // A fixed body: the error message can carry Conversation.id.
+    json(res, 500, { error: 'Set approval mode failed' })
   }
 }
 

@@ -8,6 +8,7 @@ const requestSpy = vi.spyOn(controlApiClient, 'controlApiRequestWithStatus')
 
 function app() {
   const server = express()
+  server.set('trust proxy', 1)
   server.use(express.json())
   server.use(createOidcProfileFlowRouter())
   return server
@@ -64,7 +65,7 @@ describe('External REST OIDC Profile UI bridge', () => {
     expect(JSON.stringify(response.body)).not.toContain('must-not-escape')
   })
 
-  it('limits each browser separately and keeps an aggregate connection budget', async () => {
+  it('limits each browser separately by its forwarded IP', async () => {
     requestSpy.mockResolvedValue({
       data: {
         authorizationUrl: 'https://issuer.example.test/authorize?state=opaque',
@@ -73,13 +74,13 @@ describe('External REST OIDC Profile UI bridge', () => {
       status: 200,
     } as never)
     const server = app()
-    const send = (key: string) =>
+    const send = (forwardedIp: string) =>
       request(server)
         .post('/oidc/profile-flow/attempts')
-        .set('x-oidc-client-key', key)
+        .set('X-Forwarded-For', forwardedIp)
         .send({ browserBinding: 'B'.repeat(43) })
-    const first = 'a'.repeat(64)
-    const second = 'b'.repeat(64)
+    const first = '198.51.100.1'
+    const second = '198.51.100.2'
     for (let i = 0; i < 60; i++) {
       expect((await send(first)).status).toBe(200)
     }
@@ -130,5 +131,55 @@ describe('External REST OIDC Profile UI bridge', () => {
       retrySameAttempt: false,
     })
     expect(JSON.stringify(response.body)).not.toContain('private.example.test')
+  })
+
+  it('ignores x-oidc-client-key: a rotating key does not get a fresh bucket or exhaust the peer', async () => {
+    requestSpy.mockResolvedValue({
+      data: {
+        redirectUri: 'https://profile.example.test/cb',
+        memberAuthenticationActivated: false,
+      },
+      status: 200,
+    } as never)
+    const server = app()
+    const get = (forwardedIp: string, key?: string) => {
+      const r = request(server)
+        .get('/oidc/profile-flow/configuration')
+        .set('X-Forwarded-For', forwardedIp)
+      return key ? r.set('x-oidc-client-key', key) : r
+    }
+    let ok = 0
+    let limited = 0
+    for (let i = 0; i < 600; i++) {
+      const res = await get('198.51.100.7', i.toString(16).padStart(64, '0'))
+      if (res.status === 200) ok++
+      else if (res.status === 429) limited++
+    }
+    expect(ok).toBe(60)
+    expect(limited).toBe(540)
+    expect(requestSpy).toHaveBeenCalledTimes(60)
+    const victim = await get('203.0.113.50')
+    expect(victim.status).toBe(200)
+    expect(requestSpy).toHaveBeenCalledTimes(61)
+  })
+
+  it('groups IPv6 addresses by /56 for the per-client limit', async () => {
+    requestSpy.mockResolvedValue({
+      data: {
+        redirectUri: 'https://profile.example.test/cb',
+        memberAuthenticationActivated: false,
+      },
+      status: 200,
+    } as never)
+    const server = app()
+    const get = (forwardedIp: string) =>
+      request(server).get('/oidc/profile-flow/configuration').set('X-Forwarded-For', forwardedIp)
+    for (let i = 0; i < 60; i++) {
+      expect((await get(`2001:db8:abcd:12${(i % 16).toString(16)}0::${i + 1}`)).status).toBe(200)
+    }
+    // Same /56 (2001:db8:abcd:1200::/56 covers 12xx), different address: shares the bucket.
+    expect((await get('2001:db8:abcd:12ff::99')).status).toBe(429)
+    // A different /56: its own bucket.
+    expect((await get('2001:db8:abcd:1300::1')).status).toBe(200)
   })
 })

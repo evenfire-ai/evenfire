@@ -124,6 +124,8 @@ const legacyRoutes: Route[] = [
   { method: 'get', suffix: '/status/stream' },
   { method: 'get', suffix: '/activity/stream' },
   { method: 'get', suffix: '/tasks/task-1/progress/stream' },
+  // Outside the preflight wrappers; the route calls validateHostRef itself.
+  { method: 'patch', suffix: '/sessions/agent/chat/approval-mode', body: { mode: 'auto' } },
 ]
 const invalidCapturedRefs = [
   '*',
@@ -267,7 +269,10 @@ beforeAll(
 beforeEach(() => {
   vi.clearAllMocks()
   authMock.verifyRpcToken.mockReturnValue(legacyClaims)
-  hostMock.resolveHostConnectionForUser.mockResolvedValue(null)
+  hostMock.resolveHostConnectionForUser.mockResolvedValue({
+    denied: true,
+    code: 'host_access_denied',
+  })
 })
 
 afterEach(() => {
@@ -332,7 +337,10 @@ describe('public Host-ref validation', () => {
       const response = await callRoute(mountedApp(), route, 'valid-host')
 
       expect(response.status).toBe(403)
-      expect(response.body).toEqual({ error: 'Forbidden: user cannot access this host' })
+      expect(response.body).toEqual({
+        error: 'Forbidden: user cannot access this host',
+        code: 'host_access_denied',
+      })
       expect(hostMock.resolveHostConnectionForUser).toHaveBeenCalledWith(
         'user-1',
         'valid-host',

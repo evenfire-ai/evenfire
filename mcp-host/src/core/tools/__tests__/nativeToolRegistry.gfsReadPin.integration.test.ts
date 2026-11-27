@@ -1,7 +1,7 @@
 /**
  * #666 — the Host pins `clerum__gfs_read` to the version of each GFS file the
  * turn's message referenced. The resolutions come from the real
- * `resolveFileReferences`, the tool is the one the chat registry presents
+ * `resolveMessageReferences`, the tool is the one the chat registry presents
  * (through `InternalToolAdapter`), and the read runs the real
  * `readGfsContent` behind an HTTP double.
  */
@@ -14,7 +14,7 @@ import {
 } from '@clerum/gfs-interaction-policy'
 import {
   type FileReferenceResolution,
-  resolveFileReferences,
+  resolveMessageReferences,
 } from '../../../agent/fileReferenceResolver'
 import { referencedFilePins } from '../../../internalTools/gfs'
 import { readGfsContent } from '../../../internalTools/gfsContentRead'
@@ -108,7 +108,7 @@ function gfsReference(version: number): FileReferenceV1 {
 
 /** Admission's resolution of one reference against gfsc, as it runs in production. */
 async function resolved(reference: FileReferenceV1): Promise<FileReferenceResolution[]> {
-  const result = await resolveFileReferences([reference], {
+  const result = await resolveMessageReferences([reference], [], {
     resolve: async () => ({
       ok: true,
       data: {

@@ -23,6 +23,7 @@ import {
   updateRecipe,
   validateRecipeServer,
 } from '../lib/api'
+import { partitionApprovalUsers } from '../lib/approvalUsers'
 import {
   CODEX_CONNECTION_REF_ANNOTATION,
   CODEX_UNASSIGNED_CONNECTION_KEY,
@@ -1611,30 +1612,46 @@ function StepsApprovalPanel({
 
                       {form.targetKind === 'userId' &&
                         approvalUsers &&
-                        approvalUsers.length > 0 && (
-                          <label className="cu-steps-approval__field">
-                            Known user
-                            <select
-                              className="cu-input cu-input--compact"
-                              aria-label={`Known approval user (${stepId})`}
-                              value={
-                                approvalUsers.some(user => user.id === form.targetValue)
-                                  ? form.targetValue
-                                  : ''
-                              }
-                              onChange={e =>
-                                updateStep(i, { ...form, targetValue: e.target.value })
-                              }
-                            >
-                              <option value="">Select a user or enter an id below</option>
-                              {approvalUsers.map(user => (
-                                <option key={user.id} value={user.id}>
-                                  {user.displayName || user.name || user.email} ({user.email})
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                        )}
+                        approvalUsers.length > 0 &&
+                        (() => {
+                          const { selectable, storedRemoved } = partitionApprovalUsers(
+                            approvalUsers,
+                            form.targetValue
+                          )
+                          return (
+                            <label className="cu-steps-approval__field">
+                              Known user
+                              <select
+                                className="cu-input cu-input--compact"
+                                aria-label={`Known approval user (${stepId})`}
+                                value={
+                                  storedRemoved ||
+                                  selectable.some(user => user.id === form.targetValue)
+                                    ? form.targetValue
+                                    : ''
+                                }
+                                onChange={e =>
+                                  updateStep(i, { ...form, targetValue: e.target.value })
+                                }
+                              >
+                                <option value="">Select a user or enter an id below</option>
+                                {storedRemoved && (
+                                  <option value={storedRemoved.id} disabled>
+                                    {storedRemoved.displayName ||
+                                      storedRemoved.name ||
+                                      storedRemoved.email}{' '}
+                                    (removed)
+                                  </option>
+                                )}
+                                {selectable.map(user => (
+                                  <option key={user.id} value={user.id}>
+                                    {user.displayName || user.name || user.email} ({user.email})
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          )
+                        })()}
 
                       {form.targetKind === 'teamId' &&
                         approvalTeams &&
@@ -1677,6 +1694,16 @@ function StepsApprovalPanel({
                             Required when approval is enabled.
                           </span>
                         )}
+                        {form.targetKind === 'userId' &&
+                          form.targetValue.trim() &&
+                          approvalUsers &&
+                          partitionApprovalUsers(approvalUsers, form.targetValue.trim())
+                            .storedRemoved && (
+                            <span role="alert" className="cu-recipe-inline-error">
+                              This approver has been removed. Choose another approver; approval
+                              requests to a removed member fail.
+                            </span>
+                          )}
                         {form.targetKind === 'teamId' &&
                           form.targetValue.trim() &&
                           !selectedApprovalTeamIds.includes(form.targetValue.trim()) && (

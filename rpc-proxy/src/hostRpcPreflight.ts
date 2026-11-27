@@ -34,7 +34,8 @@ export type HostRpcPreflight = {
 
 type ParseResult = { value: HostRpcPreflight } | { status: number; body: unknown }
 
-function safePathSegment(value: string): boolean {
+/** Exported for routes outside the canonical preflight (approval-mode in rpc.ts). */
+export function safePathSegment(value: string): boolean {
   return (
     value.length > 0 &&
     value !== '.' &&
@@ -44,7 +45,7 @@ function safePathSegment(value: string): boolean {
   )
 }
 
-function safeAgentSegment(value: string): boolean {
+export function safeAgentSegment(value: string): boolean {
   return safePathSegment(value) && value.length <= 200 && !value.includes(':')
 }
 

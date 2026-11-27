@@ -4,6 +4,7 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { useParams, useRouter } from 'next/navigation'
 import { AuthGate } from '@components/AuthGate'
 import { useConfirmDialog } from '@components/ConfirmDialog'
+import { ConnectorIdentity } from '@components/ConnectorIdentity'
 import { CreateFlowPanel } from '@components/CreateFlowPanel'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
@@ -20,6 +21,7 @@ import {
   getRegistryCatalog,
   installRecipeFromRegistry,
 } from '@lib/api'
+import { getConnectorPresentation } from '@lib/connectorPresentation'
 import { useRegistryCapability } from '@lib/hooks/useRegistryCapability'
 import { trustBgColor, trustColor } from '@lib/trustLevel'
 import RegistryEntryDetailLoading from './loading'
@@ -246,8 +248,20 @@ function RegistryEntryDetailContent() {
           className="cu-detail-flow-panel"
           header={
             <CreatePageHeader
-              icon={<IconStore />}
-              title={entry ? `${entry.name}` : 'Marketplace entry'}
+              icon={
+                entry?.entry_type === 'mcp-server' ? (
+                  <ConnectorIdentity name={entry.name} iconOnly />
+                ) : (
+                  <IconStore />
+                )
+              }
+              title={
+                entry
+                  ? entry.entry_type === 'mcp-server'
+                    ? getConnectorPresentation(entry.name).name
+                    : entry.name
+                  : 'Marketplace entry'
+              }
               subtitle={
                 entry
                   ? `v${entry.version} · by ${entry.author} · ${labelForType(entry.entry_type)}`

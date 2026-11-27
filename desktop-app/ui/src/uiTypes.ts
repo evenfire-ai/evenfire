@@ -4,6 +4,7 @@ import type {
   HostActivityEvent,
   MessageToolStep,
   SessionTokensLite,
+  ShellCardDescriptor,
 } from '../../src/types'
 import type {
   AgentWorkspaceRoute as AgentWorkspaceRouteValue,
@@ -216,6 +217,8 @@ export interface SuspendedInfo {
    *  approve"). Absent means allowed. */
   alwaysApproveAllowed?: false
   inputPreview?: ApprovalInputPreview
+  /** Auto shell card. Absent means today's Approve / Always approve / Deny buttons. */
+  shellCard?: ShellCardDescriptor
 }
 
 export interface TaskProgress {
@@ -374,8 +377,23 @@ export type ComposerGlobalFileReference = {
   bytes: number
 }
 
+/**
+ * A Global Files folder named as the place the message is about. It carries no
+ * version or size: a folder changes whenever something is created inside it.
+ */
+export type ComposerGlobalFolderReference = {
+  id: string
+  addedOrder?: number
+  type: 'global_folder'
+  resourceId: string
+  drive: string
+  gfsUri: string
+  label: string
+}
+
 export type ComposerReferenceAttachment =
   | ComposerPluginReference
   | ComposerConnectorReference
   | ComposerAgentFileReference
   | ComposerGlobalFileReference
+  | ComposerGlobalFolderReference

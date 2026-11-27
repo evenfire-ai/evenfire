@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { config } from '../config.js'
 import { resolveHostConnectionForUser, resolveServerConnectionForUser } from './mcpProxyService.js'
 
 describe('v2 checkpoint destination routing', () => {
@@ -24,10 +23,9 @@ describe('v2 checkpoint destination routing', () => {
       url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
       headers: {
         'x-clerum-edge-action-context': 'trusted-edge',
-        'x-clerum-rpc-proxy-edge-token': expect.stringMatching(/^.{16,}$/),
-        'x-service-token': 'rpc-proxy',
       },
     })
+    expect(connection?.headers['x-service-token']).toBeUndefined()
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
@@ -48,38 +46,14 @@ describe('v2 checkpoint destination routing', () => {
     ).rejects.toThrow('Invalid v2 host destination binding')
   })
 
-  it('does not downgrade authorized V2 when the edge credential is unavailable', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch')
-    const previousToken = config.mcpHostEdgeToken
-    ;(config as { mcpHostEdgeToken: string }).mcpHostEdgeToken = ''
-    try {
-      await expect(
-        resolveHostConnectionForUser('user', 'chatllm', 'raw-v2-token', {
-          authorizedActionV2: {
-            trustedEdgeHeader: 'trusted-edge',
-            checkpoint: {
-              destination: {
-                kind: 'host',
-                ref: 'mcp-host/chatllm',
-                url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
-              },
-            },
-          } as never,
-        })
-      ).rejects.toThrow('RPC Proxy edge credential is unavailable')
-      expect(fetchSpy).not.toHaveBeenCalled()
-    } finally {
-      ;(config as { mcpHostEdgeToken: string }).mcpHostEdgeToken = previousToken
-    }
-  })
-
-  it('keeps ordinary legacy Host traffic on the legacy edge without the V2 credential', async () => {
+  it('keeps ordinary V1 Host traffic on the clear edge headers without an action context', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(
         JSON.stringify({
           userId: 'user',
           hostRef: 'chatllm',
           url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+          edgeAssertion: 'edge-assertion-fixture',
         }),
         { status: 200, headers: { 'content-type': 'application/json' } }
       )
@@ -90,10 +64,10 @@ describe('v2 checkpoint destination routing', () => {
       headers: {
         'x-clerum-edge-caller': 'rpc-proxy',
         'x-clerum-edge-user-id': 'user',
-        'x-service-token': 'rpc-proxy',
+        'x-clerum-edge-assertion': 'edge-assertion-fixture',
       },
     })
-    expect(connection?.headers['x-clerum-rpc-proxy-edge-token']).toBeUndefined()
+    expect(connection?.headers['x-service-token']).toBeUndefined()
     expect(connection?.headers['x-clerum-edge-action-context']).toBeUndefined()
   })
 

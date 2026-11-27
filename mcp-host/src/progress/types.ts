@@ -1,4 +1,5 @@
 // mcp-host/src/progress/types.ts
+import type { ShellCardDescriptor } from '../core/approval/shellCard'
 import type { CanonicalReason } from '../lifecycle/types.js'
 import type { TaskError } from '../queue/types.js'
 
@@ -103,9 +104,8 @@ export interface SuspendedEvent {
   requestId: string
   // P1-1: the approval event carries ONLY the server-derived displayName, never
   // the raw tool_name (mirrors the REST `pendingApproval` wire shape; the
-  // progress stream is owner-scoped). NOTE: the operator-only `GET /status`
-  // endpoint still exposes raw tool_name in `pendingApprovals[]` — separate
-  // channel, tracked as a follow-up.
+  // progress stream is owner-scoped). The `GET /status` endpoint lists each
+  // pending approval only by its start time (`pendingApprovals[].since`).
   displayName: string
   // U5 — 'connect_required' is a reactive OAuth-consent suspension; the default
   // HITL gate stays 'approval_required'.
@@ -115,6 +115,8 @@ export interface SuspendedEvent {
   /** false when the card must not offer "Always approve" (forced gate or
    *  denial re-ask). Omitted when allowed. */
   alwaysApproveAllowed?: false
+  /** Shell card buttons. Omitted when this suspension is not a shell card. */
+  shellCard?: ShellCardDescriptor
   /** Sanitized, bounded input for human review; never used to resume execution. */
   inputPreview?: ApprovalInputPreview
 }

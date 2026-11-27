@@ -1,16 +1,28 @@
 /**
- * Issue #666 — structured file references on an incoming message.
+ * Issue #666 — structured references on an incoming message.
  *
- * `parseIncomingFileReferences` is the route-level contract check: shape,
- * count, uniqueness and GFS identity, with no I/O. `resolveFileReferences`
- * re-authorizes every GFS reference under the Host principal with gfsc
- * `resolve` (JSON metadata only, never bytes) and reports one availability per
- * reference. The model reads an available file later with `clerum__gfs_read`,
- * which the Host pins to the reference's version.
+ * `parseIncomingFileReferences` and `parseIncomingLocationReferences` are the
+ * route-level contract checks: shape, count, uniqueness and GFS identity, with
+ * no I/O. `resolveMessageReferences` is the single entry that re-authorizes
+ * both kinds under the Host principal with gfsc `resolve` (JSON metadata only,
+ * never bytes), one call per reference in parallel under one shared deadline,
+ * so admission waits on gfsc for at most one timeout however many files and
+ * folders the message names.
+ * The model reads an available file later with `clerum__gfs_read`, which the
+ * Host pins to the reference's version.
  */
-import { type FileReferenceV1, parseFileReferenceV1 } from '@clerum/gfs-interaction-policy'
+import {
+  type FileReferenceV1,
+  type LocationReferenceV1,
+  parseFileReferenceV1,
+  parseLocationReferenceV1,
+  resourceNameProblem,
+} from '@clerum/gfs-interaction-policy'
 import { FileReferenceErrorCode } from '../core/errors'
-import type { TurnContextReferencedFile } from '../core/orchestration/turnContext'
+import type {
+  TurnContextReferencedFile,
+  TurnContextReferencedFolder,
+} from '../core/orchestration/turnContext'
 import { GfscHttpError } from '../internalTools/gfsClient'
 import { GFS_FILE_LIMITS } from '../internalTools/gfsFilePolicy'
 import { logger } from '../logger'
@@ -75,6 +87,55 @@ export function referencedFilesForTurnContext(
   })
 }
 
+export type LocationReferenceAvailability =
+  | 'available'
+  | 'not_found'
+  | 'denied'
+  | 'not_a_folder'
+  | 'unsupported'
+
+export interface LocationReferenceResolution {
+  availability: LocationReferenceAvailability
+  reference: LocationReferenceV1
+  /**
+   * The name the model sees: gfsc's current name when it reports a valid one
+   * (the folder may have been renamed or moved since Desktop took the
+   * reference), otherwise the name Desktop sent.
+   */
+  name: string
+  /** Who supplied `name`. */
+  nameSource: 'gfsc' | 'client'
+}
+
+/** The code each unavailable location is reported under in the turn block. */
+export const LOCATION_REFERENCE_AVAILABILITY_CODES: Record<
+  Exclude<LocationReferenceAvailability, 'available'>,
+  FileReferenceErrorCode
+> = {
+  not_found: FileReferenceErrorCode.NotFound,
+  denied: FileReferenceErrorCode.Denied,
+  not_a_folder: FileReferenceErrorCode.NotAFolder,
+  unsupported: FileReferenceErrorCode.Unsupported,
+}
+
+/** The `referenced_folder` entries for the turn-context block, in message order. */
+export function referencedFoldersForTurnContext(
+  resolutions: readonly LocationReferenceResolution[] | undefined
+): TurnContextReferencedFolder[] {
+  return (resolutions ?? []).map(({ availability, reference, name, nameSource }) => ({
+    referenceId: reference.id,
+    name,
+    // A client-claimed name must not reach the model as the folder's verified name.
+    nameVerified: nameSource === 'gfsc',
+    drive: reference.source.drive,
+    resourceId: reference.source.resourceId,
+    availability,
+    ...(availability === 'available'
+      ? {}
+      : { code: LOCATION_REFERENCE_AVAILABILITY_CODES[availability] }),
+  }))
+}
+
 export type ParsedIncomingFileReferences =
   | { ok: true; references: FileReferenceV1[] }
   | {
@@ -129,6 +190,50 @@ export function parseIncomingFileReferences(
   return { ok: true, references }
 }
 
+export type ParsedIncomingLocationReferences =
+  | { ok: true; references: LocationReferenceV1[] }
+  | Extract<ParsedIncomingFileReferences, { ok: false }>
+
+/** `undefined` is a message without locations; anything else must be a list. */
+export function parseIncomingLocationReferences(
+  value: unknown,
+  maxCount: number
+): ParsedIncomingLocationReferences {
+  if (value === undefined) return { ok: true, references: [] }
+  const invalid = (message: string): ParsedIncomingLocationReferences => ({
+    ok: false,
+    code: FileReferenceErrorCode.Invalid,
+    message,
+  })
+  if (!Array.isArray(value)) return invalid('locationReferences must be a list.')
+  if (value.length > maxCount)
+    return invalid(
+      `A message can reference at most ${maxCount} folder${maxCount === 1 ? '' : 's'}.`
+    )
+  const references: LocationReferenceV1[] = []
+  const folders = new Set<string>()
+  for (const entry of value) {
+    const parsed = parseLocationReferenceV1(entry)
+    if (!parsed.ok) {
+      return {
+        ok: false,
+        code:
+          parsed.code === 'FILE_REFERENCE_SCHEMA_VERSION_UNSUPPORTED'
+            ? FileReferenceErrorCode.SchemaVersionUnsupported
+            : FileReferenceErrorCode.Invalid,
+        message: parsed.message,
+      }
+    }
+    // Keyed by gfsUri, which carries the normalized rid: a dashed and an
+    // undashed resourceId name the same folder under different ids.
+    if (folders.has(parsed.value.source.gfsUri))
+      return invalid('Each location reference must appear once.')
+    folders.add(parsed.value.source.gfsUri)
+    references.push(parsed.value)
+  }
+  return { ok: true, references }
+}
+
 /** The gfsc surface resolution needs: one JSON metadata call. */
 export interface FileReferenceGfscClient {
   resolve(
@@ -158,15 +263,21 @@ export type FileReferenceCheckErrorClass =
   | 'UnexpectedMetadata'
   | 'SizeMismatch'
 
-export type FileReferenceResolutionResult =
-  | { ok: true; resolutions: FileReferenceResolution[] }
+export interface FileReferenceCheckFailureResult {
+  ok: false
+  failure: FileReferenceCheckFailure
+  errorClass: FileReferenceCheckErrorClass
+  /** The gfsc HTTP status, when gfsc answered. */
+  status?: number
+}
+
+export type MessageReferenceResolutionResult =
   | {
-      ok: false
-      failure: FileReferenceCheckFailure
-      errorClass: FileReferenceCheckErrorClass
-      /** The gfsc HTTP status, when gfsc answered. */
-      status?: number
+      ok: true
+      resolutions: FileReferenceResolution[]
+      locationResolutions: LocationReferenceResolution[]
     }
+  | FileReferenceCheckFailureResult
 
 class ResolutionFailure extends Error {
   constructor(
@@ -234,10 +345,16 @@ interface ResolvedView {
   bytes: number
 }
 
-function resolvedView(
+type GfsIdentity = Pick<LocationReferenceV1['source'], 'drive' | 'resourceId' | 'gfsUri'>
+
+/**
+ * The resolve body's data, once it is proven to describe the resource the
+ * reference names, as a file or a directory.
+ */
+function resolvedIdentity(
   body: unknown,
-  source: Extract<FileReferenceV1['source'], { kind: 'gfs' }>
-): ResolvedView {
+  source: GfsIdentity
+): Record<string, unknown> & { kind: 'file' | 'directory' } {
   const envelope = body as { ok?: unknown; data?: unknown } | null
   if (
     !envelope ||
@@ -255,7 +372,15 @@ function resolvedView(
     data.rid !== rid ||
     data.drive !== source.drive ||
     data.gfsUri !== source.gfsUri ||
-    (data.kind !== 'file' && data.kind !== 'directory') ||
+    (data.kind !== 'file' && data.kind !== 'directory')
+  )
+    throw new ResolutionFailure('contract', 'UnexpectedMetadata')
+  return data as Record<string, unknown> & { kind: 'file' | 'directory' }
+}
+
+function resolvedView(body: unknown, source: GfsIdentity): ResolvedView {
+  const data = resolvedIdentity(body, source)
+  if (
     !Number.isSafeInteger(data.version) ||
     (data.version as number) < 0 ||
     !Number.isSafeInteger(data.bytes) ||
@@ -263,6 +388,26 @@ function resolvedView(
   )
     throw new ResolutionFailure('contract', 'UnexpectedMetadata')
   return { kind: data.kind, version: data.version as number, bytes: data.bytes as number }
+}
+
+/** Calls gfsc `resolve`; a 403/404/410 is an availability, 400 an invalid reference. */
+async function resolveGfs(
+  gfsUri: string,
+  client: FileReferenceGfscClient,
+  call: { signal: AbortSignal; deadlineMs: number }
+): Promise<{ body: unknown } | { availability: 'denied' | 'not_found' }> {
+  try {
+    return { body: await client.resolve({ uri: gfsUri }, call) }
+  } catch (error) {
+    if (error instanceof GfscHttpError) {
+      // gfsc checks the grant before the lookup, so a missing resource usually
+      // answers 403 too; 404/410 only reach a principal that could read it.
+      if (error.status === 403) return { availability: 'denied' }
+      if (error.status === 404 || error.status === 410) return { availability: 'not_found' }
+      if (error.status === 400) throw new ResolutionFailure('invalid', 'GfscHttpError', 400)
+    }
+    throw checkFailure(error)
+  }
 }
 
 async function resolveOne(
@@ -273,21 +418,9 @@ async function resolveOne(
 ): Promise<FileReferenceResolution> {
   const source = reference.source
   if (source.kind !== 'gfs' || !client) return { availability: 'unsupported', reference }
-  let body: unknown
-  try {
-    body = await client.resolve({ uri: source.gfsUri }, call)
-  } catch (error) {
-    if (error instanceof GfscHttpError) {
-      // gfsc checks the grant before the lookup, so a missing resource usually
-      // answers 403 too; 404/410 only reach a principal that could read it.
-      if (error.status === 403) return { availability: 'denied', reference }
-      if (error.status === 404 || error.status === 410)
-        return { availability: 'not_found', reference }
-      if (error.status === 400) throw new ResolutionFailure('invalid', 'GfscHttpError', 400)
-    }
-    throw checkFailure(error)
-  }
-  const view = resolvedView(body, source)
+  const answer = await resolveGfs(source.gfsUri, client, call)
+  if ('availability' in answer) return { availability: answer.availability, reference }
+  const view = resolvedView(answer.body, source)
   if (view.kind === 'directory') return { availability: 'not_a_file', reference }
   if (view.version !== source.version)
     return { availability: 'stale', reference, resolvedVersion: view.version }
@@ -302,12 +435,36 @@ async function resolveOne(
   }
 }
 
+async function resolveLocationOne(
+  reference: LocationReferenceV1,
+  client: FileReferenceGfscClient | null,
+  call: { signal: AbortSignal; deadlineMs: number }
+): Promise<LocationReferenceResolution> {
+  const fallback = { reference, name: reference.name, nameSource: 'client' as const }
+  if (!client) return { availability: 'unsupported', ...fallback }
+  const answer = await resolveGfs(reference.source.gfsUri, client, call)
+  if ('availability' in answer) return { availability: answer.availability, ...fallback }
+  // A folder has no version or size the reference pins, so only its identity
+  // and kind are checked.
+  const data = resolvedIdentity(answer.body, reference.source)
+  const named =
+    typeof data.name === 'string' && resourceNameProblem(data.name) === null
+      ? { name: data.name, nameSource: 'gfsc' as const }
+      : { name: reference.name, nameSource: 'client' as const }
+  return {
+    availability: data.kind === 'directory' ? 'available' : 'not_a_folder',
+    reference,
+    ...named,
+  }
+}
+
 /**
- * Resolves every reference in parallel under one deadline. The first failure
- * aborts the calls still in flight.
+ * Resolves every file and location reference in parallel under one deadline.
+ * The first failure, from either list, aborts the calls still in flight.
  */
-export async function resolveFileReferences(
+export async function resolveMessageReferences(
   references: readonly FileReferenceV1[],
+  locations: readonly LocationReferenceV1[],
   client: FileReferenceGfscClient | null,
   timeoutMs: number = VISUAL_INPUT_LIMITS.validationTimeoutMs,
   runtimeSurfaces: GfsSurfaceRuntimeCapability = {
@@ -315,15 +472,18 @@ export async function resolveFileReferences(
     localExecutor: false,
     visual: false,
   }
-): Promise<FileReferenceResolutionResult> {
+): Promise<MessageReferenceResolutionResult> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   const call = { signal: controller.signal, deadlineMs: Date.now() + timeoutMs }
   try {
-    const resolutions = await Promise.all(
-      references.map(reference => resolveOne(reference, client, call, runtimeSurfaces))
-    )
-    return { ok: true, resolutions }
+    const [resolutions, locationResolutions] = await Promise.all([
+      Promise.all(
+        references.map(reference => resolveOne(reference, client, call, runtimeSurfaces))
+      ),
+      Promise.all(locations.map(location => resolveLocationOne(location, client, call))),
+    ])
+    return { ok: true, resolutions, locationResolutions }
   } catch (error) {
     if (error instanceof ResolutionFailure)
       return {

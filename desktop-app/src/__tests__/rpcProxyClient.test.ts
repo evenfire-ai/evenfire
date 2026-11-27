@@ -16,7 +16,12 @@ describe('RpcProxyClient.invokeHostMessage admission', () => {
     try {
       const client = new RpcProxyClient()
       const rejection = await client
-        .invokeHostMessage('rpc-token', 'host-a', { content: 'hello' })
+        .invokeHostMessage(
+          'rpc-token',
+          'host-a',
+          { content: 'hello' },
+          { idempotencyKey: 'fixture-idempotency-key' }
+        )
         .catch(error => error)
       expect(rejection).toBeInstanceOf(ApiError)
       expect(rejection).toMatchObject({ status: 429, retryAfter: '19' })

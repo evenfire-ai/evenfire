@@ -38,7 +38,7 @@ describe('CommunicationChannelsPage', () => {
       items: [
         {
           metadata: { name: 'channel-a', namespace: 'channels' },
-          spec: { hostRef: 'agent-a' },
+          spec: { hostRef: 'agent-a', telegramSettings: { botHandle: '@fixture_bot' } },
         },
       ],
     })

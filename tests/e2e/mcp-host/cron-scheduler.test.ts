@@ -41,9 +41,10 @@
  * Set E2E_RUN_CRON_SCHEDULER=1 to run this LLM-driven suite. It is not part
  * of the default deterministic minikube gate.
  */
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { CRON_EXEC_PROBE_INSTRUCTION } from '../fixtures/cronExecProbeInstruction.js'
 import {
+  DEFAULT_HOST_REF,
   MCP_HOST_URL,
   approveRequest,
   fetchJson,
@@ -55,6 +56,13 @@ import {
   waitForAgentState,
   waitForIdle,
 } from '../helpers.js'
+import { issueRealRpcToken } from './runtimeAuth.js'
+
+let statusToken: string
+
+beforeAll(async () => {
+  statusToken = await issueRealRpcToken(['host:status:read'], [DEFAULT_HOST_REF])
+})
 
 const RUN_CRON_SCHEDULER = process.env.E2E_RUN_CRON_SCHEDULER === '1'
 
@@ -88,11 +96,11 @@ async function sendAndWait(
   expect(res.status).toBe(200)
 
   if (res.data.success && res.data.response) {
-    await waitForIdle(10_000).catch(() => {})
+    await waitForIdle(statusToken, 10_000).catch(() => {})
     return { response: res.data.response, userId }
   }
 
-  await waitForIdle(timeoutMs)
+  await waitForIdle(statusToken, timeoutMs)
   return { response: res.data?.response || null, userId }
 }
 
@@ -131,7 +139,7 @@ async function sendWithApproval(
     expect(approvalRes.status, JSON.stringify(approvalRes.data)).toBe(200)
     expect(approvalRes.data?.success, JSON.stringify(approvalRes.data)).toBe(true)
 
-    await waitForIdle(timeoutMs)
+    await waitForIdle(statusToken, timeoutMs)
 
     const taskRes = await getTaskResult(taskId, timeoutMs)
     return {
@@ -143,7 +151,7 @@ async function sendWithApproval(
 
   // Case 3: No approval needed
   if (!res.data.success || !res.data.response) {
-    await waitForIdle(timeoutMs)
+    await waitForIdle(statusToken, timeoutMs)
   }
 
   return { response: res.data?.response || null, wasApproval: false, userId }
@@ -290,7 +298,7 @@ async function assertNoCronWaitingApproval(
 
 describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 1: Cron CRUD (approval disabled)', () => {
   it('CR-1: Create a cron job and verify via /status', async () => {
-    const statusBefore = await getStatus()
+    const statusBefore = await getStatus(statusToken)
     const cronBefore = statusBefore.cronJobs || 0
 
     const { response } = await sendAndWait(
@@ -299,7 +307,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 1: Cron CRUD (approval disabled)', (
         'Use the cron scheduling tool to create this job.'
     )
 
-    const statusAfter = await getStatus()
+    const statusAfter = await getStatus(statusToken)
     expect(statusAfter.cronJobs).toBeGreaterThan(cronBefore)
 
     if (response) {
@@ -331,7 +339,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 1: Cron CRUD (approval disabled)', (
       expect(lower).toMatch(/daily.?report/)
     }
 
-    const status = await getStatus()
+    const status = await getStatus(statusToken)
     expect(status.agent.state).toBe('idle')
   }, 360_000)
 
@@ -345,13 +353,13 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 1: Cron CRUD (approval disabled)', (
       { userId }
     )
 
-    const statusAfterCreate = await getStatus()
+    const statusAfterCreate = await getStatus(statusToken)
     const cronAfterCreate = statusAfterCreate.cronJobs
 
     // Step 2: Delete it
     const { response } = await sendAndWait("Delete the 'temp-job' cron job.", { userId })
 
-    const statusAfterDelete = await getStatus()
+    const statusAfterDelete = await getStatus(statusToken)
     expect(statusAfterDelete.cronJobs).toBeLessThan(cronAfterCreate)
 
     if (response) {
@@ -390,7 +398,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 1: Cron CRUD (approval disabled)', (
       expect(enableRes.toLowerCase()).toMatch(/enable|started|active|resum/)
     }
 
-    const status = await getStatus()
+    const status = await getStatus(statusToken)
     expect(status.agent.state).toBe('idle')
   }, 480_000)
 
@@ -398,7 +406,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 1: Cron CRUD (approval disabled)', (
     const userId = `cron-test-${++testCounter}`
     cleanupPaths.push('cron-output.txt')
 
-    const baselineStatus = await getStatus()
+    const baselineStatus = await getStatus(statusToken)
     const baselineSucceeded = baselineStatus.agent.tasksSucceeded ?? 0
 
     // Step 1: Create a cron job whose task writes a file
@@ -415,14 +423,14 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 1: Cron CRUD (approval disabled)', (
     })
 
     // Step 3: Wait for the triggered task to complete
-    await waitForIdle(120_000)
+    await waitForIdle(statusToken, 120_000)
 
     // Step 4: Verify the file was created by the cron-triggered task (unconditional)
     expect(fileExists('cron-output.txt')).toBe(true)
     const content = readFileInContainer('cron-output.txt')
     expect(content).toContain('CRON_OUTPUT_OK')
 
-    const status = await getStatus()
+    const status = await getStatus(statusToken)
     expect(status.agent.state).toBe('idle')
     expect(status.agent.tasksSucceeded).toBeGreaterThan(baselineSucceeded)
   }, 480_000)
@@ -431,7 +439,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 1: Cron CRUD (approval disabled)', (
     const userId = `cron-test-${++testCounter}`
     cleanupPaths.push('cron-e2e-output.txt')
 
-    const baselineStatus = await getStatus()
+    const baselineStatus = await getStatus(statusToken)
     const baselineSucceeded = baselineStatus.agent.tasksSucceeded ?? 0
     const cronBefore = baselineStatus.cronJobs || 0
 
@@ -442,7 +450,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 1: Cron CRUD (approval disabled)', (
       { userId }
     )
 
-    const statusAfterCreate = await getStatus()
+    const statusAfterCreate = await getStatus(statusToken)
     expect(statusAfterCreate.cronJobs).toBeGreaterThan(cronBefore)
 
     const cronResult = await pollCronResultCompleted('scheduled-fire-e2e', {
@@ -452,7 +460,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 1: Cron CRUD (approval disabled)', (
     expect(cronResult.status).toBe('completed')
     expect(cronResult.cronJobName).toBe('scheduled-fire-e2e')
 
-    const statusAfterFire = await waitForIdle(120_000)
+    const statusAfterFire = await waitForIdle(statusToken, 120_000)
     expect(statusAfterFire.agent.tasksSucceeded).toBeGreaterThan(baselineSucceeded)
     expect(statusAfterFire.queue.pending).toBe(0)
 
@@ -467,7 +475,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 1: Cron CRUD (approval disabled)', (
 
   it('CR-6: Multiple cron jobs', async () => {
     const userId = `cron-test-${++testCounter}`
-    const statusBefore = await getStatus()
+    const statusBefore = await getStatus(statusToken)
     const cronBefore = statusBefore.cronJobs || 0
 
     // Step 1: Create 3 jobs
@@ -482,7 +490,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 1: Cron CRUD (approval disabled)', (
     // Step 2: List them
     const { response } = await sendAndWait('List all scheduled cron jobs.', { userId })
 
-    const statusAfter = await getStatus()
+    const statusAfter = await getStatus(statusToken)
     expect(statusAfter.cronJobs).toBeGreaterThanOrEqual(cronBefore + 3)
 
     if (response) {
@@ -518,7 +526,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 1: Cron CRUD (approval disabled)', (
       // best-effort; absence is fine
     }
 
-    const baselineStatus = await getStatus()
+    const baselineStatus = await getStatus(statusToken)
     const baselineSucceeded = baselineStatus.agent.tasksSucceeded ?? 0
 
     // Single-shot: hand the full recipe instruction to the agent and let it
@@ -543,7 +551,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 1: Cron CRUD (approval disabled)', (
     expect(proof).toContain('CRON_EXEC_OK')
 
     // 3. Pipeline health — the scheduled task ran through real dispatch.
-    const statusAfter = await waitForIdle(120_000)
+    const statusAfter = await waitForIdle(statusToken, 120_000)
     expect(statusAfter.agent.tasksSucceeded).toBeGreaterThan(baselineSucceeded)
     expect(statusAfter.agent.state).toBe('idle')
     expect(statusAfter.queue.pending).toBe(0)
@@ -564,7 +572,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 1: Cron CRUD (approval disabled)', (
 
 describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 2: Approval + Cron (approval enabled)', () => {
   it('CR-7: Approval gate blocks cron_manage until approved', async () => {
-    const statusBefore = await getStatus()
+    const statusBefore = await getStatus(statusToken)
     const cronBefore = statusBefore.cronJobs || 0
 
     const { response, wasApproval } = await sendWithApproval(
@@ -579,7 +587,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 2: Approval + Cron (approval enabled
       console.log('[CR-7] Approval flow confirmed for cron_manage')
     }
 
-    const statusAfter = await getStatus()
+    const statusAfter = await getStatus(statusToken)
     expect(statusAfter.cronJobs).toBeGreaterThan(cronBefore)
 
     if (response) {
@@ -599,7 +607,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 2: Approval + Cron (approval enabled
       { userId, timeoutMs: 240_000 }
     )
 
-    const status1 = await getStatus()
+    const status1 = await getStatus(statusToken)
     expect(status1.agent.state).toBe('idle')
 
     // Step 2: Second cron_manage call — should auto-approve (same userId)
@@ -619,7 +627,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 2: Approval + Cron (approval enabled
       expect(res2.response.toLowerCase()).toMatch(/schedul|cron|creat/)
     }
 
-    const status2 = await getStatus()
+    const status2 = await getStatus(statusToken)
     expect(status2.agent.state).toBe('idle')
   }, 480_000)
 
@@ -627,7 +635,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 2: Approval + Cron (approval enabled
     const userId = `cron-test-${++testCounter}`
     cleanupPaths.push('cron-approval-e2e.txt')
 
-    const baselineStatus = await getStatus()
+    const baselineStatus = await getStatus(statusToken)
     const baselineSucceeded = baselineStatus.agent.tasksSucceeded ?? 0
 
     const { wasApproval } = await sendWithApproval(
@@ -652,7 +660,7 @@ describe.skipIf(!RUN_CRON_SCHEDULER)('Phase 2: Approval + Cron (approval enabled
       expect(content).toContain('CRON_APPROVAL_E2E_OK')
     }
 
-    const statusAfterFire = await waitForIdle(120_000)
+    const statusAfterFire = await waitForIdle(statusToken, 120_000)
     expect(statusAfterFire.agent.tasksSucceeded).toBeGreaterThan(baselineSucceeded)
     expect(statusAfterFire.agent.state).toBe('idle')
 

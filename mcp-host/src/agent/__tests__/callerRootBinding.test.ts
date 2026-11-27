@@ -159,6 +159,7 @@ describe('degraded GFS caller-root binding', () => {
           return { workspaceFile, localExecutor: workspaceFile, visual: false }
         },
         logger: { info: vi.fn(), warn: vi.fn() },
+        approvalSnapshot: () => ({ effective: undefined, hostSpec: undefined }),
       }
 
       const admit = createIncomingAdmission(deps)

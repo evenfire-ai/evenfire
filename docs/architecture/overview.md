@@ -597,7 +597,7 @@ All runtime routes are namespaced under `/v1/runtime/*`. Unmatched paths fall th
 | `POST` | `/v1/runtime/approvals/approve` | Approve a pending tool execution                            |
 | `POST` | `/v1/runtime/approvals/deny`    | Deny a pending tool execution                               |
 
-Except for the three unauthenticated routes (`/v1/runtime`, `/v1/runtime/live`, `/v1/runtime/health`), these routes are wrapped in a runtime edge guard: callers must send `x-clerum-edge-caller` and `x-clerum-edge-host-ref` (plus `x-clerum-edge-user-id` when the caller is `rpc-proxy`), and the host-ref must match the pod's own `CLERUM_HOST_NAME` (403 otherwise). The accepted caller value is per route: `/v1/runtime/status` accepts only `rpc-proxy`; the approval routes accept `rpc-proxy` or `channel-reader`; `/v1/runtime/messages` also accepts `workflow-approval-request-reader`. An `Authorization` header is rejected with 401 on these routes.
+Except for the three unauthenticated routes (`/v1/runtime`, `/v1/runtime/live`, `/v1/runtime/health`), these routes are wrapped in a runtime edge guard: callers must send `x-clerum-edge-caller` and `x-clerum-edge-host-ref` (plus `x-clerum-edge-user-id` when the caller is `rpc-proxy`), and the host-ref must match the pod's own `CLERUM_HOST_NAME` (403 otherwise). Caller `rpc-proxy` must also send `x-clerum-edge-assertion`: a short-lived RS256 JWT that control-api signs with the RPC key (`aud: "evenfire-host-runtime-edge"`, at most 300 s). The Host verifies it with `CLERUM_AUTH_JWT_PUBLIC_KEY`, checks that its claims match the clear edge headers, and checks that its `scopes` contain the route's scope from `HOST_EDGE_RPC_PROXY_ROUTE_SCOPES` (`@clerum/action-context-contracts`); otherwise it answers 401 `Missing runtime edge assertion` or `Invalid runtime edge assertion`. A `POST /v1/runtime/messages` body from caller `rpc-proxy` that carries `approvalMode` also needs `host:approval:write` in the assertion, the scope of the approval-mode PATCH route; without it the route answers 403 `Forbidden: missing scope`. The accepted caller value is per route: `/v1/runtime/status` accepts only `rpc-proxy`; the approval routes accept `rpc-proxy` or `channel-reader`; `/v1/runtime/messages` also accepts `workflow-approval-request-reader`. An `Authorization` header is rejected with 401 on these routes.
 
 **POST /v1/runtime/messages** request:
 
@@ -1573,7 +1573,7 @@ Host CRD (spec.approval)
 | `POST` | `/v1/runtime/approvals/approve`    | Approve a pending tool execution                                        |
 | `POST` | `/v1/runtime/approvals/deny`       | Deny a pending tool execution                                           |
 | `GET`  | `/v1/runtime/tasks/:taskId/result` | Poll for final result after channel-based approval (two-phase response) |
-| `GET`  | `/v1/runtime/status`               | Includes `pendingApprovals` array                                       |
+| `GET`  | `/v1/runtime/status`               | Includes `pendingApprovals` (`since` of each, no request ids)           |
 
 All four require the `x-clerum-edge-*` caller headers (see [HTTP RPC API](#http-rpc-api)).
 
@@ -1606,18 +1606,13 @@ All four require the `x-clerum-edge-*` caller headers (see [HTTP RPC API](#http-
 {
   "agent": { "state": "awaiting_approval", "..." },
   "queue": { "..." },
-  "pendingApprovals": [
-    {
-      "requestId": "1709123456789-tc_1",
-      "userId": "123456789",
-      "toolName": "shell_exec",
-      "parameters": { "command": "rm -rf /tmp/old-data" },
-      "description": "Tool shell_exec requires approval",
-      "since": "2026-02-25T14:00:00.000Z"
-    }
-  ]
+  "pendingApprovals": [{ "since": "2026-02-25T14:00:00.000Z" }]
 }
 ```
+
+The status route only says that approvals are pending and since when. The
+`requestId` of each approval comes from the task's own progress stream
+(`GET /v1/runtime/tasks/:taskId/progress/stream`, `suspended` events).
 
 ### Configuration
 
@@ -1679,6 +1674,8 @@ All three calls carry the `x-clerum-edge-*` caller headers (`x-clerum-edge-calle
 
 ### Per-tool approval
 
+The approval mode changes which of the cards below appear. `cron_manage` follows the `manual` rules below in every mode. For every other tool, the grant rules (what a plain approval and **Always approve** store, and the `turn_tools` scope of an ordinary card) apply only in `manual`: outside manual, approving a card stores no task or **Always approve** grant. The denial rules (a denied tool asks again, and while a denial is active so do tools that start other tools) apply in `manual` and `auto`. In `auto`, a denial re-ask, a tool an admin forces with `spec.approval.tools.<tool>: true`, and a guardrail `ask` each show a card for that one call. Otherwise the shell classifier judges `shell_exec` and a command it does not approve shows the shell card, `http_request` runs with no card, and every other gated tool shows its card. In `allow_all`, a call the approval gate would hold runs with no approval card, including a tool the user denied and a tool an admin forces; a guardrail `ask` still shows its card. A denial stays recorded and applies again when the mode drops. An OAuth connect card shows in every mode: it comes from the tool's result after the call runs, not from the approval gate. See [Configure approvals](../how-to/configure-approvals.md#approval-modes).
+
 Approving a tool runs that call only. It does not allowlist the rest of the turn or every tool on the same MCP server. A later call, including the same tool with different arguments, asks again.
 
 `/approve always` (and the desktop **Always approve** button) stores that exact tool name for later calls in the conversation. It never waives a forced gate: the stateless `cron_manage` create/enable card, a denial re-ask, and an OAuth connect card run the call once and allowlist nothing. Desktop hides the button on those cards. Slack, Telegram, and Teams do the same when the Host sets `alwaysApproveAllowed` to false.
@@ -1702,11 +1699,14 @@ Every pending approval carries a durable `authorization_scope`. An ordinary card
 
 **Channel commands:**
 
-| Command           | Behavior                                                                                                                               |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `/approve`        | Run the approved call only                                                                                                             |
-| `/approve always` | On an ordinary card, run the call and allowlist that exact tool name. On an exact-invocation card, run the call once and store nothing |
-| `/deny`           | Cancel the call, block that tool name until approved, and revoke its Always approve                                                    |
+| Command                | Behavior                                                                                                                               |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `/approve`             | Run the approved call only                                                                                                             |
+| `/approve always`      | On an ordinary card, run the call and allowlist that exact tool name. On an exact-invocation card, run the call once and store nothing |
+| `/deny`                | Cancel the call, block that tool name until approved, and revoke its Always approve                                                    |
+| `approval-mode <mode>` | Set this conversation's approval mode to `manual`, `auto` or `allow-all`                                                               |
+
+`approval-mode <mode>` works on Telegram, Slack, Teams and email. The whole message must be the command, in any letter case; for email, the subject and body together. Lowering the mode always works. With the channel's `allowModeChange` off, the command stores `manual`. Under an explicit `defaultPolicy` of `cli_only` or `designated_approvers`, a raise from a sender the policy does not allow leaves the stored mode unchanged, and a session whose owner the policy does not allow runs as `manual` whatever it stored, including after a later change to `defaultPolicy` or `approvers`. The reply gives the stored and the effective mode.
 
 ### Architecture Components
 
@@ -1746,17 +1746,22 @@ Then in Telegram:
 **Option 2: CLI-based approval (for scripts/debugging)**
 
 Every `/v1/runtime/*` route below is behind the runtime edge guard, so each call must
-carry the edge headers: `x-clerum-edge-caller` (one of `rpc-proxy`, `channel-reader`,
-`workflow-approval-request-reader`), `x-clerum-edge-host-ref` (must match the running
-host's `CLERUM_HOST_NAME`), and — when the caller is `rpc-proxy` — `x-clerum-edge-user-id`.
-There is no dev-mode bypass; without them the guard returns `401`. An `Authorization`
-header on these routes is also rejected with `401`.
+carry the edge headers: `x-clerum-edge-caller`, `x-clerum-edge-host-ref` (must match the
+running host's `CLERUM_HOST_NAME`) and the caller's context headers. There is no
+dev-mode bypass; without them the guard returns `401`. An `Authorization` header on these
+routes is also rejected with `401`. Caller `rpc-proxy` also needs an edge assertion that
+only control-api can sign, so a script acts as the Telegram `channel-reader`, the way
+channel-reader itself does: send the message, read the approval's `requestId` from the
+task's progress stream, then approve. `CLERUM_MCP_HOST_URL` is the Host URL that
+channel-reader uses above.
 
 ```bash
-EDGE=(-H "x-clerum-edge-caller: rpc-proxy" -H "x-clerum-edge-host-ref: chatllm" -H "x-clerum-edge-user-id: 123")
+EDGE=(-H "x-clerum-edge-caller: channel-reader" -H "x-clerum-edge-host-ref: chatllm"
+      -H "x-clerum-edge-channel-type: telegram" -H "x-clerum-edge-channel-id: test"
+      -H "x-clerum-edge-sender: 123")
 
-# Send a message that triggers a tool
-curl -X POST http://localhost:8080/v1/runtime/messages "${EDGE[@]}" -H "Content-Type: application/json" -d '{
+# Send a message that triggers a tool; the answer carries the taskId
+curl -X POST "$CLERUM_MCP_HOST_URL/v1/runtime/messages" "${EDGE[@]}" -H "Content-Type: application/json" -d '{
   "content": "List files in /tmp",
   "channelType": "telegram",
   "channelId": "test",
@@ -1766,14 +1771,16 @@ curl -X POST http://localhost:8080/v1/runtime/messages "${EDGE[@]}" -H "Content-
   "hostRef": "chatllm"
 }'
 
-# Check pending approvals
-curl http://localhost:8080/v1/runtime/status "${EDGE[@]}" | jq '.pendingApprovals'
+# Read the approval request: each `suspended` event carries data.requestId
+curl -N "$CLERUM_MCP_HOST_URL/v1/runtime/tasks/<taskId>/progress/stream" "${EDGE[@]}"
 
 # Approve
-curl -X POST http://localhost:8080/v1/runtime/approvals/approve "${EDGE[@]}" -H "Content-Type: application/json" -d '{
+curl -X POST "$CLERUM_MCP_HOST_URL/v1/runtime/approvals/approve" "${EDGE[@]}" -H "Content-Type: application/json" -d '{
   "userId": "123",
-  "requestId": "<from status response>",
-  "alwaysApprove": false
+  "requestId": "<from the suspended event>",
+  "alwaysApprove": false,
+  "channelType": "telegram",
+  "channelId": "test"
 }'
 ```
 

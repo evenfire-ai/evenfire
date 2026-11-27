@@ -2,8 +2,10 @@ import React, { useEffect, useId, useRef, useState } from 'react'
 import { Button, IconButton } from '@components/Common'
 import { extractArtifactNames } from '@lib/artifacts'
 import { formatTokenBreakdown, formatTokenCount } from '@lib/format'
-import { formatToolApprovalLabel } from '@lib/toolLabels'
+import { formatToolApprovalLabel, formatToolDisplayName } from '@lib/toolLabels'
+import type { ShellAction } from '../../../src/types'
 import type { ApprovalDecisionSettlement } from '../hooks/domain/approvalDecision'
+import { desktopShellCommandOffered } from '../hooks/domain/trackerToProgress'
 import type { ProgressStep, TaskProgress } from '../uiTypes'
 import { ArtifactsBadge } from './ArtifactsBadge'
 
@@ -14,6 +16,7 @@ interface ProgressStepperProps {
   // re-enables the same request for a retry (see `ApprovalDecisionSettlement`).
   onApprove?: () => void | Promise<ApprovalDecisionSettlement>
   onAlwaysApprove?: () => void | Promise<ApprovalDecisionSettlement>
+  onShellAction?: (action: ShellAction) => void | Promise<ApprovalDecisionSettlement>
   onDeny?: () => void | Promise<ApprovalDecisionSettlement>
   onCancel?: () => void
   // U5 (mcp-oauth reactive consent): fired for a `connect_required` suspension —
@@ -21,7 +24,7 @@ interface ProgressStepperProps {
   onConnect?: () => void
 }
 
-type ApprovalAction = 'approve' | 'always' | 'deny'
+type ApprovalAction = 'approve' | 'always' | 'deny' | ShellAction
 
 function ThinkingIndicator({ label }: { label: string }) {
   return (
@@ -94,7 +97,8 @@ function truncateStatusLabel(value: string): string {
 
 function stepSubjectLabel(step: ProgressStep): string {
   const fnName = toolFunctionName(step)
-  return truncateStatusLabel(step.displayName || fnName || step.toolName)
+  const displayName = formatToolDisplayName(step)
+  return truncateStatusLabel(displayName || fnName || step.toolName)
 }
 
 function activeProgressLabel(progress: TaskProgress): string {
@@ -117,7 +121,7 @@ function activeProgressLabel(progress: TaskProgress): string {
   if (latestStep?.state === 'error') {
     const errorSummary = compactText(latestStep.errorSummary)
     const label = errorSummary
-      ? `${latestStep.displayName}: ${errorSummary}`
+      ? `${formatToolDisplayName(latestStep)}: ${errorSummary}`
       : stepSubjectLabel(latestStep)
     return `Issue in ${truncateStatusLabel(label)}`
   }
@@ -203,7 +207,7 @@ function StepList({ steps }: { steps: TaskProgress['steps'] }) {
                 {stepIcon(step.state)}
               </span>
               <span className="stepper-step-name">
-                {step.displayName}
+                {formatToolDisplayName(step)}
                 {fnName && <span className="stepper-step-fn">{fnName}</span>}
               </span>
               {step.state === 'completed' && step.durationMs != null && (
@@ -273,6 +277,7 @@ export function ProgressStepper({
   hostRef,
   onApprove,
   onAlwaysApprove,
+  onShellAction,
   onDeny,
   onCancel,
   onConnect,
@@ -447,6 +452,10 @@ export function ProgressStepper({
     const approvalPending = pendingAction !== null
     // The host refuses to allowlist some suspensions (`alwaysApproveAllowed: false`).
     const canAlwaysApprove = !!onAlwaysApprove && info?.alwaysApproveAllowed !== false
+    const showShellCard = !!info?.shellCard && !!onShellAction
+    const offerShellCommand = info
+      ? desktopShellCommandOffered(info.shellCard, info.inputPreview)
+      : false
     // The host keeps this grant in memory only: a Host restart or a reload of
     // the chat from storage asks again (docs/architecture/overview.md).
     const alwaysApproveScope = info
@@ -532,41 +541,44 @@ export function ProgressStepper({
             </Button>
           </div>
         )}
-        {info && !canConnect && !isConnect && (onApprove || canAlwaysApprove || onDeny) && (
+        {info && !canConnect && !isConnect && showShellCard && (
           <div className="stepper-approval-actions">
-            {onApprove && (
+            <Button
+              data-testid="approval-shell-once-btn"
+              className="stepper-btn stepper-btn-approve"
+              color="success"
+              disabled={approvalPending}
+              onClick={() => decide('once', () => onShellAction!('once'))}
+              size="sm"
+              variant="soft"
+            >
+              {pendingAction === 'once' ? 'Allowing...' : 'Allow once'}
+            </Button>
+            {offerShellCommand && (
               <Button
-                data-testid="approval-approve-btn"
+                data-testid="approval-shell-command-btn"
                 className="stepper-btn stepper-btn-approve"
                 color="success"
                 disabled={approvalPending}
-                onClick={() => decide('approve', onApprove)}
+                onClick={() => decide('command', () => onShellAction!('command'))}
                 size="sm"
                 variant="soft"
               >
-                {pendingAction === 'approve' ? 'Approving...' : 'Approve'}
+                {pendingAction === 'command' ? 'Allowing...' : 'Allow this command'}
               </Button>
             )}
-            {canAlwaysApprove && (
-              <>
-                <Button
-                  data-testid="approval-always-approve-btn"
-                  className="stepper-btn stepper-btn-always-approve"
-                  color="success"
-                  disabled={approvalPending}
-                  onClick={() => decide('always', onAlwaysApprove!)}
-                  size="sm"
-                  title={alwaysApproveScope}
-                  aria-describedby={alwaysApproveScopeId}
-                  variant="soft"
-                >
-                  {pendingAction === 'always' ? 'Approving...' : 'Always approve'}
-                </Button>
-                <span id={alwaysApproveScopeId} hidden>
-                  {alwaysApproveScope}
-                </span>
-              </>
-            )}
+            <Button
+              data-testid="approval-shell-always-btn"
+              className="stepper-btn stepper-btn-always-approve"
+              color="success"
+              disabled={approvalPending}
+              onClick={() => decide('shell', () => onShellAction!('shell'))}
+              size="sm"
+              title="Allow later shell commands in this chat until the mode changes or the Host restarts."
+              variant="soft"
+            >
+              {pendingAction === 'shell' ? 'Allowing...' : 'Always allow shell'}
+            </Button>
             {onDeny && (
               <Button
                 data-testid="approval-deny-btn"
@@ -582,6 +594,60 @@ export function ProgressStepper({
             )}
           </div>
         )}
+        {info &&
+          !canConnect &&
+          !isConnect &&
+          !showShellCard &&
+          (onApprove || canAlwaysApprove || onDeny) && (
+            <div className="stepper-approval-actions">
+              {onApprove && (
+                <Button
+                  data-testid="approval-approve-btn"
+                  className="stepper-btn stepper-btn-approve"
+                  color="success"
+                  disabled={approvalPending}
+                  onClick={() => decide('approve', onApprove)}
+                  size="sm"
+                  variant="soft"
+                >
+                  {pendingAction === 'approve' ? 'Approving...' : 'Approve'}
+                </Button>
+              )}
+              {canAlwaysApprove && (
+                <>
+                  <Button
+                    data-testid="approval-always-approve-btn"
+                    className="stepper-btn stepper-btn-always-approve"
+                    color="success"
+                    disabled={approvalPending}
+                    onClick={() => decide('always', onAlwaysApprove!)}
+                    size="sm"
+                    title={alwaysApproveScope}
+                    aria-describedby={alwaysApproveScopeId}
+                    variant="soft"
+                  >
+                    {pendingAction === 'always' ? 'Approving...' : 'Always approve'}
+                  </Button>
+                  <span id={alwaysApproveScopeId} hidden>
+                    {alwaysApproveScope}
+                  </span>
+                </>
+              )}
+              {onDeny && (
+                <Button
+                  data-testid="approval-deny-btn"
+                  className="stepper-btn stepper-btn-deny"
+                  color="danger"
+                  disabled={approvalPending}
+                  onClick={() => decide('deny', onDeny)}
+                  size="sm"
+                  variant="soft"
+                >
+                  {pendingAction === 'deny' ? 'Denying...' : 'Deny'}
+                </Button>
+              )}
+            </div>
+          )}
         {steps.length > 0 && (
           <>
             <Button

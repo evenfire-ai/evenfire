@@ -12,6 +12,7 @@
  *
  * Phase 6: Added approval handler wiring and approval config propagation.
  */
+import { createHash } from 'node:crypto'
 import * as path from 'node:path'
 import { HostActivityHub } from './activityHub'
 import { AgentStateMachine, CronScheduler, wireCronDispatch } from './agent'
@@ -22,6 +23,7 @@ import { createFileReferenceGfsGate } from './agent/fileReferenceGfsGate'
 import { createIncomingAdmission, replayedIncomingMessage } from './agent/incomingAdmission'
 import { INCOMING_ATTACHMENT_MAX_COUNT } from './agent/incomingAttachments'
 import { IncomingDelivery } from './agent/incomingDelivery'
+import { applySessionApprovalMode } from './agent/sessionApprovalMode'
 import {
   type SessionModelSelectionOptions,
   applySessionModelSelection as applySessionModelSelectionCore,
@@ -40,6 +42,12 @@ import {
   resolveSessionModel,
 } from './config/modelResolution'
 import { ContextMapperClient, getContextMapperClient } from './contextMapperClient'
+import { applyHostChange } from './core/approval/hostChange'
+import { createHostEventGate } from './core/approval/hostEventGate'
+import {
+  type ShellClassifierCaller,
+  configuredShellClassifierModel,
+} from './core/approval/shellClassifier'
 import {
   type ConversationStoreHandle,
   SqliteColdStartLoader,
@@ -123,7 +131,11 @@ import {
 } from './mcp/grantExistenceClient'
 import { McpStatusHeartbeat } from './mcp/statusHeartbeat'
 import { startMcpInitializationInBackground } from './mcpBackgroundInit'
-import { IncomingMessageHandler, PendingTaskEntry } from './messageHandler'
+import {
+  IncomingMessageHandler,
+  PendingTaskEntry,
+  projectTaskResultApproval,
+} from './messageHandler'
 import {
   configurePluginWorkloadSdkBootstrapIdentity,
   resolvePluginWorkloadSdkBootstrapCapabilityFamily,
@@ -167,6 +179,7 @@ import {
   WorkflowApprovalNotificationTerminal,
 } from './server'
 import { createSessionRouteHandlers } from './server/sessionRouteHandlers'
+import { pendingApprovalsForStatus } from './server/statusProjection'
 import { projectContextBreakdown } from './server/wireProjections'
 import { SessionProcessor } from './session'
 import { serializeSessionKey } from './session/types.js'
@@ -219,6 +232,12 @@ setOutputDirHostAccessor(() => currentHost)
 let currentKeys: ApiKeys = {}
 let currentProvider: SingleTurnProvider | null = null
 let configStore: ConfigStore | null = null
+// The failover credential slots the installed `configStore` was opened with.
+// A Host event decides whether to rebuild by comparing its own slots with
+// these, never with `currentPolicy`: an earlier event that is still opening its
+// store has already refreshed `currentPolicy`, and that store is dropped when a
+// newer event commits first.
+let configStoreFallbackSlots: string[] = []
 setCodexPolicyBindingReader(() => configStore?.codexPolicyBinding() ?? null)
 setGrokPolicyBindingReader(() => configStore?.grokPolicyBinding() ?? null)
 // R5 — provider-fallback. `currentPolicy` is the normalized `spec.llmPolicy`
@@ -237,6 +256,7 @@ let contextMapperPollTimer: ReturnType<typeof setInterval> | null = null
 // events (the LlmHookWatcher is the primary, immediate path). Host edits also
 // apply immediately via onHostChange.
 let guardrailResolveTimer: ReturnType<typeof setInterval> | null = null
+const hostEventGate = createHostEventGate()
 const GUARDRAIL_RESOLVE_INTERVAL_MS = 300_000
 let contextMapperPollRunner: { trigger(): void; stop(): void } | null = null
 let mcpStatusHeartbeat: McpStatusHeartbeat | null = null
@@ -630,6 +650,53 @@ function hostAllowlistView(): AllowlistView {
   return hostSubsetAllowlistView(allowlistView(), currentHost?.spec.allowedModels)
 }
 
+let shellClassifierCache: {
+  fingerprint: string
+  model: string
+  caller: ShellClassifierCaller
+} | null = null
+
+/**
+ * Dedicated shell classifier for a Host whose model provider is OpenAI. The
+ * ConfigStore holds only the Host provider's credentials
+ * (`apiKeysFromConfigStore`), so any other provider has no OpenAI key here.
+ * Dev mode reads every provider's key from the env, so an OPENAI_API_KEY
+ * there is used whatever the Host model. The chat model is not the judge. No
+ * OpenAI key, or a provider that cannot be built, returns null and admission
+ * keeps the chat or failover pair. The credential is hashed only as a cache
+ * key and is never logged.
+ */
+function shellClassifierCaller(): ShellClassifierCaller | null {
+  const keys = configStore ? apiKeysFromConfigStore(configStore) : currentKeys
+  const credential = keys.openai?.['openai-api-key']
+  if (typeof credential !== 'string' || credential.length === 0) {
+    shellClassifierCache = null
+    return null
+  }
+  const model = configuredShellClassifierModel(currentHost?.spec.approval?.shellClassifierModel)
+  const fingerprint = createHash('sha256').update(credential).digest('hex')
+  if (shellClassifierCache?.fingerprint === fingerprint && shellClassifierCache.model === model) {
+    return shellClassifierCache.caller
+  }
+  const provider = createLLMProvider(
+    keys,
+    { provider: 'openai', name: model },
+    { env: hostProviderEnv('openai') }
+  )
+  if (!provider) {
+    // createLLMProvider already logged the construction failure.
+    shellClassifierCache = null
+    return null
+  }
+  const caller: ShellClassifierCaller = {
+    provider,
+    providerType: provider.getProviderType(),
+    modelName: model,
+  }
+  shellClassifierCache = { fingerprint, model, caller }
+  return caller
+}
+
 /**
  * R2.9(a) — build a provider instance for a specific model within the Host's
  * configured provider, reading the LIVE ConfigStore keys. Called per task by
@@ -649,6 +716,33 @@ function buildProviderForModel(model: string): SingleTurnProvider | null {
 }
 
 /**
+ * The `(provider, model)` pair a task for these selections runs with, without
+ * building a provider. The task model resolver and the session read both use
+ * it, so a session view reports the pair admission judges.
+ *
+ * R5.10 — boot fallback: the primary is inconstructible, so the boot fallback
+ * pair serves (cross-provider → ignore the session selection, R5.4). Otherwise
+ * the session's model on the Host provider, resolved against the global
+ * allowlist view like every task.
+ */
+function taskModelPair(
+  selections: Record<string, string> | undefined
+): { provider: string; model: string } | null {
+  const modelCfg = currentHost?.spec.model
+  if (!modelCfg?.provider || !modelCfg.name) return null
+  if (bootFallbackEntry && currentProvider) {
+    return { provider: bootFallbackEntry.provider, model: bootFallbackEntry.model }
+  }
+  const { model } = resolveSessionModel(
+    allowlistView(),
+    modelCfg.provider,
+    modelCfg.name,
+    selections
+  )
+  return { provider: modelCfg.provider, model }
+}
+
+/**
  * R2 — the per-task model resolver injected into the agent. Turns a session's
  * saved `{ provider → model }` selection into the concrete provider instance +
  * effective model + context window for the task. Falls back to the Host default
@@ -658,24 +752,15 @@ function resolveTaskModel(
   selections: Record<string, string> | undefined
 ): ResolvedTaskModel | null {
   const modelCfg = currentHost?.spec.model
-  if (!modelCfg?.provider || !modelCfg.name) return null
-  const view = allowlistView()
-  // R5.10 — boot fallback: the primary is inconstructible, so serve the boot
-  // fallback pair (cross-provider → ignore the session selection, R5.4). The
-  // runtime failover engine (currentFailoverSupport) still advances from here.
+  const pair = taskModelPair(selections)
+  if (!modelCfg || !pair) return null
+  const { model } = pair
+  const contextWindowTokens = contextWindowForModel(allowlistView(), pair.provider, model)
+  // R5.10 — the boot fallback pair serves on the boot provider. The runtime
+  // failover engine (currentFailoverSupport) still advances from here.
   if (bootFallbackEntry && currentProvider) {
-    return {
-      provider: currentProvider,
-      model: bootFallbackEntry.model,
-      contextWindowTokens: contextWindowForModel(
-        view,
-        bootFallbackEntry.provider,
-        bootFallbackEntry.model
-      ),
-    }
+    return { provider: currentProvider, model, contextWindowTokens }
   }
-  const { model } = resolveSessionModel(view, modelCfg.provider, modelCfg.name, selections)
-  const contextWindowTokens = contextWindowForModel(view, modelCfg.provider, model)
   // Hot-path short-circuit (review nit): when the resolution lands on the Host
   // default, reuse the process provider instead of constructing a fresh
   // instance per task. Rotation-safe: onChange rebuilds currentProvider too.
@@ -687,18 +772,21 @@ function resolveTaskModel(
   return { provider, model, contextWindowTokens }
 }
 
+interface OpenedConfigStore {
+  store: ConfigStore
+  /** The failover credential slots this store loads. */
+  fallbackSlots: string[]
+}
+
 /**
  * (Re)create the ConfigStore for the current Host. Used at boot and on
  * Host CRD changes that flip `spec.secretRef` (which would also have
  * triggered a Deployment rollout in HCC, but we re-create here anyway
  * so a soft secretRef change without HCC also picks up correctly).
  */
-async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
+async function openConfigStore(host: HostCRD): Promise<OpenedConfigStore> {
   const provider = host.spec.model?.provider ?? null
-  if (configStore) {
-    configStore.stop()
-    configStore = null
-  }
+  const fallbackSlots = fallbackCredentialSlotsFor(currentPolicy)
   const store = new ConfigStore({
     namespace: config.namespace,
     hostRef: host.name,
@@ -708,10 +796,19 @@ async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
     allowlistConfigMapName: config.llmAllowlistConfigMapName,
     // R5 — load the failover policy's referenced credential slots from the same
     // LLM Secret (kept out of the effective env; read via fallbackSlotValue).
-    fallbackCredentialSlots: fallbackCredentialSlotsFor(currentPolicy),
+    fallbackCredentialSlots: fallbackSlots,
   })
   await store.start()
+  return { store, fallbackSlots }
+}
+
+function installConfigStore(opened: OpenedConfigStore, host: HostCRD): void {
+  const { store } = opened
+  if (configStore && configStore !== store) configStore.stop()
   configStore = store
+  configStoreFallbackSlots = opened.fallbackSlots
+  currentKeys = apiKeysFromConfigStore(store)
+  const provider = host.spec.model?.provider ?? null
 
   // R3.7 — non-disruptive signal: warn (+ metric) if this Host's configured
   // model is not in the operator allowlist. No enforcement here; the hard gate
@@ -768,8 +865,12 @@ async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
       logger.info({}, '[Main] LLM provider rebuilt (agent not ready yet, will use on init)')
     }
   })
+}
 
-  return store
+async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
+  const opened = await openConfigStore(host)
+  installConfigStore(opened, host)
+  return opened.store
 }
 
 /**
@@ -788,7 +889,6 @@ async function initializeProvider(
   keys: ApiKeys,
   opts?: { llmConfigChanged?: boolean }
 ): Promise<void> {
-  currentHost = host
   currentKeys = keys
 
   logger.info({ host: host.spec.host }, '[Main] Initializing provider for host:')
@@ -868,17 +968,22 @@ async function initializeProvider(
   } else {
     logger.error({}, '[Main] Failed to initialize LLM provider')
   }
+}
 
-  // Phase 6: Propagate approval config to agent
-  if (agent) {
-    const effectiveApprovalCfg = host.spec.approval || config.approvalConfig
-    agent.setApprovalConfig(effectiveApprovalCfg)
-    validateApprovalConfig(
-      effectiveApprovalCfg,
-      knownNativeToolNames,
-      config.nativeTool.httpAllowlist
-    )
-  }
+/**
+ * Publish this host's approval policy. Effective tools stay
+ * `spec.approval || CLERUM_APPROVAL_CONFIG`. The ceiling and the channel switch
+ * read `spec.approval` alone, except dev mode, which passes the env config. The
+ * approver policy in the channel cap reads the effective policy.
+ * Runs before credential reconciliation so a later event cannot be overwritten
+ * by an older completion.
+ */
+function publishApproval(host: HostCRD): void {
+  if (!agent) return
+  const effective = host.spec.approval || config.approvalConfig
+  const hostSpec = config.devMode ? config.approvalConfig : host.spec.approval
+  agent.setApprovalConfig(effective, hostSpec)
+  validateApprovalConfig(effective, knownNativeToolNames, config.nativeTool.httpAllowlist)
 }
 
 const mcpFleetCoordinator = new AuthoritativeMcpFleetCoordinator(
@@ -1524,7 +1629,10 @@ async function applyResolvedGuardrails(): Promise<void> {
   agent.setGuardrailsConfig(withResolvedHookDescriptors(hostGuardrails, resolved))
 }
 
-async function onHostChange(host: HostCRD): Promise<void> {
+/**
+ * Host watch handler. Exported so tests drive this handler, not a copy of it.
+ */
+export async function onHostChange(host: HostCRD): Promise<void> {
   logger.info({ name: host.name }, '[Main] Host configuration changed:')
 
   const contextChanged =
@@ -1559,66 +1667,83 @@ async function onHostChange(host: HostCRD): Promise<void> {
   }
 
   // R5 — refresh the failover policy BEFORE (re)building the ConfigStore so the
-  // fallback credential slots are loaded. A policy change that alters which
-  // Secret slots are needed forces a ConfigStore rebuild even if provider/
-  // secretRef are unchanged.
-  const prevFallbackSlots = fallbackCredentialSlotsFor(currentPolicy)
-  refreshFailoverPolicy(host)
-  const fallbackSlotsChanged =
-    JSON.stringify(prevFallbackSlots) !== JSON.stringify(fallbackCredentialSlotsFor(currentPolicy))
-  if (
-    !configStore ||
-    providerChanged ||
-    secretRefChanged ||
-    connectionRefChanged ||
-    fallbackSlotsChanged
-  ) {
-    logger.info(
-      {},
-      '[Main] Rebuilding ConfigStore (provider/secretRef/connectionRef/failover slots changed)'
-    )
-    await ensureConfigStore(host)
-  }
-  currentKeys = apiKeysFromConfigStore(configStore!)
-  // R5.10 — only a primary credential-surface change (secretRef/provider/grant)
-  // may clear a sticky runtime cooldown; unrelated CR edits must not (see
-  // initializeProvider). A `secretRefChanged` rebuilds the ConfigStore fresh, so
-  // the store.onChange clearCooldown path never fires for it — this covers it.
-  await initializeProvider(host, currentKeys, {
-    llmConfigChanged: secretRefChanged || providerChanged || connectionRefChanged,
-  })
-
-  // PMC-2 — the cached `stable` tier embeds the model+provider runtime line
-  // (see DefaultPromptBuilder). A model/provider/secretRef swap must invalidate
-  // the prompt cache REGARDLESS of personalization, otherwise the next turn
-  // keeps serving the OLD model:/provider: line until eviction (generation is
-  // correct — it uses the live provider — but the system prompt mislabels the
-  // model). This is deliberately OUTSIDE the personalization branch below.
-  if (providerChanged || secretRefChanged || modelChanged || connectionRefChanged) {
-    promptCache?.invalidateAll('model_change')
-  }
-
-  // Reconcile admin-managed identity files. This is intentionally keyed off the
-  // Host watch so CRD edits propagate without a pod restart.
-  if (workspaceProvider && host.spec.personalization?.enabled) {
-    try {
-      await workspaceProvider.collectiveWorkspace.applyAdminIdentityFiles(host.spec.personalization)
-      // T2.2 §5.7 — identity files just got rewritten; drop every cached
-      // `parts` so the next turn rebuilds the `stable` tier from the new
-      // identity content. The cache is constructed during initializeAgent()
-      // so by the time onHostChange runs at runtime it is non-null; the `?.`
-      // is defensive for early-boot reconcile paths.
-      promptCache?.invalidateAll('identity_reconciled')
-      logger.info({}, '[Main] Identity files reconciled from CRD')
-    } catch (err) {
-      logger.error({ err: err }, '[Main] Failed to apply identity files:')
+  // fallback credential slots are loaded. The slots are compared with the ones
+  // the installed store holds, and provider/secretRef/connectionRef with the
+  // committed Host, so an event that overlaps an uncommitted rebuild still
+  // rebuilds when the installed store does not match it.
+  const stagedStores = new Map<HostCRD, OpenedConfigStore>()
+  await applyHostChange(host, {
+    gate: hostEventGate,
+    publishApproval,
+    ensureConfigStore: async eventHost => {
+      refreshFailoverPolicy(eventHost)
+      const fallbackSlotsChanged =
+        JSON.stringify(configStoreFallbackSlots) !==
+        JSON.stringify(fallbackCredentialSlotsFor(currentPolicy))
+      if (
+        !configStore ||
+        providerChanged ||
+        secretRefChanged ||
+        connectionRefChanged ||
+        fallbackSlotsChanged
+      ) {
+        logger.info(
+          {},
+          '[Main] Rebuilding ConfigStore (provider/secretRef/connectionRef/failover slots changed)'
+        )
+        stagedStores.set(eventHost, await openConfigStore(eventHost))
+      }
+    },
+    commitHost: eventHost => {
+      const staged = stagedStores.get(eventHost)
+      if (staged) {
+        installConfigStore(staged, eventHost)
+        // Only an installed store leaves the map; one whose install threw is
+        // stopped by the cleanup below.
+        stagedStores.delete(eventHost)
+      } else if (configStore) currentKeys = apiKeysFromConfigStore(configStore)
+      currentHost = eventHost
+      // R5.10 — only a primary credential-surface change may clear a sticky
+      // runtime cooldown. A stale completion does not reach this assignment.
+      return initializeProvider(eventHost, currentKeys, {
+        llmConfigChanged: secretRefChanged || providerChanged || connectionRefChanged,
+      }).then(async () => {
+        // PMC-2 — the cached `stable` tier embeds the model+provider runtime line
+        // (see DefaultPromptBuilder). A model/provider/secretRef swap must invalidate
+        // the prompt cache REGARDLESS of personalization, otherwise the next turn
+        // keeps serving the OLD model:/provider: line until eviction.
+        if (providerChanged || secretRefChanged || modelChanged || connectionRefChanged) {
+          promptCache?.invalidateAll('model_change')
+        }
+        if (workspaceProvider && eventHost.spec.personalization?.enabled) {
+          try {
+            await workspaceProvider.collectiveWorkspace.applyAdminIdentityFiles(
+              eventHost.spec.personalization
+            )
+            // T2.2 §5.7 — identity files just got rewritten; drop every cached
+            // `parts` so the next turn rebuilds the `stable` tier from the new
+            // identity content.
+            promptCache?.invalidateAll('identity_reconciled')
+            logger.info({}, '[Main] Identity files reconciled from CRD')
+          } catch (err) {
+            logger.error({ err: err }, '[Main] Failed to apply identity files:')
+          }
+        }
+        // Re-resolve guardrails so a Host.spec.guardrails edit takes effect
+        // without a restart (§8.2 "resolution is live").
+        await applyResolvedGuardrails()
+      })
+    },
+  }).finally(() => {
+    // Runs on success and on a throw. A store this event opened but never
+    // installed is stopped so its watches do not stay live: a newer event
+    // committed first, or the commit threw before the install finished. The
+    // store in use is never stopped here. The rejection still propagates.
+    for (const abandoned of stagedStores.values()) {
+      if (abandoned.store !== configStore) abandoned.store.stop()
     }
-  }
-
-  // Re-resolve guardrails so a Host.spec.guardrails edit (added/removed hook,
-  // changed digest, capability/failMode change) takes effect without a restart
-  // (§8.2 "resolution is live").
-  await applyResolvedGuardrails()
+    stagedStores.clear()
+  })
 }
 
 /**
@@ -1813,6 +1938,34 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
 }
 
 /**
+ * The agent state machine, with the per-task sources it reads from this
+ * module.
+ */
+function createAgent(queue: MessageQueue, lifecycle: TaskLifecycle): AgentStateMachine {
+  const created = new AgentStateMachine(queue, lifecycle, {
+    maxTaskDuration: config.agentMaxTaskDuration,
+    maxToolCallsPerTask: config.agentMaxToolCallsPerTask,
+    autoStart: true,
+    taskDelay: config.agentTaskDelay,
+    approvalTimeout: config.agentApprovalTimeout,
+  })
+
+  // R2 — inject the per-task model resolver. Closes over the module globals
+  // (currentHost + configStore) so it always reads the live keys/allowlist; a
+  // key rotation or allowlist reload is picked up on the next task with no
+  // re-wiring.
+  created.setTaskModelResolver(resolveTaskModel)
+  created.setImageInputResolver(resolveImageInput)
+
+  // R5 — inject the provider-fallback support. Closes over the module globals
+  // (currentPolicy/failoverEngine/bootFallbackEntry + configStore) so each task
+  // reads the live policy + sticky failover state. Null when no policy.
+  created.setFailoverSupport(currentFailoverSupport)
+  created.setShellClassifierProvider(shellClassifierCaller)
+  return created
+}
+
+/**
  * Initialize the message queue and agent.
  */
 async function initializeAgent(): Promise<void> {
@@ -1826,14 +1979,8 @@ async function initializeAgent(): Promise<void> {
   taskLifecycle = new TaskLifecycle()
   messageQueue.setLifecycle(taskLifecycle)
 
-  // Create agent state machine
-  agent = new AgentStateMachine(messageQueue, taskLifecycle, {
-    maxTaskDuration: config.agentMaxTaskDuration,
-    maxToolCallsPerTask: config.agentMaxToolCallsPerTask,
-    autoStart: true,
-    taskDelay: config.agentTaskDelay,
-    approvalTimeout: config.agentApprovalTimeout,
-  })
+  // Create agent state machine. Set once here (the agent is created once).
+  agent = createAgent(messageQueue, taskLifecycle)
 
   logger.info(
     {
@@ -1846,21 +1993,14 @@ async function initializeAgent(): Promise<void> {
     '[Main] Agent config: taskDelay=ms, maxTaskDuration=ms, maxToolCalls=, maxQueueSize=, approvalTimeout=ms'
   )
 
-  // R2 — inject the per-task model resolver. Closes over the module globals
-  // (currentHost + configStore) so it always reads the live keys/allowlist; a
-  // key rotation or allowlist reload is picked up on the next task with no
-  // re-wiring. Set once here (the agent is created once).
-  agent.setTaskModelResolver(resolveTaskModel)
-  agent.setImageInputResolver(resolveImageInput)
-
-  // R5 — inject the provider-fallback support. Closes over the module globals
-  // (currentPolicy/failoverEngine/bootFallbackEntry + configStore) so each task
-  // reads the live policy + sticky failover state. Null when no policy.
-  agent.setFailoverSupport(currentFailoverSupport)
-
-  // Phase 6: Set approval config
+  // Phase 6: publish approval once. Host changes publish again from onHostChange,
+  // before credential reconciliation. initializeProvider does not.
   const approvalCfg = currentHost?.spec.approval || config.approvalConfig
-  agent.setApprovalConfig(approvalCfg)
+  if (currentHost) publishApproval(currentHost)
+  else {
+    agent.setApprovalConfig(approvalCfg, config.devMode ? config.approvalConfig : undefined)
+    validateApprovalConfig(approvalCfg, knownNativeToolNames, config.nativeTool.httpAllowlist)
+  }
 
   // Guardrails (spec §5/§6) — resolve installed-hook references (§8.2) into
   // runtime descriptors so the LLM lane actually calls the hook pods.
@@ -1871,7 +2011,6 @@ async function initializeAgent(): Promise<void> {
       GUARDRAIL_RESOLVE_INTERVAL_MS
     )
   }
-  validateApprovalConfig(approvalCfg, knownNativeToolNames, config.nativeTool.httpAllowlist)
   logger.info(
     {
       detail: config.enableApproval ? 'ENABLED' : 'DISABLED',
@@ -2216,6 +2355,8 @@ const prepareIncomingMessage = createIncomingAdmission({
   resolveImageInput,
   applySessionModelSelection,
   dispatch: dispatchIncomingMessage,
+  getConversationManager: () => agent!.getConversationManager(),
+  approvalSnapshot: () => agent!.approvalSnapshot(),
   fileReferenceGfs: fileReferenceGfsGate,
   gfsSurfaceRuntimeCapability: message => {
     const callerRootBinding = resolveCallerRootBinding(gfsWorkspaceProvider, message)
@@ -2333,23 +2474,7 @@ async function handleTaskResult(
       return {
         success: true,
         status: 'waiting_approval',
-        approval: {
-          taskId,
-          requestId: result.approval.requestId,
-          userId: result.approval.userId,
-          notification: result.approval.notification,
-          // U5 — surface the connect_required discriminator on the REST poll so a
-          // reconnecting desktop rebuilds a "Connect <server>" suspension, not a
-          // generic approval. Omitted for generic approvals (back-compat).
-          ...(result.approval.reason ? { reason: result.approval.reason } : {}),
-          // mcpServerName rides ONLY connect_required, matching the SSE producer.
-          ...(result.approval.reason === 'connect_required' && result.approval.mcpServerName
-            ? { mcpServerName: result.approval.mcpServerName }
-            : {}),
-          ...(result.approval.alwaysApproveAllowed === false
-            ? { alwaysApproveAllowed: false as const }
-            : {}),
-        },
+        approval: projectTaskResultApproval(taskId, result.approval),
         model: result.model,
       }
     }
@@ -2409,7 +2534,8 @@ async function handleApprovalDecision(
         decision.requestId,
         decision.alwaysApprove,
         decision.channelType,
-        decision.channelId
+        decision.channelId,
+        decision.shellAction
       )
     : await agent.handleDenial(
         decision.userId,
@@ -2690,8 +2816,8 @@ async function getStatus(): Promise<StatusResponse> {
 
   const cronJobs = cronScheduler?.getAllJobs().length || 0
 
-  // Phase 6: Include pending approvals
-  const pendingApprovals = agent?.getPendingApprovals() || []
+  // Phase 6: Include pending approvals, projected to their start time only
+  const pendingApprovals = pendingApprovalsForStatus(agent)
 
   const mcpServers = mcpManager ? mcpManager.status.snapshot() : []
   const degraded = computeDegradedReason()
@@ -2862,6 +2988,19 @@ async function startRPCServer(): Promise<void> {
     getConversationManager: () => agent!.getConversationManager(),
     redactToolError,
     redactTitle,
+    approvalSnapshot: () => agent!.approvalSnapshot(),
+    sessionModel: selections => {
+      const pair = taskModelPair(selections)
+      // No Host model means no task can run; 'unknown' reads as "no classifier".
+      return pair
+        ? { providerType: pair.provider, modelName: pair.model }
+        : { providerType: 'unknown', modelName: 'unknown' }
+    },
+    servedModel: () => failoverEngine?.servedBy() ?? null,
+    shellClassifierPair: () => {
+      const caller = shellClassifierCaller()
+      return caller ? { providerType: caller.providerType, modelName: caller.modelName } : null
+    },
   })
 
   const handleContextBreakdown = async (userSub: string, agentName: string, chatId: string) => {
@@ -2952,6 +3091,23 @@ async function startRPCServer(): Promise<void> {
   const handleSetTitle = (userSub: string, agentName: string, chatId: string, title: string) =>
     applySessionTitle(userSub, agentName, chatId, title)
 
+  const handleSetApprovalMode = (
+    userSub: string,
+    agentName: string,
+    chatId: string,
+    mode: string
+  ) =>
+    applySessionApprovalMode(
+      {
+        convManager: agent!.getConversationManager(),
+        approvalSnapshot: () => agent!.approvalSnapshot(),
+      },
+      userSub,
+      agentName,
+      chatId,
+      mode
+    )
+
   rpcServer.onMessage(handleIncomingMessage)
   rpcServer.setArtifactSecretEntriesProvider(() => configStore?.listSecretEntries() ?? [])
   // Generated files are per user: each Desktop user lists and downloads only
@@ -2996,9 +3152,12 @@ async function startRPCServer(): Promise<void> {
   rpcServer.onModelsList(handleModelsList)
   rpcServer.onSetModel(handleSetModel)
   rpcServer.onSetTitle(handleSetTitle)
+  rpcServer.onSetApprovalMode(handleSetApprovalMode)
   // T3.1 — session search REST endpoint. Only wired when the feature is
   // enabled and the SQLite backend is live; otherwise the route returns 501
-  // through `handleSessionSearchRoute`.
+  // through `handleSessionSearchRoute`; in this release the edge guard answers
+  // 401 before the handler runs, so the route returns neither 200 nor 501
+  // until V2 edge assertions are accepted.
   if (sessionSearchService) {
     const service = sessionSearchService
     rpcServer.onSessionSearch(async req => {
@@ -3388,6 +3547,7 @@ async function startDevMode(): Promise<void> {
   // R5 — parse `spec.llmPolicy` (dev mode has no ConfigStore, so fallback
   // providers won't build — failover stays inert, byte-identical to today).
   refreshFailoverPolicy(host)
+  currentHost = host
   await initializeProvider(host, keys)
 
   // Initialize MCP manager
@@ -3456,6 +3616,7 @@ async function startProductionMode(): Promise<void> {
   await ensureConfigStore(host)
   const keys = apiKeysFromConfigStore(configStore!)
 
+  currentHost = host
   await initializeProvider(host, keys)
 
   // §3.14 (stateless agents) — Ready never waits for MCP. The agent and the
@@ -3841,6 +4002,31 @@ async function main(): Promise<void> {
 // Run main only when this module is the executable entry point. Keeping imports
 // side-effect free allows the authoritative initialization contract to be
 // regression-tested without starting the service.
+/**
+ * Test seams for main's own RPC wiring. A suite installs the agent and starts
+ * the RPC server main wires, so it exercises main's handlers instead of copies
+ * of them. Production never calls these.
+ */
+export const mainRpcTestSeams = {
+  setAgent(next: AgentStateMachine | null): void {
+    agent = next
+  },
+  /** The agent initializeAgent builds, without the rest of the boot. */
+  createAgent(queue: MessageQueue, lifecycle: TaskLifecycle): AgentStateMachine {
+    return createAgent(queue, lifecycle)
+  },
+  setMessageQueue(next: MessageQueue | null): void {
+    messageQueue = next
+  },
+  failoverEngine(): FailoverEngine | null {
+    return failoverEngine
+  },
+  async startRPCServer(): Promise<RPCServer> {
+    await startRPCServer()
+    return rpcServer!
+  },
+}
+
 if (require.main === module) {
   // Global crash guards (defense-in-depth): a throw that escapes a stray event
   // listener (e.g. a transport listener) must be LOGGED, not a silent process

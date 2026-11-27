@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import jwt from 'jsonwebtoken'
+import { generateKeyPairSync, randomUUID } from 'node:crypto'
 import request from 'supertest'
+import {
+  HOST_EDGE_ASSERTION_AUDIENCE,
+  HOST_EDGE_ASSERTION_CLAIM_TYPE,
+  HOST_EDGE_ASSERTION_JWT_TYPE,
+} from '@clerum/action-context-contracts'
+import { config } from '../config.js'
 import { apiErrorHandler } from '../errorHandler.js'
 import { createRpcRouter } from '../routes/rpc.js'
 import { createRpcHostActivityStreamRouter } from '../routes/rpcHostActivityStream.js'
@@ -133,7 +141,7 @@ type RouteCase = {
 }
 
 // Every rpc-proxy route that resolves a Host and answers its own authorization
-// 403: the 15 in rpc.ts plus the three streams.
+// 403: the 16 in rpc.ts plus the three streams.
 const DENYING_ROUTES: RouteCase[] = [
   {
     label: 'messages',
@@ -171,6 +179,12 @@ const DENYING_ROUTES: RouteCase[] = [
     path: '/rpc/hosts/chatllm/sessions/agent-a/chat-1/name',
     body: { title: 'renamed' },
   },
+  {
+    label: 'session approval mode',
+    method: 'patch',
+    path: '/rpc/hosts/chatllm/sessions/agent-a/chat-1/approval-mode',
+    body: { mode: 'auto' },
+  },
   { label: 'models', method: 'get', path: '/rpc/hosts/chatllm/models' },
   {
     label: 'set model',
@@ -201,11 +215,38 @@ function send(route: RouteCase) {
   return route.body ? pending.send(route.body) : pending
 }
 
+// The status stream reads the assertion's `exp` before each poll, so the
+// authorized connection carries an assertion signed the way control-api signs it
+// (RS256, the assertion JWT type, the Host runtime audience), `exp` 300 s ahead.
+const EDGE_KEYS = generateKeyPairSync('rsa', { modulusLength: 2048 })
+const NOW_SECONDS = Math.floor(Date.now() / 1000)
+const SIGNED_EDGE_ASSERTION = jwt.sign(
+  {
+    typ: HOST_EDGE_ASSERTION_CLAIM_TYPE,
+    v: 1,
+    iss: 'control-api',
+    sub: CLAIMS.sub,
+    host: `${config.hostNamespace}/chatllm`,
+    jti: randomUUID(),
+    iat: NOW_SECONDS,
+    exp: NOW_SECONDS + 300,
+    teamId: CLAIMS.teamId,
+    scopes: CLAIMS.scopes,
+  },
+  EDGE_KEYS.privateKey,
+  {
+    algorithm: 'RS256',
+    audience: HOST_EDGE_ASSERTION_AUDIENCE,
+    header: { alg: 'RS256', typ: HOST_EDGE_ASSERTION_JWT_TYPE },
+  }
+)
+
 const CONTROL_API_CONNECTION = {
   userId: CLAIMS.sub,
   hostRef: 'chatllm',
   url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
   bindingStatus: 'recorded',
+  edgeAssertion: SIGNED_EDGE_ASSERTION,
 }
 
 /**
@@ -293,7 +334,7 @@ describe('host authorization 403 carries a machine-readable code at every site',
     expect(res.body).toEqual({ error: DENIED_ERROR, code: 'host_access_denied' })
   })
 
-  it('messages: a threaded send posts the binding to the parent path, and a 404 is an upstream failure', async () => {
+  it('messages: a threaded send posts the binding to the parent path, and a 404 is an unavailable authority', async () => {
     const threaded: RouteCase = {
       label: 'messages with threadId',
       method: 'post',
@@ -320,8 +361,8 @@ describe('host authorization 403 carries a machine-readable code at every site',
 
     expect(controlApiCalls).toHaveLength(2)
     expect(hostCalls).toHaveLength(1)
-    expect(res.status).toBe(502)
-    expect(res.body).toEqual({ error: 'Upstream host unavailable' })
+    expect(res.status).toBe(503)
+    expect(res.body).toEqual({ error: 'authority_unavailable' })
   })
 
   // These two answer their own 404 (rather than a coded 403) on a Host denial,
@@ -431,6 +472,7 @@ describe('passthrough and non-authorization responses are left untouched', () =>
         userId: CLAIMS.sub,
         hostRef: 'chatllm',
         url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+        edgeAssertion: 'edge-assertion-fixture',
       },
     }
   })
@@ -518,6 +560,10 @@ describe('an mcp-host 403 never reaches the client with a reserved Host-access c
       hostPath: '/v1/runtime/sessions/agent-a/chat-1/context-breakdown',
     },
     { ...byLabel('session rename'), hostPath: '/v1/runtime/sessions/agent-a/chat-1/name' },
+    {
+      ...byLabel('session approval mode'),
+      hostPath: '/v1/runtime/sessions/agent-a/chat-1/approval-mode',
+    },
     { ...byLabel('models'), hostPath: '/v1/runtime/models' },
     { ...byLabel('set model'), hostPath: '/v1/runtime/model' },
     {
@@ -551,6 +597,7 @@ describe('an mcp-host 403 never reaches the client with a reserved Host-access c
         userId: CLAIMS.sub,
         hostRef: 'chatllm',
         url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+        edgeAssertion: 'edge-assertion-fixture',
       },
     }
     hostAnswer = {

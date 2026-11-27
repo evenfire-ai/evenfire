@@ -31,6 +31,7 @@ const serviceMock = vi.hoisted(() => ({
   listAllowedServersForUser: vi.fn(),
   resolveServerConnectionForUser: vi.fn(),
   resolveHostConnectionForUser: vi.fn(),
+  refreshV1HostConnection: vi.fn(),
   validateRpcRequest: vi.fn(),
   forwardRpcToServer: vi.fn(),
   forwardHostMessageToHost: vi.fn(),
@@ -50,15 +51,6 @@ const serviceMock = vi.hoisted(() => ({
   },
 }))
 const controlApiMock = vi.hoisted(() => ({
-  ControlApiHostAccessRejectedError: class extends Error {
-    constructor(
-      readonly status: number,
-      readonly denialCode: string | null = null
-    ) {
-      super(`Control API rejected host access (${status})`)
-      this.name = 'ControlApiHostAccessRejectedError'
-    }
-  },
   fetchUserAllowedServersFromControlApi: vi.fn(),
   fetchHostConnectionFromControlApi: vi.fn(),
   requestHostWakeFromControlApi: vi.fn(),
@@ -127,6 +119,7 @@ async function startUpstream(handler: Handler): Promise<void> {
     headers: {},
   }
   serviceMock.resolveHostConnectionForUser.mockResolvedValue(connection)
+  serviceMock.refreshV1HostConnection.mockResolvedValue(null)
 }
 
 /** Ends the TCP connection without a response: undici reports it as `fetch failed`. */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatToolApprovalLabel } from '../toolLabels'
+import { formatToolApprovalLabel, formatToolDisplayName } from '../toolLabels'
 
 describe('formatToolApprovalLabel', () => {
   it('uses the display name when toolName is empty', () => {
@@ -38,5 +38,16 @@ describe('formatToolApprovalLabel', () => {
         toolName: 'coingecko__get_price',
       })
     ).toBe('Market data')
+  })
+})
+
+describe('formatToolDisplayName', () => {
+  it('preserves the display name outside the internal namespace', () => {
+    expect(
+      formatToolDisplayName({
+        toolName: 'other__x',
+        displayName: 'Clerum',
+      })
+    ).toBe('Clerum')
   })
 })

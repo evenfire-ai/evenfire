@@ -14,6 +14,20 @@ function toolFunctionName(toolName: string): string {
   return toolName.slice(separatorIndex + 2).trim()
 }
 
+export function formatToolDisplayName({
+  displayName,
+  toolName,
+}: {
+  displayName: string
+  toolName: string
+}): string {
+  // The historical runtime namespace is not the public product name.
+  if (toolName.startsWith('clerum__') && displayName === 'Clerum') {
+    return 'Evenfire'
+  }
+  return displayName
+}
+
 export function formatToolApprovalLabel({
   displayName,
   toolName,

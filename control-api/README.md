@@ -45,7 +45,7 @@ Validation behavior:
 
 - service name is used to look up expected token in `CONTROL_API_INTERNAL_SERVICE_TOKENS`
 - token comparison uses timing-safe equality
-- invalid/missing identity or token returns `401`
+- invalid/missing identity or token returns `401 {"error":"Unauthorized"}` with the response header `x-internal-service-auth-refusal: service_credential_rejected` (`INTERNAL_SERVICE_AUTH_REFUSAL_HEADER`, `INTERNAL_SERVICE_CREDENTIAL_REJECTED` in `src/middleware/internalServiceAuth.ts`); every refusal of `requireInternalToken` and `requireInternalService` carries it, whoever the caller. rpc-proxy reads it on the Host access route to tell a refused service credential from a refused `x-rpc-access-token`, whose `401` does not carry the header
 - `/external/users`, `/external/teams`, `/external/invitations`, and `/external/directory` additionally require a valid `x-user-session-token` verified by `control-api`
 - `/rpc/access/*` additionally requires a valid `x-rpc-access-token` (RS256 JWT), with scope and route-claim matching (`sub` = `:userId`, `teamId` = `:teamId`, `hostRefs` must include `:hostRef` for host routes)
 
@@ -87,14 +87,14 @@ If you need fewer variables operationally, you can reuse a single keypair across
 
 Host runtime scope intent for `rpc-proxy` callers:
 
-| Scope                 | Purpose                                                                  |
-| --------------------- | ------------------------------------------------------------------------ |
-| `host:message:invoke` | authorizes host message/task submission route                            |
-| `host:status:read`    | authorizes host status snapshot and status stream routes                 |
-| `host:activity:read`  | authorizes host activity snapshot and activity stream routes (read-only) |
-| `host:health:read`    | authorizes host health/liveness route                                    |
-| `host:task:read`      | authorizes host task status and result routes (read-only)                |
-| `host:approval:write` | authorizes host approval submission                                      |
+| Scope                 | Purpose                                                                                                                  |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `host:message:invoke` | authorizes host message/task submission route                                                                            |
+| `host:status:read`    | authorizes host status snapshot and status stream routes                                                                 |
+| `host:activity:read`  | authorizes host activity snapshot and activity stream routes (read-only)                                                 |
+| `host:health:read`    | authorizes host health/liveness route                                                                                    |
+| `host:task:read`      | authorizes host task status and result routes (read-only)                                                                |
+| `host:approval:write` | authorizes host approval submission, the session approval-mode change, and a first message that carries an approval mode |
 
 ### 5) Control UI admin auth
 

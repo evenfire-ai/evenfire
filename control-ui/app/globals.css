@@ -2222,6 +2222,7 @@ textarea.cu-input {
   container-type: inline-size;
 }
 
+/* Name, description, authentication, managed, enabled, status, actions. */
 .cu-connectors-table {
   min-width: 62rem;
   table-layout: fixed;
@@ -2240,21 +2241,23 @@ textarea.cu-input {
 
 .cu-connectors-table th:nth-child(3),
 .cu-connectors-table td:nth-child(3) {
-  width: 6rem;
+  width: 10rem;
 }
 
 .cu-connectors-table th:nth-child(4),
-.cu-connectors-table td:nth-child(4) {
-  width: 6rem;
-}
-
+.cu-connectors-table td:nth-child(4),
 .cu-connectors-table th:nth-child(5),
 .cu-connectors-table td:nth-child(5) {
-  width: 7rem;
+  width: 6rem;
 }
 
 .cu-connectors-table th:nth-child(6),
 .cu-connectors-table td:nth-child(6) {
+  width: 7rem;
+}
+
+.cu-connectors-table th:nth-child(7),
+.cu-connectors-table td:nth-child(7) {
   width: 3.5rem;
   text-align: right;
 }
@@ -7787,7 +7790,7 @@ td.cu-registry-description {
   }
 
   .cu-channel-create-panel .cu-agent-step-rail {
-    grid-template-columns: repeat(2, minmax(2.25rem, 1fr));
+    grid-template-columns: repeat(3, minmax(2.25rem, 1fr));
   }
 
   .cu-create-step-flow--2 .cu-agent-step-rail {
@@ -9220,6 +9223,17 @@ td.cu-registry-description {
   justify-content: space-between;
   flex-wrap: wrap;
   gap: var(--cu-space-2);
+  margin: var(--cu-space-4) 0 var(--cu-space-6);
+  /* Match the tab rail gutter plus the existing tab button's inline padding. */
+  padding-inline-start: calc(var(--cu-space-5) + 10px);
+}
+
+.cu-identity-panel__intro:has(+ .cu-banner--error) {
+  margin-bottom: 0;
+}
+
+.cu-identity-panel > .cu-banner--error {
+  margin: var(--cu-space-4) 0;
 }
 
 .cu-identity-dirty {
@@ -9377,6 +9391,14 @@ td.cu-registry-description {
   transition:
     border-color 0.15s,
     box-shadow 0.15s;
+}
+
+.cu-markdown-editor[data-color-mode='dark'] {
+  color-scheme: dark;
+}
+
+.cu-markdown-editor[data-color-mode='light'] {
+  color-scheme: light;
 }
 
 .cu-markdown-editor--invalid {
@@ -13601,6 +13623,10 @@ button.cu-gfs-tree__button:focus-visible,
   text-underline-offset: 2px;
 }
 
+:root[data-theme='light'] .cu-identity-preview__document .cu-gfs-markdown-preview__content a {
+  color: var(--cu-link);
+}
+
 .cu-gfs-markdown-preview__content code {
   padding: 0.1rem var(--cu-space-1);
   border-radius: calc(var(--cu-radius-sm) - 3px);
@@ -15036,4 +15062,119 @@ button.cu-gfs-tree__button:focus-visible,
   display: flex;
   justify-content: flex-end;
   gap: var(--cu-space-1);
+}
+
+.cu-channel-provider-tabs {
+  padding-top: var(--cu-space-3);
+  padding-bottom: var(--cu-space-2);
+}
+
+.cu-channel-provider-tabs__label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+}
+
+.cu-channel-create-panel .eft-secret-field__label,
+.cu-channel-create-panel .cu-field > label,
+.cu-channel-create-panel .cu-field__label,
+.cu-channel-create-panel .cu-section-title {
+  color: var(--cu-text);
+  font-size: var(--cu-font-size-md);
+  font-weight: var(--cu-font-weight-semibold);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.cu-channel-create-panel .cu-agent-step-rail__copy {
+  align-content: start;
+}
+
+.cu-teams-setup--inline {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.cu-channel-create-panel .cu-channel-credentials--inline > .cu-form-stack {
+  max-width: none;
+}
+
+.cu-channel-create-panel .cu-channel-credentials--inline .cu-credential-field {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.cu-channel-access .cu-selection-dropdown--inline .cu-selection-dropdown__list {
+  min-height: 0;
+  max-height: min(22rem, 40vh);
+  grid-auto-rows: max-content;
+  align-content: start;
+  overflow-y: scroll;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+  scrollbar-color: var(--cu-border-hover) var(--cu-surface);
+}
+
+/* Catalog-linked connector names use local, decorative SVGs beside the label. */
+.cu-connector-identity {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.cu-connector-icon {
+  width: var(--cu-space-6);
+  height: var(--cu-space-6);
+  flex: none;
+  object-fit: contain;
+}
+
+.cu-connector-identity .cu-registry-name {
+  overflow-wrap: anywhere;
+}
+
+.cu-connector-icon img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.cu-connector-icon .cu-connector-icon__base--themed,
+:root[data-theme='light'] .cu-connector-icon .cu-connector-icon__on-dark {
+  display: none;
+}
+
+:root[data-theme='light'] .cu-connector-icon .cu-connector-icon__base--themed {
+  display: block;
+}
+
+.cu-connector-identity__text {
+  display: grid;
+  min-width: 0;
+}
+
+.cu-connector-identity__instance {
+  /* Reserve space so revealing identity never moves row controls. */
+  visibility: hidden;
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-xs);
+  font-weight: var(--cu-font-weight-regular);
+  overflow-wrap: anywhere;
+}
+
+.cu-connector-identity:hover .cu-connector-identity__instance,
+.cu-connectors-table tr:hover .cu-connector-identity__instance,
+.cu-connectors-table tr:focus-within .cu-connector-identity__instance {
+  visibility: visible;
+}
+
+/* Touch users must be able to distinguish instances before opening a row. */
+@media (hover: none), (pointer: coarse) {
+  .cu-connector-identity__instance {
+    visibility: visible;
+  }
 }
