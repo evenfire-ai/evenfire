@@ -139,6 +139,10 @@ describeRealPostgres('workflow run failure reasons on PostgreSQL 16', () => {
       instanceId: 'r6-l5-real-postgres',
       pool: { connect: runtimeClient } as unknown as Pool,
       runPollMs: 30_000,
+      maxRunDurationCapSeconds: 86_400,
+      deliverCancelSignal: () => {
+        throw new Error('no cancel is delivered by this test')
+      },
       createChildRecipe: async () => {
         throw new Error('protected_child_must_not_be_created')
       },
@@ -210,7 +214,7 @@ describeRealPostgres('workflow run failure reasons on PostgreSQL 16', () => {
         candidate => candidate.run_id === runId
       )
       expect(exactRun).toBeDefined()
-      expect(mapDbRun(exactRun!).message).toBe(expectedReason)
+      expect(mapDbRun(exactRun!, 'tenant').message).toBe(expectedReason)
     }
   )
 
@@ -295,6 +299,6 @@ describeRealPostgres('workflow run failure reasons on PostgreSQL 16', () => {
     expect(retried.kind).toBe('run')
     if (retried.kind !== 'run') throw new Error('expected existing run')
     expect(retried.row.failure_reason).toBe('workflow_authority_denied')
-    expect(mapDbRun(retried.row).message).toBe('workflow_authority_denied')
+    expect(mapDbRun(retried.row, 'tenant').message).toBe('workflow_authority_denied')
   })
 })

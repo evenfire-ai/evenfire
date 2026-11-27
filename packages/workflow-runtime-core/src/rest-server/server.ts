@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto'
 import * as http from 'node:http'
-import type { Signal, StepPhase, WorkflowPhase } from '../config-loader/types'
+import type { StepPhase, WorkflowPhase } from '../config-loader/types'
 import { emitLog } from '../status-reporter/logger'
 
 /** Constant-time string comparison to prevent timing side-channel attacks on tokens. */
@@ -9,32 +9,29 @@ export function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(Buffer.from(a), Buffer.from(b))
 }
 
-const MAX_BODY_BYTES = 65536
-const VALID_SIGNAL_TYPES = new Set<Signal['type']>(['pause', 'resume', 'cancel', 'approval'])
-
 export interface WorkflowStateRef {
   phase: WorkflowPhase
   steps: Record<string, { phase: StepPhase; output?: unknown }>
   workflowName: string
 }
 
-function isValidSignal(obj: unknown): obj is Signal {
-  if (typeof obj !== 'object' || obj === null) return false
-  const s = obj as Record<string, unknown>
-  return (
-    VALID_SIGNAL_TYPES.has(s.type as Signal['type']) &&
-    typeof s.requestId === 'string' &&
-    s.requestId.length > 0 &&
-    s.requestId.length <= 128 &&
-    typeof s.receivedAt === 'string'
-  )
-}
-
+/**
+ * Serves `GET /health` and `GET /status`. When `validateToken` is given,
+ * `/status` requires a bearer token it accepts. Signals reach the runtime only
+ * through `SignalPoller.pollSignals()`; this server has no signal route.
+ */
 export function createServer(
   stateRef: WorkflowStateRef,
-  onSignal?: (signal: Signal) => void,
   validateToken?: (token: string) => boolean | Promise<boolean>
 ): http.Server {
+  // The validator now sits where the removed onSignal parameter was. A caller
+  // still passing three arguments would otherwise serve /status without its
+  // token check, or use the old signal callback as the validator.
+  if (arguments.length > 2) {
+    throw new TypeError(
+      'createServer(stateRef, validateToken?) takes at most two arguments: the onSignal parameter was removed'
+    )
+  }
   const server = http.createServer(async (req, res) => {
     const url = req.url ?? ''
 
@@ -45,7 +42,7 @@ export function createServer(
     }
 
     if (req.method === 'GET' && url === '/status') {
-      // SEC-02 fix: /status exposes step outputs — require auth like /signal.
+      // SEC-02 fix: /status exposes step outputs, so it requires the token when a validator is given.
       if (validateToken) {
         const authHeader = req.headers.authorization
         const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : ''
@@ -63,52 +60,6 @@ export function createServer(
           steps: stateRef.steps,
         })
       )
-      return
-    }
-
-    if (req.method === 'POST' && url === '/api/v1/workflow/signal') {
-      const authHeader = req.headers.authorization
-      if (validateToken) {
-        const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : ''
-        if (!(await validateToken(token))) {
-          res.writeHead(401, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Unauthorized' }))
-          return
-        }
-      }
-
-      let body = ''
-      let bodySize = 0
-      let rejected = false // prevents double-response if req.destroy() doesn't fire synchronously
-      req.on('data', (chunk: Buffer) => {
-        if (rejected) return
-        bodySize += chunk.length
-        if (bodySize > MAX_BODY_BYTES) {
-          rejected = true
-          res.writeHead(413, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Payload too large' }))
-          req.destroy()
-          return
-        }
-        body += chunk.toString()
-      })
-      req.on('end', () => {
-        if (rejected || bodySize > MAX_BODY_BYTES) return
-        try {
-          const parsed = JSON.parse(body)
-          if (!isValidSignal(parsed)) {
-            res.writeHead(422, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: 'Invalid signal schema' }))
-            return
-          }
-          onSignal?.(parsed)
-          res.writeHead(202, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ accepted: true }))
-        } catch {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Invalid signal body' }))
-        }
-      })
       return
     }
 

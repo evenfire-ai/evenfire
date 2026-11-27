@@ -100,6 +100,66 @@ describe('routes/workflows', () => {
     expect(controlApiClientMock.controlApiRequest).not.toHaveBeenCalled()
   })
 
+  it('proxies run cancel with the session token and passes the status through', async () => {
+    const cancelPath = '/external/workflows/sandbox-recipes/recipe-a/runs/run-123/cancel'
+    const app = makeApp()
+
+    // 200: a V2 session needs no action delegation for cancel; the upstream answer is relayed.
+    authTokenMock.verifyToken.mockReturnValueOnce({ ...claims, sessionContract: 'v2' })
+    controlApiClientMock.controlApiRequestWithStatus.mockResolvedValueOnce({
+      status: 200,
+      data: {
+        run: { runId: 'run-123', phase: 'Running', cancelRequestedAt: '2026-11-26T10:00:00.000Z' },
+      },
+    })
+    const ok = await request(app)
+      .post('/api/v1/workflows/sandbox-recipes/recipe-a/runs/run-123/cancel')
+      .set('authorization', 'Bearer user-session-token')
+    expect(ok.status).toBe(200)
+    expect(ok.body).toEqual({
+      run: { runId: 'run-123', phase: 'Running', cancelRequestedAt: '2026-11-26T10:00:00.000Z' },
+    })
+    expect(controlApiClientMock.controlApiRequestWithStatus).toHaveBeenCalledTimes(1)
+    expect(controlApiClientMock.controlApiRequestWithStatus).toHaveBeenLastCalledWith(
+      'POST',
+      cancelPath,
+      {
+        userSessionToken: 'user-session-token',
+      }
+    )
+
+    // 404 and 409 from control-api keep their status and body.
+    for (const [status, body] of [
+      [404, { error: 'workflow_run_not_found' }],
+      [409, { error: 'workflow_run_not_cancellable' }],
+    ] as const) {
+      authTokenMock.verifyToken.mockReturnValueOnce(claims)
+      controlApiClientMock.controlApiRequestWithStatus.mockRejectedValueOnce(
+        new controlApiClientMock.ControlApiError('private', status, body)
+      )
+      const res = await request(app)
+        .post('/api/v1/workflows/sandbox-recipes/recipe-a/runs/run-123/cancel')
+        .set('authorization', 'Bearer user-session-token')
+      expect(res.status).toBe(status)
+      expect(res.body).toEqual(body)
+      expect(controlApiClientMock.controlApiRequestWithStatus).toHaveBeenLastCalledWith(
+        'POST',
+        cancelPath,
+        {
+          userSessionToken: 'user-session-token',
+        }
+      )
+    }
+    expect(controlApiClientMock.controlApiRequestWithStatus).toHaveBeenCalledTimes(3)
+
+    // No session: 401 at the edge and no upstream call (the count above is the witness).
+    const unauthenticated = await request(app).post(
+      '/api/v1/workflows/sandbox-recipes/recipe-a/runs/run-123/cancel'
+    )
+    expect(unauthenticated.status).toBe(401)
+    expect(controlApiClientMock.controlApiRequestWithStatus).toHaveBeenCalledTimes(3)
+  })
+
   it('lists run-scoped workflow artifacts through Control API with the user session token', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     controlApiClientMock.controlApiRequest.mockResolvedValueOnce({

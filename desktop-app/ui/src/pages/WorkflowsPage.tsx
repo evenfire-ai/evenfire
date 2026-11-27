@@ -7,12 +7,19 @@ import { InputContractForm } from '../components/InputContractForm'
 import { useAuthContext } from '../contexts/AuthContext'
 import {
   type WorkflowRecentRuns,
+  isTerminalWorkflowRunPhase,
+  isWorkflowRunCanceling,
   useWorkflowController,
   useWorkflowRecentRuns,
 } from '../hooks/domain/useWorkflowController'
 import { formatRelativeTime } from '../lib/format'
 import { workflowStatusPillTone } from '../lib/workflowStatus'
 import type { WorkflowSummary } from '../workflows.types'
+
+// When a requested cancel takes effect, as the Cancel button's tooltip and the cancel
+// confirmation state it.
+const WORKFLOW_RUN_CANCEL_EFFECT =
+  'A running run stops at the first step boundary after its coordinator receives the signal (normally within 5 s). A step that starts before then still runs, and steps that already ran are not undone.'
 
 function workflowKey(wf: WorkflowSummary): string {
   return `${wf.namespace}/${wf.name}`
@@ -27,16 +34,23 @@ function hasContractInputs(
 /**
  * Compact "Recent Runs" cell (spec 12 §5.F): the latest run's phase + relative
  * time and a run count — never the full expanded list that lived in the old
- * accordion. The latest run's artifacts stay downloadable inline.
+ * accordion. The latest run's artifacts stay downloadable inline. When the server
+ * says the viewer may cancel the latest run, its Cancel button asks the page to
+ * confirm the cancel; once a cancel is requested and the run has not stopped, it
+ * reads "Canceling".
  */
 function RecentRunsCell({
   recent,
   onDownload,
   downloadingKey,
+  onRequestCancel,
+  cancelDisabled,
 }: {
   recent: WorkflowRecentRuns
   onDownload: (run: WorkflowRunListItem, artifact: WorkflowRunArtifact) => void
   downloadingKey: string | null
+  onRequestCancel: (run: WorkflowRunListItem) => void
+  cancelDisabled: boolean
 }) {
   if (recent.loading) {
     return <span className="muted">Loading runs…</span>
@@ -51,14 +65,34 @@ function RecentRunsCell({
     return <span className="muted">No runs yet</span>
   }
   const when = run.startedAt ?? run.triggeredAt
+  const canceling = isWorkflowRunCanceling(run)
+  const showCancel =
+    run.viewerCanCancel === true && !isTerminalWorkflowRunPhase(run.phase) && !run.cancelRequestedAt
   return (
     <span className="workflow-recent-runs">
       <span className="workflow-recent-runs__summary">
-        <Pill tone={workflowStatusPillTone(run.phase)} size="xs">
-          {run.phase}
+        <Pill
+          data-testid="workflow-latest-run-phase"
+          tone={canceling ? 'neutral' : workflowStatusPillTone(run.phase)}
+          size="xs"
+        >
+          {canceling ? 'Canceling' : run.phase}
         </Pill>
         <span className="muted">{when ? formatRelativeTime(when) : 'Pending'}</span>
         {recent.runCount > 1 ? <span className="muted">· {recent.runCount} runs</span> : null}
+        {showCancel ? (
+          <Button
+            aria-label="Cancel run"
+            color="danger"
+            disabled={cancelDisabled}
+            onClick={() => onRequestCancel(run)}
+            size="xs"
+            title={`Cancel this run. ${WORKFLOW_RUN_CANCEL_EFFECT}`}
+            variant="ghost"
+          >
+            Cancel
+          </Button>
+        ) : null}
       </span>
       {run.artifacts && run.artifacts.length > 0 ? (
         <span className="workflow-recent-runs__artifacts" aria-label="Latest run artifacts">
@@ -88,12 +122,16 @@ function WorkflowRow({
   wf,
   pendingTriggerKey,
   triggerModalOpen,
+  cancelConfirmOpen,
   onTrigger,
+  onRequestCancel,
 }: {
   wf: WorkflowSummary
   pendingTriggerKey: string | null
   triggerModalOpen: boolean
+  cancelConfirmOpen: boolean
   onTrigger: (wf: WorkflowSummary) => void
+  onRequestCancel: (run: WorkflowRunListItem) => void
 }) {
   const { setStatus } = useAuthContext()
   const recent = useWorkflowRecentRuns(wf)
@@ -150,17 +188,26 @@ function WorkflowRow({
           recent={recent}
           onDownload={handleDownload}
           downloadingKey={downloadingKey}
+          onRequestCancel={onRequestCancel}
+          // The same rule the other way: while the Trigger modal is open, or any
+          // row's trigger is pending (the recipe read that decides whether the
+          // modal opens, or the trigger call itself), every row's Cancel is
+          // disabled, so no cancel confirmation can open beside the modal.
+          cancelDisabled={triggerModalOpen || pendingTriggerKey !== null}
         />
       </td>
       <td className="da-table__cell da-table__cell--right">
         <span className="action-row">
           <Button
             color="primary"
-            // While the Trigger modal is open, every row's Trigger is disabled:
-            // ConfirmDialog has no focus trap yet, so a keyboard user could
-            // otherwise Shift+Tab out and activate another row, resetting the
-            // modal's global selection state. (Central focus-trap is follow-up.)
-            disabled={!wf.triggerableByUser || anotherPending || triggerModalOpen}
+            // While the Trigger modal or the cancel confirmation is open, every
+            // row's Trigger is disabled: ConfirmDialog has no focus trap yet, so a
+            // keyboard user could otherwise Shift+Tab out and activate another row,
+            // resetting the modal's global selection state or opening a second
+            // dialog over the first. (Central focus-trap is follow-up.)
+            disabled={
+              !wf.triggerableByUser || anotherPending || triggerModalOpen || cancelConfirmOpen
+            }
             loading={isTriggering}
             onClick={() => onTrigger(wf)}
             size="sm"
@@ -200,6 +247,7 @@ export function WorkflowsPage() {
     workflowsError: error,
     handleSelectWorkflow,
     handleTriggerWorkflow,
+    cancelRun,
   } = useWorkflowController({ setStatus })
 
   // Which workflow's Trigger modal is open (a recipe with an input contract).
@@ -207,6 +255,13 @@ export function WorkflowsPage() {
   const [triggerModalWorkflow, setTriggerModalWorkflow] = useState<WorkflowSummary | null>(null)
   // Which row is mid-trigger, so only that row shows the busy Trigger button.
   const [pendingTriggerKey, setPendingTriggerKey] = useState<string | null>(null)
+  // The run whose cancel is waiting for confirmation, with its recipe. The first
+  // run asked for is kept until the dialog closes, and the dialog cancels that run
+  // even if a newer run becomes the latest meanwhile.
+  const [cancelConfirm, setCancelConfirm] = useState<{
+    wf: WorkflowSummary
+    run: WorkflowRunListItem
+  } | null>(null)
 
   const handleTrigger = useCallback(
     async (wf: WorkflowSummary) => {
@@ -301,7 +356,9 @@ export function WorkflowsPage() {
                     wf={wf}
                     pendingTriggerKey={pendingTriggerKey}
                     triggerModalOpen={triggerModalWorkflow !== null}
+                    cancelConfirmOpen={cancelConfirm !== null}
                     onTrigger={w => void handleTrigger(w)}
+                    onRequestCancel={run => setCancelConfirm(current => current ?? { wf, run })}
                   />
                 ))}
               </tbody>
@@ -325,6 +382,28 @@ export function WorkflowsPage() {
               disabled={workflowTriggerLoading}
             />
           }
+        />
+      ) : null}
+
+      {/* Rendered at page level, outside the table: its confirm label equals the row
+          button's accessible name. ConfirmDialog keeps it open, refusing dismissal
+          and a second confirm, until the cancel call settles. */}
+      {cancelConfirm ? (
+        <ConfirmDialog
+          title={`Cancel run ${cancelConfirm.run.id.slice(0, 8)}?`}
+          body={WORKFLOW_RUN_CANCEL_EFFECT}
+          cancelLabel="Keep running"
+          confirmLabel="Cancel run"
+          tone="danger"
+          onCancel={() => setCancelConfirm(null)}
+          onConfirm={async () => {
+            const { wf, run } = cancelConfirm
+            try {
+              await cancelRun(wf.namespace, wf.name, run.id)
+            } finally {
+              setCancelConfirm(null)
+            }
+          }}
         />
       ) : null}
     </section>

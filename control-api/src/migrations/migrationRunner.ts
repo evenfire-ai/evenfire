@@ -5,6 +5,7 @@ import { GOVERNED_TRACE_RETENTION_MIGRATION } from './governedTraceRetention.js'
 import { GOVERNED_TRACE_RETENTION_HARDENING_MIGRATION } from './governedTraceRetentionHardening.js'
 import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
 import { hasPostSchemaWork, preparePr1Migration } from './pr1OnlineIndexPlan.js'
+import { WORKFLOW_RUN_CANCEL_REQUEST_MIGRATION } from './workflowRunCancelRequest.js'
 
 export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0137_user_access_foundation',
@@ -79,13 +80,14 @@ export const RUNNER_MIGRATION_VERSIONS = Object.freeze([
   GOVERNED_TRACE_RETENTION_MIGRATION,
   GOVERNED_TRACE_RETENTION_HARDENING_MIGRATION,
   OIDC_MEMBER_LINK_MIGRATION,
+  WORKFLOW_RUN_CANCEL_REQUEST_MIGRATION,
 ] as const)
 
 export type MigrationDescriptor = {
   version: string
   legacyVersions?: readonly string[]
   apply: (db: DbClient) => Promise<void>
-  /** Extra attempts of the whole transaction after it lost a lock wait. */
+  /** Extra attempts of the schema transaction after it lost a lock wait. */
   lockRetries?: number
 }
 
@@ -106,9 +108,33 @@ const defaultSleep = (ms: number) => new Promise<void>(resolve => setTimeout(res
 const MAX_LOCK_RETRIES = 3
 
 // 55P03: lock_timeout expired. Nothing is applied after the ROLLBACK, so the
-// whole transaction is retried and holds no lock between attempts.
+// transaction is retried as a whole and holds no lock between attempts.
 function isLockWaitTimeout(error: unknown): boolean {
   return (error as { code?: unknown } | null)?.code === '55P03'
+}
+
+// Runs one bounded transaction, and runs it again after a lost lock wait, up
+// to `retries` extra times with a growing pause. Any other error, and the
+// lost lock wait of the last attempt, propagates.
+async function runWithLockRetries(
+  version: string,
+  retries: number,
+  sleep: (ms: number) => Promise<void>,
+  attempt: () => Promise<void>
+): Promise<void> {
+  for (let tried = 0; ; tried += 1) {
+    try {
+      await attempt()
+      return
+    } catch (error) {
+      if (tried >= retries || !isLockWaitTimeout(error)) throw error
+      log.warn(
+        { err: error, version, attempt: tried + 1, retries },
+        'Migration lost a lock wait; retrying'
+      )
+      await sleep(LOCK_RETRY_DELAY_MS * (tried + 1))
+    }
+  }
 }
 
 export async function runBoundedTransaction(
@@ -263,8 +289,13 @@ export async function applyPendingPr1Migrations({
       continue
     }
 
+    const retries = migration.lockRetries ?? 0
     if (hasPostSchemaWork(version)) {
-      await runBoundedTransaction(db, async () => migration.apply(db))
+      // Only the schema transaction is retried: the validations and the
+      // receipt run once, after it committed.
+      await runWithLockRetries(version, retries, sleep, () =>
+        runBoundedTransaction(db, async () => migration.apply(db))
+      )
       await preparePr1Migration(db, version, 'after-schema')
       await runBoundedTransaction(db, async () => {
         await recordMigration(db, version)
@@ -274,23 +305,12 @@ export async function applyPendingPr1Migrations({
     }
 
     await preparePr1Migration(db, version)
-    const retries = migration.lockRetries ?? 0
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        await runBoundedTransaction(db, async () => {
-          await migration.apply(db)
-          await recordMigration(db, version)
-        })
-        break
-      } catch (error) {
-        if (attempt >= retries || !isLockWaitTimeout(error)) throw error
-        log.warn(
-          { err: error, version, attempt: attempt + 1, retries },
-          'Migration lost a lock wait; retrying'
-        )
-        await sleep(LOCK_RETRY_DELAY_MS * (attempt + 1))
-      }
-    }
+    await runWithLockRetries(version, retries, sleep, () =>
+      runBoundedTransaction(db, async () => {
+        await migration.apply(db)
+        await recordMigration(db, version)
+      })
+    )
     appliedVersions.add(version)
   }
 }

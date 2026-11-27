@@ -51,8 +51,11 @@ export function enqueueSignal(recipeName: string, signal: WorkflowSignal): void 
     lastEvictionTime = now
   }
   const signals = signalStore.get(recipeName) ?? []
+  // A signal whose requestId is still queued is not queued twice: cancel
+  // delivery re-queues the same signal on every tick.
+  const alreadyQueued = signals.some(queued => queued.requestId === signal.requestId)
   // Cap at SIGNAL_STORE_MAX per recipe to prevent unbounded memory growth (DoS)
-  if (signals.length < SIGNAL_STORE_MAX) {
+  if (!alreadyQueued && signals.length < SIGNAL_STORE_MAX) {
     signals.push(signal)
   }
   signalStore.set(recipeName, signals)

@@ -8,6 +8,7 @@ import type {
   WorkflowRunsResult,
 } from '../../../../src/types'
 import { buildInitialInputValues } from '../../components/InputContractForm'
+import { stripIpcWrapper } from '../../lib/gfsGrantErrors'
 import { canTriggerWorkflowAsUser, summarizeWorkflowResource } from '../../lib/workflows'
 import type { WorkflowSummary } from '../../workflows.types'
 import { desktopQueryKeys } from './queryKeys'
@@ -22,6 +23,29 @@ const EMPTY_WORKFLOW_RUNS: WorkflowRunsResult['items'] = []
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+// A refused cancel reaches the renderer as `<status> <status text>: <code>` (the
+// Desktop HTTP client's message for the route's `{ error: code }` body) behind
+// Electron's IPC wrapper. Only a verdict of exactly that shape yields a code.
+const CANCEL_REFUSAL_VERDICT = /^\d{3} [^:]*: ([a-z_]+)$/
+
+/**
+ * The text a user reads after a refused cancel: the two refusal codes of the cancel
+ * route get a sentence; any other verdict is shown as it arrived, without the IPC
+ * wrapper.
+ */
+function cancelRunErrorMessage(error: unknown): string {
+  const verdict = stripIpcWrapper(toErrorMessage(error))
+  const code = CANCEL_REFUSAL_VERDICT.exec(verdict)?.[1]
+  switch (code) {
+    case 'workflow_run_not_found':
+      return 'The run was not found.'
+    case 'workflow_run_not_cancellable':
+      return 'The run can no longer be canceled.'
+    default:
+      return verdict
+  }
 }
 
 function isWorkflowApprovalRequestResult(
@@ -88,6 +112,27 @@ async function loadRecentRunsWithLatestArtifacts(
   }
 }
 
+const TERMINAL_WORKFLOW_RUN_PHASES: ReadonlySet<string> = new Set([
+  'Succeeded',
+  'Failed',
+  'Canceled',
+])
+
+export function isTerminalWorkflowRunPhase(phase: string): boolean {
+  return TERMINAL_WORKFLOW_RUN_PHASES.has(phase)
+}
+
+/** A cancel was requested and the runtime has not stopped the run yet. */
+export function isWorkflowRunCanceling(
+  run: Pick<WorkflowRunsResult['items'][number], 'phase' | 'cancelRequestedAt'>
+): boolean {
+  return Boolean(run.cancelRequestedAt) && !isTerminalWorkflowRunPhase(run.phase)
+}
+
+// While the latest run is "Canceling", its row re-reads the runs on this interval so the
+// cell reaches the terminal phase without a manual Refresh. No other state polls.
+export const WORKFLOW_CANCELING_REFETCH_INTERVAL_MS = 5_000
+
 export type WorkflowRecentRuns = {
   latestRun: WorkflowRunsResult['items'][number] | null
   runCount: number
@@ -109,6 +154,12 @@ export function useWorkflowRecentRuns(wf: WorkflowSummary): WorkflowRecentRuns {
     queryFn: () => loadRecentRunsWithLatestArtifacts(wf, RECENT_RUNS_LIMIT),
     staleTime: Infinity,
     gcTime: Infinity,
+    refetchInterval: current => {
+      const latest = current.state.data?.items?.[0]
+      return latest && isWorkflowRunCanceling(latest)
+        ? WORKFLOW_CANCELING_REFETCH_INTERVAL_MS
+        : false
+    },
   })
 
   const items =
@@ -397,6 +448,30 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
     ]
   )
 
+  const cancelRun = useCallback(
+    async (ns: string, name: string, runId: string) => {
+      let refusal: string | null = null
+      try {
+        await window.clerum.workflows.cancelRun(ns, name, runId)
+      } catch (error) {
+        refusal = cancelRunErrorMessage(error)
+      }
+      if (refusal === null) {
+        setStatus('Cancel requested.', 'success', undefined, { global: false, toast: true })
+      } else {
+        setStatus(`Cancel failed: ${refusal}`, 'error')
+      }
+      // The table's Recent Runs cell reads the RECENT_RUNS_LIMIT key; re-read it on both
+      // paths without a manual Refresh. After an accepted cancel the row shows
+      // "Canceling" (or the terminal phase); after a refusal it shows the run's stored
+      // phase, so a run that already ended no longer offers Cancel.
+      await queryClient.invalidateQueries({
+        queryKey: desktopQueryKeys.workflowRuns(ns, name, RECENT_RUNS_LIMIT),
+      })
+    },
+    [queryClient, setStatus]
+  )
+
   const clearSelectedWorkflow = useCallback(() => {
     selectWorkflowSeqRef.current += 1
     setWorkflowSelection(current => ({
@@ -446,6 +521,7 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
       handleRefreshWorkflows,
       handleSelectWorkflow,
       handleTriggerWorkflow,
+      cancelRun,
       loadWorkflowRunsFor,
       clearSelectedWorkflow,
       resetWorkflows,
@@ -464,6 +540,7 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
       handleRefreshWorkflows,
       handleSelectWorkflow,
       handleTriggerWorkflow,
+      cancelRun,
       loadWorkflowRunsFor,
       clearSelectedWorkflow,
       resetWorkflows,

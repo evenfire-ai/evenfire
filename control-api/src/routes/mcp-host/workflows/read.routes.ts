@@ -361,7 +361,7 @@ export function createMcpHostWorkflowReadRoutes(gateway: K8sGateway): Router {
         >
         let latestRun = null
         if (canIncludeRunSummary(caller, ns, name, approvalTarget)) {
-          latestRun = await getLatestRun(ns, name)
+          latestRun = await getLatestRun(ns, name, 'tenant')
         } else if (sharedApprovalTarget && conversationId) {
           const scopedHealth = await getConversationScopedWorkflowHealth({
             caller,
@@ -370,7 +370,7 @@ export function createMcpHostWorkflowReadRoutes(gateway: K8sGateway): Router {
             approvalTarget,
             conversationId,
           })
-          latestRun = scopedHealth.lastRun ? mapDbRun(scopedHealth.lastRun) : null
+          latestRun = scopedHealth.lastRun ? mapDbRun(scopedHealth.lastRun, 'tenant') : null
         }
         const dto: RuntimeWorkflowStatusDto = {
           ...mapRuntimeWorkflow(resource),
@@ -428,7 +428,7 @@ export function createMcpHostWorkflowReadRoutes(gateway: K8sGateway): Router {
         const status = asRecord(resource.status) ?? {}
         let runHealth: { activeRuns: number | null; lastRun: ReturnType<typeof mapDbRun> | null }
         if (canIncludeRunSummary(caller, ns, name, approvalTarget)) {
-          runHealth = await getWorkflowHealth(ns, name)
+          runHealth = await getWorkflowHealth(ns, name, 'tenant')
         } else if (sharedApprovalTarget && conversationId) {
           const scopedHealth = await getConversationScopedWorkflowHealth({
             caller,
@@ -439,7 +439,7 @@ export function createMcpHostWorkflowReadRoutes(gateway: K8sGateway): Router {
           })
           runHealth = {
             activeRuns: scopedHealth.activeRuns,
-            lastRun: scopedHealth.lastRun ? mapDbRun(scopedHealth.lastRun) : null,
+            lastRun: scopedHealth.lastRun ? mapDbRun(scopedHealth.lastRun, 'tenant') : null,
           }
         } else {
           runHealth = { activeRuns: null, lastRun: null }

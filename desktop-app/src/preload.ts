@@ -710,6 +710,8 @@ const clerum = Object.freeze({
     ) => ipcRenderer.invoke('workflows:trigger', { ns, name, inputs, idempotencyKey }),
     runs: (ns: string, name: string, limit?: number) =>
       ipcRenderer.invoke('workflows:runs', { ns, name, limit }),
+    cancelRun: (ns: string, name: string, runId: string) =>
+      ipcRenderer.invoke('workflows:cancelRun', { ns, name, runId }),
     listRunArtifacts: (ns: string, name: string, runId: string) =>
       ipcRenderer.invoke('workflows:runArtifacts', { ns, name, runId }),
     downloadRunArtifact: (ns: string, name: string, runId: string, artifactName: string) =>

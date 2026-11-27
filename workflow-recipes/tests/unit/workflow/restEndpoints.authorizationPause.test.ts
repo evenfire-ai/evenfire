@@ -818,6 +818,10 @@ describe('step running report through the real run processor (A13 A-1)', () => {
       instanceId: 'wrc-test',
       pool: { connect } as unknown as Pool,
       runPollMs: 30_000,
+      maxRunDurationCapSeconds: 86_400,
+      deliverCancelSignal: () => {
+        throw new Error('no cancel is delivered by this test')
+      },
       checkpointAuthority,
       createChildRecipe: vi.fn(),
       logger: { ...logSpies, withStep: () => logSpies } as never,

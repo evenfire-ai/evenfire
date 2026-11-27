@@ -15,7 +15,7 @@ import { RecipeEditor } from '@components/RecipeEditor'
 import { RecipeIntegrationsPanel } from '@components/RecipeIntegrationsPanel'
 import { RecipeSecretsPanel } from '@components/RecipeSecretsPanel'
 import { GrantsReadonlyPanel, RecipeStatusContent } from '@components/RecipeStatusContent'
-import { RowActionsMenu } from '@components/RowActionsMenu'
+import { type RowActionMenuItem, RowActionsMenu } from '@components/RowActionsMenu'
 import { SectionLoadingSkeleton } from '@components/SectionLoadingSkeleton'
 import { IconWorkflow } from '@components/Sidebar/icons'
 import { SkeletonTableRows } from '@components/SkeletonTableRows'
@@ -34,11 +34,13 @@ import {
 } from '@constants/workflowRecipeDetails'
 import { DEFAULT_WORKFLOW_RECIPE_NAMESPACE } from '@constants/workflowRecipes'
 import {
+  cancelWorkflowRun,
   deleteRecipe,
   getRecipe,
   getRecipePods,
   getRecipeStatus,
   getWorkflowRuns,
+  isSilentApiError,
   retryRecipe,
 } from '@lib/api'
 import type {
@@ -49,7 +51,9 @@ import type {
 } from '@lib/api'
 import {
   RECIPE_STATUS_LOADING_REASON,
+  type WorkflowRunListItem,
   getRecipeRunDisabledReason,
+  getRunCancelState,
   getVisibleWorkflowRuns,
   isRecipeReadyToRun,
   isWorkflowExecutionLive,
@@ -68,6 +72,29 @@ const RUNS_COLUMNS: TableHeaderColumn[] = [
 ]
 
 const STATUS_POLL_MS = 5000
+
+// Messages for the error codes of the operator cancel route
+// (`control-api/src/services/workflows/workflowRunCancelService.ts`).
+const CANCEL_RUN_ERROR_MESSAGES: Record<string, string> = {
+  workflow_run_not_found: 'The run was not found.',
+  workflow_run_not_cancellable: 'The run can no longer be canceled.',
+}
+
+function cancelRunErrorMessage(err: unknown): string {
+  const code =
+    err && typeof err === 'object' && typeof (err as { code?: unknown }).code === 'string'
+      ? (err as { code: string }).code
+      : undefined
+  if (code && CANCEL_RUN_ERROR_MESSAGES[code]) return CANCEL_RUN_ERROR_MESSAGES[code]
+  return err instanceof Error && err.message ? err.message : 'Failed to cancel the run.'
+}
+
+function addRunIds(current: ReadonlySet<string>, ids: string[]): ReadonlySet<string> {
+  if (ids.every(id => current.has(id))) return current
+  const next = new Set(current)
+  for (const id of ids) next.add(id)
+  return next
+}
 
 function extractInputs(recipe: WorkflowRecipeResource | null): InputContractProperties | undefined {
   const spec = recipe?.spec
@@ -309,6 +336,15 @@ function WorkflowRecipeDetailContent() {
   const [runsError, setRunsError] = useState('')
   const [podsError, setPodsError] = useState('')
 
+  // The run whose cancel POST is in flight; while set, every row's `Cancel run`
+  // is disabled so the page sends at most one cancel at a time.
+  const [cancelingRunId, setCancelingRunId] = useState<string | null>(null)
+  // Runs whose cancel request this page has observed: an accepted cancel, or a
+  // list row carrying `cancelRequestedAt`. It only grows, because the server
+  // never clears a request; it keeps a row canceling when a list response that
+  // was requested earlier lands later without the field (`loadRuns` has no
+  // response ordering).
+  const [cancelAcceptedIds, setCancelAcceptedIds] = useState<ReadonlySet<string>>(() => new Set())
   const [runModalOpen, setRunModalOpen] = useState(false)
   const [uninstalling, setUninstalling] = useState(false)
   const [retrying, setRetrying] = useState(false)
@@ -387,6 +423,10 @@ function WorkflowRecipeDetailContent() {
         const response = await getWorkflowRuns(namespace, name, 50)
         if (!mountedRef.current) return
         setRuns(response.items)
+        const requestedIds = response.items.filter(run => run.cancelRequestedAt).map(run => run.id)
+        if (requestedIds.length > 0) {
+          setCancelAcceptedIds(current => addRunIds(current, requestedIds))
+        }
       } catch (err) {
         if (!mountedRef.current) return
         if (!silent) {
@@ -433,8 +473,8 @@ function WorkflowRecipeDetailContent() {
     [recipe, recipeStatus, runs]
   )
   const shouldPoll = useMemo(
-    () => shouldPollWorkflowRecipe(recipe, recipeStatus, runs),
-    [recipe, recipeStatus, runs]
+    () => shouldPollWorkflowRecipe(recipe, recipeStatus, runs, cancelAcceptedIds),
+    [recipe, recipeStatus, runs, cancelAcceptedIds]
   )
   // Always poll pods when on the workloads tab — a pod can flap between
   // CrashLoopBackOff and Running while the recipe phase is settled, so we
@@ -473,6 +513,41 @@ function WorkflowRecipeDetailContent() {
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Failed to uninstall plugin')
       setUninstalling(false)
+    }
+  }
+
+  async function handleCancelRun(run: WorkflowRunListItem) {
+    const shortId = run.id.slice(0, 8)
+    const shouldCancel = await confirm({
+      title: `Cancel run ${shortId}?`,
+      message:
+        'A running run stops at the first step boundary after its coordinator receives the signal (normally within 5 s). A step that starts before then still runs, and steps that already ran are not undone.',
+      confirmLabel: 'Cancel run',
+      cancelLabel: 'Keep running',
+      tone: 'danger',
+    })
+    if (!shouldCancel || !mountedRef.current) return
+
+    setCancelingRunId(run.id)
+    try {
+      const updated = await cancelWorkflowRun(namespace, name, run.id)
+      if (!mountedRef.current) return
+      setRuns(current => current.map(item => (item.id === run.id ? updated : item)))
+      setCancelAcceptedIds(current => addRunIds(current, [run.id]))
+      showToast(`Cancel requested for run ${shortId}.`, { tone: 'success' })
+      void loadRuns(true)
+    } catch (err) {
+      if (!mountedRef.current) return
+      // A 401 already sent the session to sign-in (`handleUnauthorized`).
+      if (isSilentApiError(err)) return
+      showToast(`Could not cancel run ${shortId}: ${cancelRunErrorMessage(err)}`, {
+        tone: 'error',
+      })
+      // The server may have committed the cancel before the failure reached the
+      // page (a client timeout); the reloaded list shows what it stored.
+      void loadRuns(true)
+    } finally {
+      if (mountedRef.current) setCancelingRunId(null)
     }
   }
 
@@ -786,6 +861,7 @@ function WorkflowRecipeDetailContent() {
                           : CONTROL_ROUTES.plugins.run(namespace, name, run.id)
                         const shortId = run.id.slice(0, 8)
                         const canOpenRun = run.isClickable !== false
+                        const cancelState = getRunCancelState(run, cancelAcceptedIds)
                         const openLabel = isCurrentExecutionRow
                           ? 'Open current execution status'
                           : `Open run ${shortId}`
@@ -801,6 +877,19 @@ function WorkflowRecipeDetailContent() {
                             }
                           }
                           router.push(href)
+                        }
+                        const rowActions: RowActionMenuItem[] = []
+                        if (canOpenRun) {
+                          rowActions.push({ key: 'view', label: 'View details', onClick: openRun })
+                        }
+                        if (cancelState === 'cancellable') {
+                          rowActions.push({
+                            key: 'cancel',
+                            label: 'Cancel run',
+                            danger: true,
+                            disabled: cancelingRunId !== null,
+                            onClick: () => void handleCancelRun(run),
+                          })
                         }
 
                         return (
@@ -840,7 +929,9 @@ function WorkflowRecipeDetailContent() {
                                 </span>
                               ) : null}
                             </td>
-                            <td style={{ padding: '10px' }}>{run.phase}</td>
+                            <td style={{ padding: '10px' }}>
+                              {cancelState === 'canceling' ? `${run.phase} · Canceling` : run.phase}
+                            </td>
                             <td style={{ padding: '10px' }}>{formatTime(run.triggeredAt)}</td>
                             <td style={{ padding: '10px' }}>{formatTime(run.startedAt)}</td>
                             <td style={{ padding: '10px' }}>{formatTime(run.completedAt)}</td>
@@ -850,17 +941,11 @@ function WorkflowRecipeDetailContent() {
                               onClick={event => event.stopPropagation()}
                               onKeyDown={event => event.stopPropagation()}
                             >
-                              {canOpenRun ? (
+                              {rowActions.length > 0 ? (
                                 <RowActionsMenu
                                   ariaLabel={`Actions for run ${shortId}`}
                                   horizontalTrigger
-                                  actions={[
-                                    {
-                                      key: 'view',
-                                      label: 'View details',
-                                      onClick: openRun,
-                                    },
-                                  ]}
+                                  actions={rowActions}
                                 />
                               ) : null}
                             </td>

@@ -13,9 +13,9 @@ import {
   applyPendingPr1Migrations,
 } from '../src/migrations/migrationRunner.js'
 import {
+  POST_SCHEMA_CONSTRAINT_VALIDATIONS,
   PR1_ONLINE_INDEX_PLAN,
   PR2_ONLINE_INDEX_PLAN,
-  PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS,
   ensureOnlineIndex,
   expectedIndexDefinition,
   onlineIndex,
@@ -1027,11 +1027,12 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         latestDevReceipts
       )
       expect(pending).toEqual([...RUNNER_MIGRATION_VERSIONS])
-      // On this upgrade every PR2 constraint lands on a table readers already
-      // use: each is added NOT VALID (no scan under ACCESS EXCLUSIVE), is still
-      // unvalidated after its schema commit, and is validated afterwards.
+      // On this upgrade every post-schema constraint lands on a table readers
+      // already use: each is added NOT VALID (no scan under ACCESS EXCLUSIVE),
+      // is still unvalidated after its schema commit, and is validated
+      // afterwards.
       expect(validations).toEqual(
-        PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => ({
+        POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => ({
           constraint: entry.constraint,
           convalidatedBefore: false,
         }))
@@ -1045,16 +1046,14 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
           )
           ORDER BY 1`,
         [
-          PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => entry.table),
-          PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => entry.constraint),
+          POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => entry.table),
+          POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => entry.constraint),
         ]
       )
       expect(validated.rows).toEqual(
         [
           ...new Set(
-            PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(
-              entry => `${entry.table}.${entry.constraint}`
-            )
+            POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => `${entry.table}.${entry.constraint}`)
           ),
         ]
           .sort()

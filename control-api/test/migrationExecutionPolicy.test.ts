@@ -11,9 +11,9 @@ import {
 } from '../src/migrations/migrationRunner.js'
 import {
   ONLINE_INDEX_PLAN,
+  POST_SCHEMA_CONSTRAINT_VALIDATIONS,
   PR1_ONLINE_INDEX_PLAN,
   PR2_ONLINE_INDEX_PLAN,
-  PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS,
   expectedIndexDefinition,
   hasPostSchemaWork,
   onlineIndex,
@@ -232,10 +232,11 @@ describe('D34 migration execution policy', () => {
       '0155_workflow_run_failure_reason',
       '0156_workflow_authorization_pause',
     ])
-    expect(RUNNER_MIGRATION_VERSIONS.slice(-3)).toEqual([
+    expect(RUNNER_MIGRATION_VERSIONS.slice(-4)).toEqual([
       '0157_governed_trace_retention_indexed',
       '0158_governed_trace_retention_hardening',
       '0159_oidc_member_links',
+      '0160_workflow_run_cancel_request',
     ])
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0117_control_admin_invitation_replace_inviter')
     expect(PR1_MIGRATION_VERSIONS).not.toContain('0118_control_admin_replace_inviter_accept_guard')
@@ -288,7 +289,7 @@ describe('D34 migration execution policy', () => {
     ).toBe(false)
   })
 
-  it('classifies the PR2 online indexes and the eight post-schema constraint validations', () => {
+  it('classifies the PR2 online indexes and the post-schema constraint validations', () => {
     expect(
       PR2_ONLINE_INDEX_PLAN.map(index => [
         index.migrationVersion,
@@ -307,7 +308,7 @@ describe('D34 migration execution policy', () => {
       ['0156_workflow_authorization_pause', 'idx_wr_owner_v2', 'after-schema', 'idx_wr_owner'],
     ])
     expect(
-      PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => [
+      POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => [
         entry.migrationVersion,
         entry.table,
         entry.constraint,
@@ -341,6 +342,11 @@ describe('D34 migration execution policy', () => {
       ['0155_workflow_run_failure_reason', 'workflow_runs', 'workflow_runs_failure_reason_check'],
       ['0156_workflow_authorization_pause', 'workflow_runs', 'workflow_runs_phase_check'],
       ['0156_workflow_authorization_pause', 'workflow_runs', 'workflow_runs_failure_reason_check'],
+      [
+        '0160_workflow_run_cancel_request',
+        'workflow_runs',
+        'workflow_runs_cancel_request_pair_check',
+      ],
     ])
     // A version with only constraint validations (0152, 0155) still has
     // post-schema work; the versions without either have none.
@@ -583,12 +589,12 @@ describe('D34 PR1 migration runner', () => {
     // One transaction per version without post-schema work (0137-0150,
     // 0153-0154, 0157-0159); a version with it commits its schema, each validation and
     // its receipt separately: 0151 1 + 4 + 1, 0152 1 + 1 + 1, 0155 1 + 1 + 1,
-    // 0156 1 + 2 + 1.
-    const transactions = 19 + 6 + 3 + 3 + 4
+    // 0156 1 + 2 + 1, 0160 1 + 1 + 1.
+    const transactions = 19 + 6 + 3 + 3 + 4 + 3
     expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(transactions)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
-    expect(queries.filter(({ sql }) => VALIDATE_CONSTRAINT.test(sql))).toHaveLength(8)
+    expect(queries.filter(({ sql }) => VALIDATE_CONSTRAINT.test(sql))).toHaveLength(9)
   })
 
   it('runs after-schema online indexes, then each constraint validation, before recording', async () => {
@@ -776,6 +782,71 @@ describe('D34 PR1 migration runner', () => {
     expect(appliedVersions).not.toContain(pendingVersion)
   })
 
+  it('does not record 0160 when its validation fails, and a rerun records it once', async () => {
+    const pendingVersion = '0160_workflow_run_cancel_request'
+    expect(hasPostSchemaWork(pendingVersion)).toBe(true)
+    const validationSql =
+      'ALTER TABLE workflow_runs VALIDATE CONSTRAINT workflow_runs_cancel_request_pair_check'
+    const validationError = Object.assign(
+      new Error('canceling statement due to statement timeout'),
+      { code: '57014' }
+    )
+    const queries: string[] = []
+    let failValidation = true
+    const query = vi.fn(async (sql: string) => {
+      queries.push(sql)
+      if (sql === validationSql && failValidation) throw validationError
+      return { rows: [], rowCount: 0 }
+    })
+    const transactionEvents = () =>
+      queries.filter(
+        sql => sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK' || sql === validationSql
+      )
+    const apply = vi.fn(async () => undefined)
+    const migrations = RUNNER_MIGRATION_VERSIONS.map(version => ({
+      version,
+      apply: version === pendingVersion ? apply : vi.fn(async () => undefined),
+    }))
+    const appliedVersions = new Set<string>(
+      RUNNER_MIGRATION_VERSIONS.filter(version => version !== pendingVersion)
+    )
+    const recorded: string[] = []
+    const run = () =>
+      applyPendingPr1Migrations({
+        db: { query },
+        migrations,
+        appliedVersions,
+        recordMigration: async (_db, version) => {
+          recorded.push(version)
+        },
+      })
+
+    await expect(run()).rejects.toBe(validationError)
+    // Witness: the schema transaction committed before the failing VALIDATE,
+    // which ran in its own transaction and was rolled back.
+    expect(apply).toHaveBeenCalledTimes(1)
+    expect(transactionEvents()).toEqual(['BEGIN', 'COMMIT', 'BEGIN', validationSql, 'ROLLBACK'])
+    expect(recorded).toEqual([])
+    expect(appliedVersions).not.toContain(pendingVersion)
+
+    // The next start re-applies the idempotent schema, validates and records once.
+    failValidation = false
+    queries.length = 0
+    await run()
+    expect(apply).toHaveBeenCalledTimes(2)
+    expect(transactionEvents()).toEqual([
+      'BEGIN',
+      'COMMIT',
+      'BEGIN',
+      validationSql,
+      'COMMIT',
+      'BEGIN',
+      'COMMIT',
+    ])
+    expect(recorded).toEqual([pendingVersion])
+    expect(appliedVersions).toContain(pendingVersion)
+  })
+
   it('does not record an after-schema migration when its online index fails', async () => {
     const query = vi.fn(async (sql: string, values?: unknown[]) => {
       if (sql.includes('FROM pg_class index_rel')) return { rows: [], rowCount: 0 }
@@ -867,7 +938,7 @@ describe('D34 PR1 migration runner', () => {
     }
   })
 
-  it('registers lock retries only on the migrations that take a lock on users or team_members', async () => {
+  it('registers lock retries only on the migrations that wait for a lock on a busy shared table', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const withRetries = CONTROL_API_MIGRATIONS.filter(
       migration => (migration as { lockRetries?: number }).lockRetries !== undefined
@@ -877,6 +948,9 @@ describe('D34 PR1 migration runner', () => {
       ['0147_gfs_watch_session_users_notify', 2],
       // 0159 adds a foreign key to users, which needs a lock on it.
       ['0159_oidc_member_links', 2],
+      // 0160 alters workflow_runs, which the workflow-recipes processor reads
+      // and updates on every poll tick.
+      ['0160_workflow_run_cancel_request', 2],
     ])
   })
 
@@ -884,10 +958,17 @@ describe('D34 PR1 migration runner', () => {
   // gfsWatch.authzSessionTriggers.realPostgres.integration.test.ts; these cases
   // pin the runner's bounds around it.
   describe('lock retries', () => {
-    const retried = '0147_gfs_watch_session_users_notify'
+    const plainVersion = '0147_gfs_watch_session_users_notify'
+    // Its CHECK is added NOT VALID and validated after the schema transaction.
+    const postSchemaVersion = '0155_workflow_run_failure_reason'
 
-    function lockFailingRun(failures: Array<{ code?: string }>, lockRetries?: number) {
+    function lockFailingRun(
+      failures: Array<{ code?: string }>,
+      lockRetries?: number,
+      retried: string = plainVersion
+    ) {
       const transactions: string[] = []
+      const validations: string[] = []
       const sleeps: number[] = []
       const recorded: string[] = []
       let calls = 0
@@ -905,6 +986,8 @@ describe('D34 PR1 migration runner', () => {
         db: {
           query: vi.fn(async (sql: string) => {
             if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') transactions.push(sql)
+            const validation = VALIDATE_CONSTRAINT.exec(sql)
+            if (validation) validations.push(validation[2])
             return { rows: [], rowCount: 0 }
           }),
         },
@@ -917,14 +1000,14 @@ describe('D34 PR1 migration runner', () => {
           sleeps.push(ms)
         },
       })
-      return { run, transactions, sleeps, recorded, attempts: () => calls }
+      return { run, transactions, validations, sleeps, recorded, attempts: () => calls }
     }
 
     it('retries the whole transaction after a lock timeout and then records once', async () => {
       const r = lockFailingRun([{ code: '55P03' }, { code: '55P03' }], 2)
       await r.run
       expect(r.attempts()).toBe(3)
-      expect(r.recorded).toEqual([retried])
+      expect(r.recorded).toEqual([plainVersion])
       expect(r.transactions).toEqual(['BEGIN', 'ROLLBACK', 'BEGIN', 'ROLLBACK', 'BEGIN', 'COMMIT'])
       expect(r.sleeps).toEqual([1_000, 2_000])
     })
@@ -947,6 +1030,64 @@ describe('D34 PR1 migration runner', () => {
       await expect(noRetries.run).rejects.toMatchObject({ code: '55P03' })
       expect(noRetries.attempts()).toBe(1)
       expect(noRetries.sleeps).toEqual([])
+    })
+
+    it('retries the schema transaction of a post-schema version, then validates and records once', async () => {
+      expect(hasPostSchemaWork(postSchemaVersion)).toBe(true)
+      const r = lockFailingRun([{ code: '55P03' }, { code: '55P03' }], 2, postSchemaVersion)
+      await r.run
+      expect(r.attempts()).toBe(3)
+      expect(r.transactions).toEqual([
+        // The schema transaction: two lost lock waits, then a commit.
+        'BEGIN',
+        'ROLLBACK',
+        'BEGIN',
+        'ROLLBACK',
+        'BEGIN',
+        'COMMIT',
+        // The constraint validation, once.
+        'BEGIN',
+        'COMMIT',
+        // The receipt, once.
+        'BEGIN',
+        'COMMIT',
+      ])
+      expect(r.validations).toEqual(['workflow_runs_failure_reason_check'])
+      expect(r.sleeps).toEqual([1_000, 2_000])
+      expect(r.recorded).toEqual([postSchemaVersion])
+    })
+
+    it('gives up on the schema transaction of a post-schema version after its retries, before any validation', async () => {
+      const r = lockFailingRun(
+        [{ code: '55P03' }, { code: '55P03' }, { code: '55P03' }],
+        2,
+        postSchemaVersion
+      )
+      await expect(r.run).rejects.toMatchObject({ code: '55P03' })
+      expect(r.attempts()).toBe(3)
+      expect(r.sleeps).toEqual([1_000, 2_000])
+      expect(r.validations).toEqual([])
+      expect(r.recorded).toEqual([])
+    })
+
+    it('does not retry other errors in the schema transaction of a post-schema version', async () => {
+      for (const code of ['57014', '40P01']) {
+        const other = lockFailingRun([{ code }], 2, postSchemaVersion)
+        await expect(other.run).rejects.toMatchObject({ code })
+        expect(other.attempts(), code).toBe(1)
+        expect(other.sleeps, code).toEqual([])
+        expect(other.validations, code).toEqual([])
+        expect(other.recorded, code).toEqual([])
+      }
+    })
+
+    it('a post-schema version without lockRetries gets one attempt', async () => {
+      const r = lockFailingRun([{ code: '55P03' }], undefined, postSchemaVersion)
+      await expect(r.run).rejects.toMatchObject({ code: '55P03' })
+      expect(r.attempts()).toBe(1)
+      expect(r.sleeps).toEqual([])
+      expect(r.validations).toEqual([])
+      expect(r.recorded).toEqual([])
     })
   })
 
@@ -1172,6 +1313,7 @@ describe('PR1 earlier-head guard', () => {
       '0157_governed_trace_retention_indexed',
       '0158_governed_trace_retention_hardening',
       '0159_oidc_member_links',
+      '0160_workflow_run_cancel_request',
     ])
   })
 })

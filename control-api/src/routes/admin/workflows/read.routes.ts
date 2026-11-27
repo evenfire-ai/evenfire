@@ -90,7 +90,7 @@ export function createAdminWorkflowReadRoutes(gateway: K8sGateway): Router {
           unknown
         >
         const status = asRecord(resource.status) ?? {}
-        const { activeRuns, lastRun } = await getWorkflowHealth(ns, name)
+        const { activeRuns, lastRun } = await getWorkflowHealth(ns, name, 'admin')
         res.json({
           recipe: `${ns}/${name}`,
           phase: status.phase ?? 'Unknown',

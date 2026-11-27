@@ -66,7 +66,6 @@ const request = {
 }
 const caller = { service: 'workflow-recipes', trustPlane: 'internal_control_jwt' } as const
 const storedRow = {
-  id: 'binding-1',
   binding_kind: 'trigger',
   path_kind: 'direct',
   effective_team_id: null,
@@ -86,12 +85,12 @@ const allowed = {
   },
 }
 
-type Query = { stored: ReturnType<typeof vi.fn>; expiry: ReturnType<typeof vi.fn> }
+type Query = { stored: ReturnType<typeof vi.fn> }
 
+// The stored-binding statement is the only statement revalidation sends itself.
 function database(query: Query) {
   return {
-    query: (text: string, values: unknown[]) =>
-      text.includes('AS current') ? query.expiry(text, values) : query.stored(text, values),
+    query: (text: string, values: unknown[]) => query.stored(text, values),
   }
 }
 
@@ -141,12 +140,6 @@ const SITES: readonly Site[] = [
     called: () => deps.resolveActionDestination,
     outage: () => new AccessExecutionCancelledError('cancelled'),
   },
-  {
-    stage: 'binding_expiry',
-    fail: (query, error) => query.expiry.mockRejectedValue(error),
-    called: query => query.expiry,
-    outage: () => pgError('57P01'),
-  },
 ]
 
 describe('workflow trigger checkpoint revalidation failures (C12 Q7 siblings)', () => {
@@ -159,7 +152,6 @@ describe('workflow trigger checkpoint revalidation failures (C12 Q7 siblings)', 
     budget = AccessExecutionBudget.create('action')
     query = {
       stored: vi.fn(async () => ({ rows: [storedRow], rowCount: 1 })),
-      expiry: vi.fn(async () => ({ rows: [{ current: true }], rowCount: 1 })),
     }
     deps.authorizeActionV2.mockResolvedValue(allowed)
     deps.resolveActionDestination.mockResolvedValue({ status: 'resolved', destination: null })
@@ -189,7 +181,6 @@ describe('workflow trigger checkpoint revalidation failures (C12 Q7 siblings)', 
     expect(query.stored).toHaveBeenCalledTimes(1)
     expect(deps.authorizeActionV2).toHaveBeenCalledTimes(1)
     expect(deps.resolveActionDestination).toHaveBeenCalledTimes(1)
-    expect(query.expiry).toHaveBeenCalledTimes(1)
     expect(warn).not.toHaveBeenCalled()
   })
 
@@ -232,21 +223,16 @@ describe('workflow trigger checkpoint revalidation failures (C12 Q7 siblings)', 
     }
   )
 
-  it.each([
-    ['stored_binding', SITES[0]!],
-    ['binding_expiry', SITES[4]!],
-  ] as const)(
-    '%s: a database error that is not an outage surfaces as itself',
-    async (_stage, site) => {
-      const undefinedColumn = pgError('42703')
-      site.fail(query, undefinedColumn)
+  it('stored_binding: a database error that is not an outage surfaces as itself', async () => {
+    const site = SITES[0]!
+    const undefinedColumn = pgError('42703')
+    site.fail(query, undefinedColumn)
 
-      await expect(revalidate()).rejects.toBe(undefinedColumn)
+    await expect(revalidate()).rejects.toBe(undefinedColumn)
 
-      expect(site.called(query)).toHaveBeenCalled()
-      expect(warn).not.toHaveBeenCalled()
-    }
-  )
+    expect(site.called(query)).toHaveBeenCalled()
+    expect(warn).not.toHaveBeenCalled()
+  })
 })
 
 describe('workflow run resume checkpoint revalidation: the run id', () => {
@@ -285,7 +271,6 @@ describe('workflow run resume checkpoint revalidation: the run id', () => {
         ],
         rowCount: 1,
       })),
-      expiry: vi.fn(async () => ({ rows: [{ current: true }], rowCount: 1 })),
     }
     deps.authorizeActionV2.mockResolvedValue(allowed)
     deps.resolveActionDestination.mockResolvedValue({ status: 'resolved', destination: null })

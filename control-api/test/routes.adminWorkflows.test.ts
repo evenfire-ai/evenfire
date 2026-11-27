@@ -87,11 +87,13 @@ vi.mock('../src/config.js', () => ({
     hostsNamespace: 'mcp-host',
     mcpServersNamespace: 'mcp-server',
     sandboxNamespace: 'sandbox-recipes',
-    // The real limiter requires the administrative budget fields as well.
+    // The real limiter requires the administrative budget fields as well, and
+    // the mcp-host trigger limiter requires the workflow trigger budget.
     adminWorkflowReadPerMin: 300,
     adminWorkflowGrantReadPerMin: 300,
     adminWorkflowGrantWritePerMin: 100,
     adminWorkflowTriggerPerMin: 50,
+    workflowTriggerPerMin: 10,
     adminOutputsReadPerMin: 150,
   },
 }))
@@ -1005,7 +1007,8 @@ describe('routes/admin/workflows', () => {
 
       const insertCall = mockPoolQuery.mock.calls[1] as [string, unknown[]]
       expect(insertCall[0]).toContain('INSERT INTO workflow_runs')
-      expect(insertCall[1]?.[11]).toBeNull()
+      // A recipe without a duration stores the 24 h run cap (workflowRunDuration.ts).
+      expect(insertCall[1]?.[11]).toBe(86_400)
       expect(insertCall[1]?.[12]).toBe(2_592_000)
     })
 
@@ -1430,6 +1433,8 @@ describe('routes/admin/workflows', () => {
               last_reconciled_at: null,
               created_at: '2026-04-18T10:00:00.000Z',
               updated_at: '2026-04-18T10:00:00.000Z',
+              cancel_requested_at: null,
+              canceled_by: null,
             },
           ],
           rowCount: 1,
@@ -1474,6 +1479,8 @@ describe('routes/admin/workflows', () => {
         message: null,
         actor: { type: 'mcp-host', hostRef: `${RECIPE_NS}/test-recipe` },
         executionRef: { namespace: RECIPE_NS, name: 'test-recipe-child-1' },
+        cancelRequestedAt: null,
+        canceledBy: null,
       })
       expect(res.body.items[1]).toEqual({
         id: 'audit-run-id',
@@ -1524,6 +1531,8 @@ describe('routes/admin/workflows', () => {
             child_recipe_name: null,
             child_recipe_namespace: null,
             approval_request_id: '00000000-0000-4000-8000-000000000123',
+            cancel_requested_at: null,
+            canceled_by: null,
             created_at: '2026-04-18T10:00:00.000Z',
             started_at: '2026-04-18T10:00:01.000Z',
             completed_at: '2026-04-18T10:00:02.000Z',
@@ -1549,6 +1558,8 @@ describe('routes/admin/workflows', () => {
         message: null,
         actor: { type: 'admin-ui', adminUserId: ADMIN_CLAIMS.sub },
         executionRef: null,
+        cancelRequestedAt: null,
+        canceledBy: null,
       })
       expect(JSON.stringify(res.body)).not.toContain('prompt')
     })

@@ -103,6 +103,7 @@ import {
   WorkflowNotificationStreamEvent,
   WorkflowRecipeListResult,
   WorkflowRunArtifactsResult,
+  WorkflowRunCancelResult,
 } from './types.js'
 
 // The single wake scope. A finite (non-streaming) Host operation carries this
@@ -4083,6 +4084,20 @@ export class AppService {
     const teamId = this.workflowTeamByKey.get(this.workflowKey(ns, name)) || null
     return this.runWithTeamContext(teamId, token =>
       this.authClient.listWorkflowRuns(token, ns, name, limit)
+    )
+  }
+
+  /** Cancel a run in the team that owns the recipe, as the trigger runs in that team. */
+  async cancelWorkflowRun(
+    ns: string,
+    name: string,
+    runId: string
+  ): Promise<WorkflowRunCancelResult> {
+    const teamId = this.workflowTeamByKey.get(this.workflowKey(ns, name)) || null
+    return this.runWithTeamContext(
+      teamId,
+      token => this.authClient.cancelWorkflowRun(token, ns, name, runId),
+      { mutation: true }
     )
   }
 

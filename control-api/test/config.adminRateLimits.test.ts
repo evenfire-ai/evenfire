@@ -129,3 +129,41 @@ describe('similar authenticated administrative budgets', () => {
     })
   }
 })
+
+// Not an OPERATING_BUDGETS row: that table holds administrative budgets raised to
+// five times their ceiling, and this external/mcp-host budget keeps its ceiling.
+const WORKFLOW_TRIGGER_KEY = 'CONTROL_API_WORKFLOW_TRIGGER_PER_MIN'
+
+async function readWorkflowTriggerBudget(value = '') {
+  vi.stubEnv(WORKFLOW_TRIGGER_KEY, value)
+  vi.stubEnv('CONTROL_API_ADMIN_WORKFLOW_TRIGGER_PER_MIN', '')
+  vi.resetModules()
+  const { config } = await import('../src/config.js')
+  return {
+    workflowTriggerPerMin: config.workflowTriggerPerMin,
+    adminWorkflowTriggerPerMin: config.adminWorkflowTriggerPerMin,
+  }
+}
+
+describe('external and mcp-host workflow trigger budget', () => {
+  it('defaults to 10', async () => {
+    const config = await readWorkflowTriggerBudget()
+    expect(config.workflowTriggerPerMin).toBe(10)
+    expect(config.adminWorkflowTriggerPerMin).toBe(50)
+  })
+
+  it('honors an explicit override without changing the administrative trigger', async () => {
+    const config = await readWorkflowTriggerBudget('37')
+    expect(config.workflowTriggerPerMin).toBe(37)
+    expect(config.adminWorkflowTriggerPerMin).toBe(50)
+  })
+
+  it.each(['0', '-1', '1.5', 'NaN', '9007199254740992'])(
+    `rejects invalid ${WORKFLOW_TRIGGER_KEY}=%s at boot`,
+    async value => {
+      await expect(readWorkflowTriggerBudget(value)).rejects.toThrow(
+        `${WORKFLOW_TRIGGER_KEY} must be a positive integer`
+      )
+    }
+  )
+})

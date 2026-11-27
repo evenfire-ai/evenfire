@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import type { K8sGateway } from '../../../k8s.js'
+import { createExternalWorkflowCancelRoutes } from './cancel.routes.js'
 import { createExternalWorkflowReadRoutes } from './read.routes.js'
 import { createExternalWorkflowResumeRoutes } from './resume.routes.js'
 import { createExternalWorkflowRunsRoutes } from './runs.routes.js'
@@ -10,6 +11,7 @@ export function createExternalWorkflowsRouter(gateway: K8sGateway): Router {
   router.use(createExternalWorkflowReadRoutes(gateway))
   router.use(createExternalWorkflowRunsRoutes(gateway))
   router.use(createExternalWorkflowResumeRoutes(gateway))
+  router.use(createExternalWorkflowCancelRoutes())
   router.use(createExternalWorkflowTriggerRoutes(gateway))
   return router
 }

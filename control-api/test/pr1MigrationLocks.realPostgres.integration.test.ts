@@ -6,11 +6,12 @@ import { initDb, withTransaction } from '../src/db.js'
 import {
   PR1_MIGRATION_VERSIONS,
   PR2_MIGRATION_VERSIONS,
+  RUNNER_MIGRATION_VERSIONS,
 } from '../src/migrations/migrationRunner.js'
 import {
+  POST_SCHEMA_CONSTRAINT_VALIDATIONS,
   PR1_ONLINE_INDEX_PLAN,
   PR2_ONLINE_INDEX_PLAN,
-  PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS,
 } from '../src/migrations/pr1OnlineIndexPlan.js'
 import { updateAllowedModel } from '../src/services/llmAllowedModels.js'
 import { type SyncConnector, syncDiscoveredModels } from '../src/services/llmCatalogSync.js'
@@ -162,7 +163,9 @@ type MigrationRun = {
   // transaction holds just before it commits.
   pr2TransactionSql: string[]
   pr2Commits: RelationLock[][]
-  pr2Validations: ConstraintValidationSnapshot[]
+  // Every VALIDATE CONSTRAINT the runner issues after PR1 (the PR2 versions and
+  // 0160), with the state another session read just before it.
+  validationsAfterPr1: ConstraintValidationSnapshot[]
   // Runner events after PR1, in order: `validate:<constraint>` and `receipt:<version>`.
   pr2Events: string[]
 }
@@ -214,7 +217,7 @@ async function migrate(
     pr2PreExistingTables: new Set(),
     pr2TransactionSql: [],
     pr2Commits: [],
-    pr2Validations: [],
+    validationsAfterPr1: [],
     pr2Events: [],
   }
   const pendingVersions: string[] = []
@@ -249,7 +252,7 @@ async function migrate(
           const validation = VALIDATE_CONSTRAINT.exec(statement)
           if (pr2Started && validation) {
             run.pr2Events.push(`validate:${validation[2]}`)
-            run.pr2Validations.push({
+            run.validationsAfterPr1.push({
               table: validation[1]!,
               constraint: validation[2]!,
               convalidatedBefore: await convalidated(observer, validation[1]!, validation[2]!),
@@ -535,20 +538,20 @@ describeRealPostgres('PR1 migration locks on real PostgreSQL', () => {
     expect(relations.rows).toEqual([])
   })
 
-  it('adds the eight PR2 constraints NOT VALID on a fresh database and validates each after its schema commit', async () => {
-    const planned = PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => ({
+  it('adds the nine post-schema constraints NOT VALID on a fresh database and validates each after its schema commit', async () => {
+    const planned = POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => ({
       table: entry.table,
       constraint: entry.constraint,
     }))
-    expect(planned).toHaveLength(8)
+    expect(planned).toHaveLength(9)
     // Liveness: the runner validated every planned constraint once, in order,
     // after the PR1 receipts.
-    expect(fresh.pr2Validations.map(({ table, constraint }) => ({ table, constraint }))).toEqual(
-      planned
-    )
+    expect(
+      fresh.validationsAfterPr1.map(({ table, constraint }) => ({ table, constraint }))
+    ).toEqual(planned)
     // Read from another session after each schema commit: not yet validated.
     expect(
-      fresh.pr2Validations.map(({ constraint, convalidatedBefore }) => [
+      fresh.validationsAfterPr1.map(({ constraint, convalidatedBefore }) => [
         constraint,
         convalidatedBefore,
       ])
@@ -570,18 +573,39 @@ describeRealPostgres('PR1 migration locks on real PostgreSQL', () => {
         .map(name => ({ name, valid: true }))
     )
 
-    // Each version's validations come before its receipt, and after the
-    // receipt of the version before it.
-    for (const [index, version] of PR2_MIGRATION_VERSIONS.entries()) {
+    // Each runner version after PR1, including every version that owns a list
+    // entry, has exactly its own validations between the receipt of the runner
+    // version before it and its own receipt.
+    const versionsAfterPr1 = RUNNER_MIGRATION_VERSIONS.slice(
+      RUNNER_MIGRATION_VERSIONS.indexOf(LAST_PR1_VERSION) + 1
+    )
+    expect(versionsAfterPr1).toEqual(
+      expect.arrayContaining([
+        ...new Set(POST_SCHEMA_CONSTRAINT_VALIDATIONS.map(entry => entry.migrationVersion)),
+      ])
+    )
+    for (const version of versionsAfterPr1) {
       const receipt = fresh.pr2Events.indexOf(`receipt:${version}`)
       expect(receipt, version).toBeGreaterThanOrEqual(0)
-      const previous = index > 0 ? PR2_MIGRATION_VERSIONS[index - 1] : undefined
-      const after = previous ? fresh.pr2Events.indexOf(`receipt:${previous}`) : -1
-      const ownValidations = PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS.filter(
+      const previous = RUNNER_MIGRATION_VERSIONS[RUNNER_MIGRATION_VERSIONS.indexOf(version) - 1]!
+      // The events start after the last PR1 receipt committed.
+      const after =
+        previous === LAST_PR1_VERSION ? -1 : fresh.pr2Events.indexOf(`receipt:${previous}`)
+      if (previous !== LAST_PR1_VERSION) expect(after, previous).toBeGreaterThanOrEqual(0)
+      const ownValidations = POST_SCHEMA_CONSTRAINT_VALIDATIONS.filter(
         entry => entry.migrationVersion === version
       ).map(entry => `validate:${entry.constraint}`)
       expect(fresh.pr2Events.slice(after + 1, receipt), version).toEqual(ownValidations)
     }
+    // 0160's pair check is validated after its schema commit and before its receipt.
+    const cancelReceipt = fresh.pr2Events.indexOf('receipt:0160_workflow_run_cancel_request')
+    expect(cancelReceipt).toBeGreaterThanOrEqual(0)
+    expect(
+      fresh.pr2Events.slice(
+        fresh.pr2Events.indexOf('receipt:0159_oidc_member_links') + 1,
+        cancelReceipt
+      )
+    ).toEqual(['validate:workflow_runs_cancel_request_pair_check'])
   })
 
   it('builds no index on a pre-existing table inside a PR2 schema transaction', async () => {

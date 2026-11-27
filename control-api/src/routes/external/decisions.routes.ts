@@ -197,7 +197,7 @@ export function createExternalUserApprovalDecisionsRouter(gateway: K8sGateway): 
 
           return res.status(200).json({
             ok: true,
-            ...(result.workflowRun ? { run: mapDbRun(result.workflowRun.row) } : {}),
+            ...(result.workflowRun ? { run: mapDbRun(result.workflowRun.row, 'tenant') } : {}),
           })
         } catch (err) {
           if (err instanceof WorkflowAuthorityError) {

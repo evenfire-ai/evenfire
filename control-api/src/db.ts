@@ -19,6 +19,10 @@ import {
   LAST_DEV_MIGRATION_VERSION,
   applyPendingPr1Migrations,
 } from './migrations/migrationRunner.js'
+import {
+  WORKFLOW_RUN_CANCEL_REQUEST_MIGRATION,
+  applyWorkflowRunCancelRequestSchema,
+} from './migrations/workflowRunCancelRequest.js'
 import { rootLogger } from './observability/logger.js'
 import { OIDC_MEMBER_LINK_MIGRATION, applyOidcMemberLinkSchema } from './oidc/memberLinkSchema.js'
 import {
@@ -169,7 +173,7 @@ type DbMigration = {
   // Equivalent names used before a branch merge renumbered the same migration body.
   legacyVersions?: readonly string[]
   apply: (db: DbClient) => Promise<void>
-  // Extra attempts when the transaction loses a lock wait (runner versions only).
+  // Extra attempts when the schema transaction loses a lock wait (runner versions only).
   lockRetries?: number
 }
 
@@ -3298,7 +3302,7 @@ async function applyWorkflowAuthorityBindingsSchema(db: DbClient): Promise<void>
     -- Readers already use these two tables, so each column is added without a
     -- default (metadata only) and its foreign key NOT VALID (no scan). The
     -- runner validates the keys after this transaction commits
-    -- (PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS).
+    -- (POST_SCHEMA_CONSTRAINT_VALIDATIONS).
     ALTER TABLE workflow_runs
       ADD COLUMN IF NOT EXISTS initiating_authority_binding_id UUID NULL;
     ALTER TABLE workflow_approval_requests
@@ -3375,7 +3379,7 @@ async function applyPr2RuntimePrivilegesSchema(db: DbClient): Promise<void> {
 }
 
 // The CHECK is added NOT VALID (no scan under ACCESS EXCLUSIVE); the runner
-// validates it after this transaction commits (PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS).
+// validates it after this transaction commits (POST_SCHEMA_CONSTRAINT_VALIDATIONS).
 async function applyWorkflowRunFailureReasonSchema(db: DbClient): Promise<void> {
   await db.query(`
     ALTER TABLE workflow_runs
@@ -3395,7 +3399,7 @@ async function applyWorkflowRunFailureReasonSchema(db: DbClient): Promise<void> 
 }
 
 // Both CHECKs are added NOT VALID and validated after this transaction commits
-// (PR2_POST_SCHEMA_CONSTRAINT_VALIDATIONS). The phase indexes that admit
+// (POST_SCHEMA_CONSTRAINT_VALIDATIONS). The phase indexes that admit
 // AuthorizationPaused are built online, after the commit, as idx_wr_phase_v2
 // and idx_wr_owner_v2, which replace idx_wr_phase and idx_wr_owner
 // (PR2_ONLINE_INDEX_PLAN).
@@ -6791,6 +6795,11 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: OIDC_MEMBER_LINK_MIGRATION,
     apply: applyOidcMemberLinkSchema,
+    lockRetries: 2,
+  },
+  {
+    version: WORKFLOW_RUN_CANCEL_REQUEST_MIGRATION,
+    apply: applyWorkflowRunCancelRequestSchema,
     lockRetries: 2,
   },
 ]
