@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { parseCronLogLines } from './cronLog.js'
 
 // Both fixtures are excerpts of real output: CronScheduler.createJob,
-// enableJob, disableJob, enableJob, triggerJob and deleteJob, run once with the scheduler
-// of this branch (structured logger) and once with the scheduler of
-// b2ad4cc52 (console adapter), with the logger of mcp-host/src/logger.ts.
+// enableJob, disableJob, enableJob, triggerJob and deleteJob, run once with
+// the scheduler of this branch (structured logger) and once with the
+// scheduler of b2ad4cc52 (console adapter), with the logger of
+// mcp-host/src/logger.ts. triggerJob logs "Manually triggering job", which
+// the parser skips, and then "Executing job", which it parses as Executing.
 const STRUCTURED = [
   '{"component":"Cron","jobId":"197554f7-0a7c-4218-805c-2b0c96240c6a","jobName":"fixture-job","schedule":"*/1 * * * *","nextRun":"2026-11-26T18:23:00.000Z","timestamp":"2026-11-26T18:22:51.138Z","level":"info","msg":"Created job"}',
   '{"component":"Cron","jobId":"197554f7-0a7c-4218-805c-2b0c96240c6a","jobName":"fixture-job","timestamp":"2026-11-26T18:22:51.138Z","level":"info","msg":"Enabled job"}',
