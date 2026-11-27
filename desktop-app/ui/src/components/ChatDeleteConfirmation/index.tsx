@@ -19,6 +19,8 @@ export function ChatDeleteConfirmation({
   if (!pending) return null
   return createPortal(
     <ConfirmDialog
+      returnFocusTo={pending.returnFocusTo}
+      fallbackFocusWithin={pending.fallbackFocusWithin}
       body={
         <>
           Delete <strong>{pending.title}</strong>? Messages cannot be recovered.

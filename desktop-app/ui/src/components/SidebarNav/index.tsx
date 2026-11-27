@@ -67,6 +67,7 @@ export function SidebarNav({
   // fetch, so it stays inert until the user reaches for the file tree.
   const [filesExplorerOpen, setFilesExplorerOpen] = useState(false)
   const [sessionMenuId, setSessionMenuId] = useState<string | null>(null)
+  const sessionOptionsTriggerRef = useRef<HTMLButtonElement | null>(null)
   const deleteConfirmation = useConfirmedChatDelete()
   const renameTriggerRef = useRef<HTMLButtonElement | null>(null)
   const renameSessionKeyRef = useRef<string | null>(null)
@@ -120,6 +121,8 @@ export function SidebarNav({
       agentRef: session.agentRef,
       chatId: session.id,
       title: session.title,
+      returnFocusTo: sessionOptionsTriggerRef.current,
+      fallbackFocusWithin: sessionsRef.current,
     })
   }
 
@@ -540,6 +543,7 @@ export function SidebarNav({
                                   aria-expanded={isMenuOpen}
                                   onClick={event => {
                                     event.stopPropagation()
+                                    sessionOptionsTriggerRef.current = event.currentTarget
                                     setSessionMenuId(isMenuOpen ? null : sessionKey)
                                   }}
                                   variant="ghost"

@@ -338,6 +338,7 @@ export function ChatThread({
   const [copiedMessageKey, setCopiedMessageKey] = useState<string | null>(null)
   const [showAllSessions, setShowAllSessions] = useState(false)
   const [sessionMenuChatId, setSessionMenuChatId] = useState<string | null>(null)
+  const sessionOptionsTriggerRef = useRef<HTMLButtonElement | null>(null)
   const deleteConfirmation = useConfirmedChatDelete()
   const renameTriggerRef = useRef<HTMLButtonElement | null>(null)
   const renameChatIdRef = useRef<string | null>(null)
@@ -471,7 +472,13 @@ export function ChatThread({
     (chatId: string, chatTitle: string) => {
       setSessionMenuChatId(null)
       if (!selectedAgent) return
-      void deleteConfirmation.request({ agentRef: selectedAgent, chatId, title: chatTitle })
+      void deleteConfirmation.request({
+        agentRef: selectedAgent,
+        chatId,
+        title: chatTitle,
+        returnFocusTo: sessionOptionsTriggerRef.current,
+        fallbackFocusWithin: dedicatedSessionsRef.current,
+      })
     },
     [deleteConfirmation.request, selectedAgent]
   )
@@ -1112,6 +1119,7 @@ export function ChatThread({
                           label={`Session actions for ${chat.title}`}
                           onClick={event => {
                             event.stopPropagation()
+                            sessionOptionsTriggerRef.current = event.currentTarget
                             setSessionMenuChatId(previous =>
                               previous === chat.id ? null : chat.id
                             )

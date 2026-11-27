@@ -176,7 +176,16 @@ export function ConversationActions({ agentRef, chatId, title }: ConversationAct
                 <MenuItem
                   className="agent-workspace-conversation-menu-item"
                   color="danger"
-                  onClick={() => void deleteConfirmation.request({ agentRef, chatId, title })}
+                  onClick={() =>
+                    void deleteConfirmation.request({
+                      agentRef,
+                      chatId,
+                      title,
+                      returnFocusTo: menuTriggerRef.current,
+                      fallbackFocusWithin:
+                        menuTriggerRef.current?.closest<HTMLElement>('.agent-workspace-shell'),
+                    })
+                  }
                   role="menuitem"
                 >
                   Delete conversation

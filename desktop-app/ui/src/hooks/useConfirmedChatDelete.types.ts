@@ -5,6 +5,8 @@ export type ConfirmedChatDeleteTarget = {
   agentRef: string
   chatId: string
   title: string
+  returnFocusTo?: HTMLElement | null
+  fallbackFocusWithin?: HTMLElement | null
 }
 
 /** A requested deletion, held until the user confirms or cancels it. */
