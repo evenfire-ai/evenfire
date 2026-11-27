@@ -230,6 +230,39 @@ describe('guardrail file_read rules over a native tool’s declared reads', () =
   })
 })
 
+describe('the derived check after a guardrail rewrite', () => {
+  it('declares the reads of the rewritten arguments, not the submitted ones', async () => {
+    const tool = new ReaderTool()
+    const real = buildToolLaneGuardrail({ rules: [allowNative, denySecrets] })!
+    const rewriteTo = (file: string) => {
+      const config = makeConfig(tool, [])
+      config.guardrails = {
+        // A hook rewrote the call: the submitted file is replaced.
+        async decide(_identity, _input) {
+          return {
+            decision: 'allow',
+            reasonCode: 'hook_rewrite',
+            effectiveInput: { file },
+            source: 'hook',
+          }
+        },
+        derivedFileReadDecision: reads => real.derivedFileReadDecision(reads),
+      }
+      return config
+    }
+    // pub → secrets: the rewritten read is denied.
+    expect(await admitToolCall(read('pub/a.json'), rewriteTo('secrets/a.json'), 0)).toMatchObject({
+      kind: 'result',
+      toolResult: { content: 'Blocked by guardrail policy (rule:deny-secrets).', is_error: true },
+    })
+    // secrets → pub: the rewritten read runs, with the rewritten arguments.
+    expect(await admitToolCall(read('secrets/a.json'), rewriteTo('pub/a.json'), 0)).toMatchObject({
+      kind: 'execute',
+      call: { arguments: { file: 'pub/a.json' } },
+    })
+  })
+})
+
 describe('the merge of a call’s own decision with its derived file_read decision', () => {
   // The strictness order the merge applies: deny > ask > allow > no_decision.
   const DECISIONS: Decision[] = ['no_decision', 'allow', 'ask', 'deny']

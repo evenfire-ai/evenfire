@@ -1,8 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { logger } from '../../../logger'
 import { protectedWorkspacePathMessage } from '../../../workspace/protectedPaths'
 import type { ToolOutput } from '../../types'
 import {
@@ -489,5 +491,80 @@ describe('JsonTransformTool result bound (indented size and depth)', () => {
         expect(strip(await tool.execute({ ...source, operation: 'stringify' }))).toEqual(TOO_DEEP)
       }
     }
+  })
+})
+
+describe('JsonTransformTool error branches and path edges', () => {
+  let root: string
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'json-transform-edge-'))
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('a file tools root that cannot be resolved returns the fixed text and logs the code', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    const missingRoot = join(root, 'no-such-root')
+    const tool = new JsonTransformTool(missingRoot)
+    expect(strip(await tool.execute({ file: 'a.json', operation: 'parse' }))).toEqual({
+      content: 'Error: the file could not be read.',
+      is_error: true,
+    })
+    expect(warn).toHaveBeenCalledWith(
+      { tool: 'json_transform', code: 'ENOENT' },
+      'json_transform could not resolve the file tools root'
+    )
+  })
+
+  it('an open that fails with another errno returns the fixed text, never the host path', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    // open(2) on a Unix socket fails with ENXIO on Linux and EOPNOTSUPP on macOS
+    // (which Node reports as an unknown system error), whoever runs the test.
+    const server = createServer()
+    await new Promise<void>(resolve => server.listen(join(root, 's.sock'), resolve))
+    try {
+      const result = await new JsonTransformTool(root).execute({
+        file: 's.sock',
+        operation: 'parse',
+      })
+      expect(strip(result)).toEqual({
+        content: 'Error: the file could not be read.',
+        is_error: true,
+      })
+      expect(result.content).not.toContain(root)
+      const [fields, message] = warn.mock.calls.at(-1) as [Record<string, unknown>, string]
+      expect(message).toBe('json_transform file read failed')
+      expect(fields.tool).toBe('json_transform')
+      expect(typeof fields.code).toBe('string')
+      expect(['ENOENT', 'EISDIR']).not.toContain(fields.code)
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
+  it('stringify at a missing path returns null', async () => {
+    const tool = new JsonTransformTool()
+    expect(
+      strip(await tool.execute({ input: '{"a":1}', operation: 'stringify', path: 'b.c' }))
+    ).toEqual({ content: 'null', is_error: false })
+  })
+
+  it('a path indexes into a string by position, and reads its length', async () => {
+    const tool = new JsonTransformTool()
+    const input = '{"name":"abc"}'
+    expect(strip(await tool.execute({ input, operation: 'get', path: 'name.1' }))).toEqual({
+      content: 'b',
+      is_error: false,
+    })
+    expect(strip(await tool.execute({ input, operation: 'get', path: 'name.length' }))).toEqual({
+      content: '3',
+      is_error: false,
+    })
+    expect(strip(await tool.execute({ input, operation: 'get', path: 'name.9' }))).toEqual({
+      content: 'null',
+      is_error: false,
+    })
   })
 })
