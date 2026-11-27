@@ -68,7 +68,10 @@ export function SidebarNav({
   const [filesExplorerOpen, setFilesExplorerOpen] = useState(false)
   const [sessionMenuId, setSessionMenuId] = useState<string | null>(null)
   const deleteConfirmation = useConfirmedChatDelete()
+  const renameTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const renameSessionKeyRef = useRef<string | null>(null)
   const rename = useInlineRename({
+    returnFocusToRef: renameTriggerRef,
     onRename: (key, nextTitle) => {
       const [agentRef = '', chatId = ''] = key.split(SESSION_KEY_SEPARATOR)
       return onRenameChatForAgent(agentRef, chatId, nextTitle)
@@ -261,7 +264,8 @@ export function SidebarNav({
 
   const startSessionRename = (session: (typeof latestChatSessions)[number]) => {
     setSessionMenuId(null)
-    rename.start(`${session.agentRef}${SESSION_KEY_SEPARATOR}${session.id}`, session.title)
+    renameSessionKeyRef.current = `${session.agentRef}${SESSION_KEY_SEPARATOR}${session.id}`
+    rename.start(renameSessionKeyRef.current, session.title)
   }
 
   const handleLogoClick = () => {
@@ -523,6 +527,10 @@ export function SidebarNav({
                                   )}
                                 </span>
                                 <IconButton
+                                  ref={element => {
+                                    if (renameSessionKeyRef.current === sessionKey)
+                                      renameTriggerRef.current = element
+                                  }}
                                   className="nav-latest-session__menu-button"
                                   label={`Session options for ${session.title}`}
                                   aria-haspopup="menu"

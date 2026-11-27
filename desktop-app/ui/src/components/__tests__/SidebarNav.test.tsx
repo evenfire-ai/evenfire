@@ -132,6 +132,22 @@ describe('SidebarNav logo', () => {
     cleanup()
   })
 
+  it.each(['Enter', 'Escape'])('returns focus to the renamed session options after %s', key => {
+    sidebarNavChatState.latestChatSessions = [
+      { agentRef: 'alpha', id: 'one', title: 'First' },
+      { agentRef: 'alpha', id: 'two', title: 'Second' },
+    ]
+    render(<SidebarNav {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Session options for First' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    const input = screen.getByRole('textbox', { name: 'Rename session' })
+    expect(document.activeElement).toBe(input)
+    fireEvent.keyDown(input, { key })
+    expect(document.activeElement).toBe(
+      screen.getByRole('button', { name: 'Session options for First' })
+    )
+  })
+
   it('renders both theme lockup variants when expanded', () => {
     const { container } = render(<SidebarNav {...baseProps({ collapsed: false })} />)
 

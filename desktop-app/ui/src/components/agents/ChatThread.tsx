@@ -339,7 +339,10 @@ export function ChatThread({
   const [showAllSessions, setShowAllSessions] = useState(false)
   const [sessionMenuChatId, setSessionMenuChatId] = useState<string | null>(null)
   const deleteConfirmation = useConfirmedChatDelete()
+  const renameTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const renameChatIdRef = useRef<string | null>(null)
   const rename = useInlineRename({
+    returnFocusToRef: renameTriggerRef,
     onRename: (chatId, nextTitle) => onRenameChat(chatId, nextTitle),
     onRejected: () => pushToast('Could not rename the session.', 'error'),
   })
@@ -458,6 +461,7 @@ export function ChatThread({
   const startSessionRename = useCallback(
     (chatId: string, currentTitle: string) => {
       setSessionMenuChatId(null)
+      renameChatIdRef.current = chatId
       rename.start(chatId, currentTitle)
     },
     [rename.start]
@@ -1097,6 +1101,10 @@ export function ChatThread({
                       </span>
                       {!isRenaming && (
                         <IconButton
+                          ref={element => {
+                            if (renameChatIdRef.current === chat.id)
+                              renameTriggerRef.current = element
+                          }}
                           className="agent-dedicated-session-menu-btn"
                           aria-label={`Session actions for ${chat.title}`}
                           aria-haspopup="true"
