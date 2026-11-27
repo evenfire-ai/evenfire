@@ -39,6 +39,8 @@ import { isToolApprovalActionValue } from './toolApprovalAction.js'
 
 const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024
 const PROVIDER_EVENT_DEDUPE_TTL_MS = 10 * 60 * 1000
+const ATTACHMENTS_UPGRADING_NOTICE =
+  'File attachments are temporarily unavailable while the assistant service is upgrading. Please resend your message in a moment.'
 const log = readerLogger.child({ module: 'server' })
 type RequestStage =
   | 'route'
@@ -930,20 +932,17 @@ export function createServer(cfg = config): http.Server {
         return
       }
       if (medium === 'slack' && auth.slackTarget) {
+        const slackTarget = auth.slackTarget
         const message = normalizeProviderMessage(medium, payload)
         if (message) {
-          if (!slackCanUseMessage(auth.slackTarget, payload, message.providerChannelId)) {
+          if (!slackCanUseMessage(slackTarget, payload, message.providerChannelId)) {
             writeJson(res, 200, { ok: true, ignored: true })
             return
           }
-          const botUserId = slackAuthorizedBotUserId(auth.slackTarget, payload)
+          const botUserId = slackAuthorizedBotUserId(slackTarget, payload)
           const shouldStripMention =
             slackEventType(payload) === 'app_mention' ||
-            slackMessageShouldStripAcceptedMention(
-              auth.slackTarget,
-              payload,
-              message.providerChannelId
-            )
+            slackMessageShouldStripAcceptedMention(slackTarget, payload, message.providerChannelId)
           const handoffMessage = shouldStripMention
             ? normalizeProviderMessage(medium, payload, {
                 stripLeadingMention: true,
@@ -961,14 +960,38 @@ export function createServer(cfg = config): http.Server {
             return
           }
           stage = 'background_message'
-          void handoffSlackMessageToChannelReader(cfg, auth.slackTarget, handoffMessage)
-            .then(result => {
+          void handoffSlackMessageToChannelReader(cfg, slackTarget, handoffMessage)
+            .then(async result => {
               if (!result.ok) {
                 log.warn('slack message handoff failed', {
                   status: result.status,
                   error: result.error,
                   providerEventId: handoffMessage.providerEventId,
                 })
+                if (result.status === 400 && result.error === 'unsupported_handoff_kind') {
+                  try {
+                    const noticeResult = await sendSlackTargetMessage(cfg, {
+                      targetId: slackTarget.targetId,
+                      channelId: handoffMessage.providerChannelId,
+                      text: `<@${handoffMessage.providerUserId}> ${ATTACHMENTS_UPGRADING_NOTICE}`,
+                      threadTs: slackTarget.replyInThreads
+                        ? handoffMessage.threadTs || handoffMessage.providerMessageTs
+                        : undefined,
+                    })
+                    if (!noticeResult.ok) {
+                      log.warn('slack attachment upgrade notice failed', {
+                        providerEventId: handoffMessage.providerEventId,
+                        status: noticeResult.status,
+                        error: noticeResult.error,
+                      })
+                    }
+                  } catch (err) {
+                    log.warn('slack attachment upgrade notice threw', {
+                      providerEventId: handoffMessage.providerEventId,
+                      error: err instanceof Error ? err.name : 'unknown_error',
+                    })
+                  }
+                }
               }
             })
             .catch(err => {
@@ -979,13 +1002,18 @@ export function createServer(cfg = config): http.Server {
           writeJson(res, 200, { ok: true })
           return
         }
+        if (isSlackEventCallback(payload)) {
+          writeJson(res, 200, { ok: true, ignored: true })
+          return
+        }
       }
       if (medium === 'teams' && auth.teamsTarget) {
+        const teamsTarget = auth.teamsTarget
         const isWorkflowApprovalAction = teamsIsWorkflowApprovalAction(payload)
         const message = isWorkflowApprovalAction ? null : normalizeProviderMessage(medium, payload)
         if (message) {
           if (
-            !teamsCanUseMessage(auth.teamsTarget, payload) &&
+            !teamsCanUseMessage(teamsTarget, payload) &&
             !teamsIsWorkflowResultAction(payload) &&
             !teamsIsToolApprovalAction(payload)
           ) {
@@ -997,14 +1025,43 @@ export function createServer(cfg = config): http.Server {
             return
           }
           stage = 'background_message'
-          void handoffTeamsMessageToChannelReader(cfg, auth.teamsTarget, message)
-            .then(result => {
+          void handoffTeamsMessageToChannelReader(cfg, teamsTarget, message)
+            .then(async result => {
               if (!result.ok) {
                 log.warn('teams message handoff failed', {
                   status: result.status,
                   error: result.error,
                   providerEventId: message.providerEventId,
                 })
+                if (
+                  result.status === 400 &&
+                  result.error === 'unsupported_handoff_kind' &&
+                  message.serviceUrl
+                ) {
+                  try {
+                    const noticeResult = await sendTeamsTargetMessage(cfg, {
+                      targetId: teamsTarget.targetId,
+                      conversationId: message.providerChannelId,
+                      threadConversationId:
+                        message.providerConversationId ?? message.providerChannelId,
+                      replyToId: message.providerReplyToMessageId ?? message.providerMessageTs,
+                      serviceUrl: message.serviceUrl,
+                      text: ATTACHMENTS_UPGRADING_NOTICE,
+                    })
+                    if (!noticeResult.ok) {
+                      log.warn('teams attachment upgrade notice failed', {
+                        providerEventId: message.providerEventId,
+                        status: noticeResult.status,
+                        error: noticeResult.error,
+                      })
+                    }
+                  } catch (err) {
+                    log.warn('teams attachment upgrade notice threw', {
+                      providerEventId: message.providerEventId,
+                      error: err instanceof Error ? err.name : 'unknown_error',
+                    })
+                  }
+                }
               }
             })
             .catch(err => {

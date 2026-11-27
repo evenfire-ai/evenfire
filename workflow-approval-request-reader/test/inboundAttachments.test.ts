@@ -67,12 +67,15 @@ async function startHandoffReceiver(
   }
 }
 
-function makeConfig(channelReaderUrlTemplate: string): ReaderConfig {
+function makeConfig(
+  channelReaderUrlTemplate: string,
+  mcpHostBaseUrl = 'http://127.0.0.1:1'
+): ReaderConfig {
   return {
     port: 0,
-    mcpHostBaseUrl: 'http://127.0.0.1:1',
+    mcpHostBaseUrl,
     mcpHostRef: 'host-1',
-    mcpHostTargets: [{ hostRef: 'host-1', baseUrl: 'http://127.0.0.1:1' }],
+    mcpHostTargets: [{ hostRef: 'host-1', baseUrl: mcpHostBaseUrl }],
     enabledMedia: new Set(['slack', 'teams']),
     mcpHostTimeoutMs: 5000,
     mcpHostMessageTimeoutMs: 120_000,
@@ -128,6 +131,8 @@ describe('inbound attachments webhook normalization & handoff (X7 / X8)', () => 
   let createServer: typeof import('../src/server.js').createServer
   let verifySlackTargetSignature: ReturnType<typeof vi.fn>
   let resolveTeamsTarget: ReturnType<typeof vi.fn>
+  let sendSlackTargetMessage: ReturnType<typeof vi.fn>
+  let sendTeamsTargetMessage: ReturnType<typeof vi.fn>
 
   beforeEach(async () => {
     vi.clearAllMocks()
@@ -135,6 +140,10 @@ describe('inbound attachments webhook normalization & handoff (X7 / X8)', () => 
     const controlApi = await import('../src/controlApiClient.js')
     verifySlackTargetSignature = vi.mocked(controlApi.verifySlackTargetSignature)
     resolveTeamsTarget = vi.mocked(controlApi.resolveTeamsTarget)
+    sendSlackTargetMessage = vi.mocked(controlApi.sendSlackTargetMessage)
+    sendTeamsTargetMessage = vi.mocked(controlApi.sendTeamsTargetMessage)
+    sendSlackTargetMessage.mockResolvedValue({ ok: true })
+    sendTeamsTargetMessage.mockResolvedValue({ ok: true })
 
     verifySlackTargetSignature.mockResolvedValue({
       ok: true,
@@ -246,6 +255,7 @@ describe('inbound attachments webhook normalization & handoff (X7 / X8)', () => 
         threadTs: '1710000099.000001',
         responseThreadTs: null,
         eventKind: 'event_callback',
+        slackEventType: 'message',
         attachments: [
           {
             providerAttachmentId: 'F_PDF_1',
@@ -1284,6 +1294,497 @@ describe('inbound attachments webhook normalization & handoff (X7 / X8)', () => 
       ])
     } finally {
       await oldChannelReader.close()
+    }
+  })
+
+  it('emits_slack_event_type_in_normalization_and_handoff_T_BR02_a', async () => {
+    const handoff = await startHandoffReceiver()
+    const cfg = makeConfig(handoff.urlTemplate)
+    const slackTarget: SlackTargetHandoffContext = {
+      targetId: SLACK_TARGET_ID,
+      hostRef: 'host-1',
+      communicationChannelRef: 'channels/slack-app',
+      providerWorkspaceId: 'T123',
+      replyInThreads: false,
+      replyOnlyWhenMentioned: true,
+    }
+
+    try {
+      const plainMessageCmd = normalizeSlackMessage({
+        type: 'event_callback',
+        team_id: 'T123',
+        event_id: 'Ev-br02-msg-1',
+        event: {
+          type: 'message',
+          user: 'U123',
+          channel: 'C123',
+          text: 'plain text message',
+          ts: '1710000700.000001',
+        },
+      })
+      const appMentionCmd = normalizeSlackMessage({
+        type: 'event_callback',
+        team_id: 'T123',
+        event_id: 'Ev-br02-mention-1',
+        authorizations: [{ team_id: 'T123', user_id: 'UBOTID' }],
+        event: {
+          type: 'app_mention',
+          user: 'U123',
+          channel: 'C123',
+          text: '<@UBOTID> check this',
+          ts: '1710000700.000002',
+        },
+      })
+      const blockActionCmd = normalizeSlackMessage({
+        type: 'block_actions',
+        trigger_id: 'trigger-br02-1',
+        user: { id: 'U123' },
+        team: { id: 'T123' },
+        channel: { id: 'C123' },
+        message: { ts: '1710000700.000003' },
+        actions: [{ value: 'tool:a:aaaaaaaaaaaaaaaa' }],
+      })
+
+      expect(plainMessageCmd?.slackEventType).toBe('message')
+      expect(appMentionCmd?.slackEventType).toBe('app_mention')
+      expect(blockActionCmd?.slackEventType).toBeUndefined()
+
+      expect(await handoffSlackMessageToChannelReader(cfg, slackTarget, plainMessageCmd!)).toEqual({
+        ok: true,
+      })
+      expect(await handoffSlackMessageToChannelReader(cfg, slackTarget, appMentionCmd!)).toEqual({
+        ok: true,
+      })
+      expect(await handoffSlackMessageToChannelReader(cfg, slackTarget, blockActionCmd!)).toEqual({
+        ok: true,
+      })
+
+      expect(handoff.received).toHaveLength(3)
+      expect(handoff.received[0]!.body).toMatchObject({
+        kind: 'slack.message',
+        content: 'plain text message',
+        eventKind: 'event_callback',
+        slackEventType: 'message',
+      })
+      expect(handoff.received[1]!.body).toMatchObject({
+        kind: 'slack.message',
+        content: 'check this',
+        eventKind: 'event_callback',
+        slackEventType: 'app_mention',
+      })
+      expect(handoff.received[2]!.body).toMatchObject({
+        kind: 'slack.message',
+        eventKind: 'block_actions',
+      })
+      expect('slackEventType' in handoff.received[2]!.body).toBe(false)
+    } finally {
+      await handoff.close()
+    }
+  })
+
+  it('forwards_mention_only_app_mention_and_ignores_unhandled_slack_event_callbacks_T_BR14_a', async () => {
+    verifySlackTargetSignature.mockResolvedValue({
+      ok: true,
+      hostRef: 'host-1',
+      communicationChannelRef: 'channels/slack-app',
+      providerWorkspaceId: 'T123',
+      replyInThreads: false,
+      replyOnlyWhenMentioned: true,
+      channelName: 'slack-app',
+      channelNamespace: 'channels',
+    })
+
+    // Direct unit check on normalizeSlackMessage:
+    // - app_mention with only <@UBOTID> and no files returns content: '' + slackEventType: 'app_mention'
+    // - message with empty text and 0 attachments still returns null
+    const normalizedMentionOnly = normalizeSlackMessage(
+      {
+        type: 'event_callback',
+        team_id: 'T123',
+        event_id: 'Ev-br14-unit-mention',
+        authorizations: [{ team_id: 'T123', user_id: 'UBOTID' }],
+        event: {
+          type: 'app_mention',
+          user: 'U123',
+          channel: 'C123',
+          text: '<@UBOTID>',
+          ts: '1710000800.000001',
+        },
+      },
+      { stripLeadingMention: true, stripBotUserId: 'UBOTID' }
+    )
+    expect(normalizedMentionOnly).toMatchObject({
+      content: '',
+      eventKind: 'event_callback',
+      slackEventType: 'app_mention',
+    })
+    const normalizedEmptyMessage = normalizeSlackMessage({
+      type: 'event_callback',
+      team_id: 'T123',
+      event_id: 'Ev-br14-unit-empty-msg',
+      event: {
+        type: 'message',
+        user: 'U123',
+        channel: 'C123',
+        text: '',
+        ts: '1710000800.000002',
+      },
+    })
+    expect(normalizedEmptyMessage).toBeNull()
+
+    const handoff = await startHandoffReceiver()
+    const mcpHost = await startHandoffReceiver()
+    const server = createServer(makeConfig(handoff.urlTemplate, mcpHost.urlTemplate))
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+
+    try {
+      // 1) app_mention with mention-only text and no files -> HTTP 200 and hands off empty content + slackEventType='app_mention'
+      const mentionOnlyRes = await postWebhook(
+        server,
+        'slack',
+        SLACK_TARGET_ID,
+        JSON.stringify({
+          type: 'event_callback',
+          team_id: 'T123',
+          event_id: 'Ev-br14-app-mention-only',
+          authorizations: [{ team_id: 'T123', user_id: 'UBOTID' }],
+          event: {
+            type: 'app_mention',
+            user: 'U123',
+            channel: 'C123',
+            text: '<@UBOTID>',
+            ts: '1710000800.000010',
+          },
+        }),
+        SLACK_HEADERS
+      )
+      expect(mentionOnlyRes).toEqual({ status: 200, body: { ok: true } })
+
+      // 2) Ignored Slack event_callback (message_changed) -> HTTP 200 { ok: true, ignored: true } (never 400)
+      const messageChangedRes = await postWebhook(
+        server,
+        'slack',
+        SLACK_TARGET_ID,
+        JSON.stringify({
+          type: 'event_callback',
+          team_id: 'T123',
+          event_id: 'Ev-br14-msg-changed',
+          event: {
+            type: 'message',
+            subtype: 'message_changed',
+            channel: 'C123',
+            ts: '1710000800.000011',
+          },
+        }),
+        SLACK_HEADERS
+      )
+      expect(messageChangedRes).toEqual({ status: 200, body: { ok: true, ignored: true } })
+
+      // 3) Ignored Slack event_callback (empty-text message without files) -> HTTP 200 { ok: true, ignored: true } (never 400)
+      const emptyMsgRes = await postWebhook(
+        server,
+        'slack',
+        SLACK_TARGET_ID,
+        JSON.stringify({
+          type: 'event_callback',
+          team_id: 'T123',
+          event_id: 'Ev-br14-empty-msg',
+          event: {
+            type: 'message',
+            user: 'U123',
+            channel: 'C123',
+            text: '',
+            ts: '1710000800.000012',
+          },
+        }),
+        SLACK_HEADERS
+      )
+      expect(emptyMsgRes).toEqual({ status: 200, body: { ok: true, ignored: true } })
+
+      // 4) Liveness witness: url_verification still returns challenge
+      const challengeRes = await postWebhook(
+        server,
+        'slack',
+        SLACK_TARGET_ID,
+        JSON.stringify({
+          type: 'url_verification',
+          challenge: 'br14-challenge-token',
+        }),
+        SLACK_HEADERS
+      )
+      expect(challengeRes).toEqual({ status: 200, body: { challenge: 'br14-challenge-token' } })
+
+      // 5) Liveness witness: Slack block_actions approval decision still routes to decision handler (not intercepted as ignored)
+      const blockActionDecisionRes = await postWebhook(
+        server,
+        'slack',
+        SLACK_TARGET_ID,
+        JSON.stringify({
+          type: 'block_actions',
+          trigger_id: 'trigger-br14-decision',
+          user: { id: 'U123' },
+          team: { id: 'T123' },
+          channel: { id: 'C123' },
+          message: { ts: '1710000800.000013' },
+          actions: [{ value: 'approve:00000000-0000-4000-8000-000000000001' }],
+        }),
+        SLACK_HEADERS
+      )
+      expect(blockActionDecisionRes).toEqual({ status: 200, body: { ok: true } })
+
+      await waitForCount(handoff.received, 1)
+      await waitForCount(mcpHost.received, 1)
+
+      expect(handoff.received).toHaveLength(1)
+      expect(handoff.received[0]!.body).toMatchObject({
+        kind: 'slack.message',
+        content: '',
+        eventKind: 'event_callback',
+        slackEventType: 'app_mention',
+        providerChannelId: 'C123',
+        providerMessageTs: '1710000800.000010',
+      })
+      expect(mcpHost.received).toHaveLength(1)
+      expect(mcpHost.received[0]!.path).toBe('/v1/runtime/workflow-approvals/decide')
+      expect(mcpHost.received[0]!.body).toMatchObject({
+        approvalRequestId: '00000000-0000-4000-8000-000000000001',
+        decision: 'approve',
+        providerIdentity: expect.objectContaining({
+          medium: 'slack',
+          providerUserId: 'U123',
+        }),
+      })
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+      await handoff.close()
+      await mcpHost.close()
+    }
+  })
+
+  it('notifies_user_on_unsupported_handoff_kind_during_rolling_upgrade_T_BR17_a', async () => {
+    verifySlackTargetSignature.mockResolvedValue({
+      ok: true,
+      hostRef: 'host-1',
+      communicationChannelRef: 'channels/slack-app',
+      providerWorkspaceId: 'T123',
+      replyInThreads: true,
+      replyOnlyWhenMentioned: false,
+      channelName: 'slack-app',
+      channelNamespace: 'channels',
+    })
+
+    let handoffReply: { status: number; body: unknown } = {
+      status: 400,
+      body: { ok: false, error: 'unsupported_handoff_kind' },
+    }
+    const handoff = await startHandoffReceiver(() => handoffReply)
+    const server = createServer(makeConfig(handoff.urlTemplate))
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+
+    const expectedNotice =
+      'File attachments are temporarily unavailable while the assistant service is upgrading. Please resend your message in a moment.'
+
+    try {
+      // 1) Slack attachment handoff receiving HTTP 400 unsupported_handoff_kind -> sends Slack upgrade notice
+      const slack400Res = await postWebhook(
+        server,
+        'slack',
+        SLACK_TARGET_ID,
+        JSON.stringify({
+          type: 'event_callback',
+          team_id: 'T123',
+          event_id: 'Ev-br17-slack-400',
+          event: {
+            type: 'message',
+            subtype: 'file_share',
+            user: 'U123',
+            channel: 'C123',
+            text: 'please check',
+            ts: '1710000900.000002',
+            thread_ts: '1710000900.000001',
+            files: [{ id: 'F_BR17_1', name: 'doc.pdf', mimetype: 'application/pdf', size: 100 }],
+          },
+        }),
+        SLACK_HEADERS
+      )
+      expect(slack400Res).toEqual({ status: 200, body: { ok: true } })
+
+      // 2) Teams attachment handoff receiving HTTP 400 unsupported_handoff_kind -> sends Teams upgrade notice
+      const teams400Res = await postWebhook(
+        server,
+        'teams',
+        TEAMS_TARGET_ID,
+        JSON.stringify({
+          type: 'message',
+          id: 'teams-br17-act-400',
+          replyToId: 'teams-br17-reply-to',
+          text: 'please check',
+          serviceUrl: 'https://smba.trafficmanager.net/amer/',
+          from: { id: 'teams-user-1' },
+          conversation: {
+            id: '19:abc@thread.tacv2;messageid=9001',
+            conversationType: 'channel',
+            tenantId: 'tenant-1',
+          },
+          channelData: {
+            tenant: { id: 'tenant-1' },
+            channel: { id: '19:abc@thread.tacv2' },
+          },
+          attachments: [
+            {
+              contentType: 'application/vnd.microsoft.teams.file.download.info',
+              name: 'doc.pdf',
+              content: {
+                downloadUrl: 'https://tenant.sharepoint.com/_layouts/15/download.aspx?UniqueId=b17',
+                uniqueId: 'u-br17-1',
+                fileType: 'pdf',
+              },
+            },
+          ],
+        }),
+        TEAMS_HEADERS
+      )
+      expect(teams400Res).toEqual({ status: 200, body: { ok: true } })
+
+      await waitForCount(handoff.received, 2)
+      await vi.waitFor(() => {
+        expect(sendSlackTargetMessage).toHaveBeenCalledTimes(1)
+        expect(sendTeamsTargetMessage).toHaveBeenCalledTimes(1)
+      })
+      expect(sendSlackTargetMessage).toHaveBeenCalledWith(expect.any(Object), {
+        targetId: SLACK_TARGET_ID,
+        channelId: 'C123',
+        text: `<@U123> ${expectedNotice}`,
+        threadTs: '1710000900.000001',
+      })
+      expect(sendTeamsTargetMessage).toHaveBeenCalledWith(expect.any(Object), {
+        targetId: TEAMS_TARGET_ID,
+        conversationId: '19:abc@thread.tacv2',
+        threadConversationId: '19:abc@thread.tacv2;messageid=9001',
+        replyToId: 'teams-br17-reply-to',
+        serviceUrl: 'https://smba.trafficmanager.net/amer/',
+        text: expectedNotice,
+      })
+
+      // 3) Negative assertions with liveness witnesses: HTTP 504 and HTTP 200 do NOT send upgrade notices
+      sendSlackTargetMessage.mockClear()
+      sendTeamsTargetMessage.mockClear()
+
+      handoffReply = { status: 504, body: { ok: false, error: 'gateway_timeout' } }
+      await postWebhook(
+        server,
+        'slack',
+        SLACK_TARGET_ID,
+        JSON.stringify({
+          type: 'event_callback',
+          team_id: 'T123',
+          event_id: 'Ev-br17-slack-504',
+          event: {
+            type: 'message',
+            subtype: 'file_share',
+            user: 'U123',
+            channel: 'C123',
+            text: 'timeout test',
+            ts: '1710000900.000003',
+            files: [{ id: 'F_BR17_2', name: 'doc2.pdf', mimetype: 'application/pdf', size: 100 }],
+          },
+        }),
+        SLACK_HEADERS
+      )
+      await postWebhook(
+        server,
+        'teams',
+        TEAMS_TARGET_ID,
+        JSON.stringify({
+          type: 'message',
+          id: 'teams-br17-act-504',
+          text: 'timeout test',
+          serviceUrl: 'https://smba.trafficmanager.net/amer/',
+          from: { id: 'teams-user-1' },
+          conversation: {
+            id: 'a:personal-chat-br17',
+            conversationType: 'personal',
+            tenantId: 'tenant-1',
+          },
+          channelData: { tenant: { id: 'tenant-1' } },
+          attachments: [
+            {
+              contentType: 'application/vnd.microsoft.teams.file.download.info',
+              name: 'doc2.pdf',
+              content: {
+                downloadUrl: 'https://tenant.sharepoint.com/_layouts/15/download.aspx?UniqueId=b18',
+                uniqueId: 'u-br17-2',
+                fileType: 'pdf',
+              },
+            },
+          ],
+        }),
+        TEAMS_HEADERS
+      )
+
+      await waitForCount(handoff.received, 4)
+
+      handoffReply = { status: 200, body: { ok: true } }
+      await postWebhook(
+        server,
+        'slack',
+        SLACK_TARGET_ID,
+        JSON.stringify({
+          type: 'event_callback',
+          team_id: 'T123',
+          event_id: 'Ev-br17-slack-200',
+          event: {
+            type: 'message',
+            subtype: 'file_share',
+            user: 'U123',
+            channel: 'C123',
+            text: 'ok test',
+            ts: '1710000900.000004',
+            files: [{ id: 'F_BR17_3', name: 'doc3.pdf', mimetype: 'application/pdf', size: 100 }],
+          },
+        }),
+        SLACK_HEADERS
+      )
+      await postWebhook(
+        server,
+        'teams',
+        TEAMS_TARGET_ID,
+        JSON.stringify({
+          type: 'message',
+          id: 'teams-br17-act-200',
+          text: 'ok test',
+          serviceUrl: 'https://smba.trafficmanager.net/amer/',
+          from: { id: 'teams-user-1' },
+          conversation: {
+            id: 'a:personal-chat-br17',
+            conversationType: 'personal',
+            tenantId: 'tenant-1',
+          },
+          channelData: { tenant: { id: 'tenant-1' } },
+          attachments: [
+            {
+              contentType: 'application/vnd.microsoft.teams.file.download.info',
+              name: 'doc3.pdf',
+              content: {
+                downloadUrl: 'https://tenant.sharepoint.com/_layouts/15/download.aspx?UniqueId=b19',
+                uniqueId: 'u-br17-3',
+                fileType: 'pdf',
+              },
+            },
+          ],
+        }),
+        TEAMS_HEADERS
+      )
+
+      // Liveness witness: all 6 handoff POSTs reached channel-reader (2 x 400, 2 x 504, 2 x 200)
+      await waitForCount(handoff.received, 6)
+      await new Promise(resolve => setTimeout(resolve, 25))
+      expect(handoff.received).toHaveLength(6)
+      expect(sendSlackTargetMessage).not.toHaveBeenCalled()
+      expect(sendTeamsTargetMessage).not.toHaveBeenCalled()
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+      await handoff.close()
     }
   })
 })

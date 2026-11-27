@@ -90,6 +90,7 @@ export type ReaderMessageCommand = {
   providerMessageTs: string
   threadTs?: string | null
   eventKind?: 'event_callback' | 'block_actions'
+  slackEventType?: 'message' | 'app_mention'
   attachments?: ProviderAttachmentDescriptorV1[]
   attachmentErrors?: ProviderAttachmentExtractionError[]
   providerChannelType?: string | null
@@ -486,6 +487,7 @@ function slackMessageIdentity(payload: unknown): {
   eventId: string
   threadTs: string | null
   ts: string
+  eventType: 'message' | 'app_mention'
   attachments: ProviderAttachmentDescriptorV1[]
 } | null {
   const body = asRecord(payload)
@@ -513,6 +515,7 @@ function slackMessageIdentity(payload: unknown): {
     eventId,
     ts,
     threadTs: asString(event.thread_ts) || null,
+    eventType,
     attachments,
   }
 }
@@ -884,7 +887,11 @@ export function normalizeSlackMessage(
   if (!message) return null
   if (message.text && /^(?:<@[A-Z0-9]+>\s*)?\/?verify\s+\d{6}$/i.test(message.text)) return null
   const content = slackMessageContent(payload, message.text, options)
-  if (!content && message.attachments.length === 0) return null
+  const allowEmptyAppMentionForHydration =
+    message.eventType === 'app_mention' && message.text.trim().length > 0
+  if (!content && message.attachments.length === 0 && !allowEmptyAppMentionForHydration) {
+    return null
+  }
   return {
     medium: 'slack',
     content,
@@ -895,6 +902,7 @@ export function normalizeSlackMessage(
     providerMessageTs: message.ts,
     threadTs: message.threadTs,
     eventKind: 'event_callback',
+    slackEventType: message.eventType,
     ...(message.attachments.length > 0 ? { attachments: message.attachments } : {}),
   }
 }

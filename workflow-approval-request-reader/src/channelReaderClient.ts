@@ -111,6 +111,7 @@ export async function handoffSlackMessageToChannelReader(
     threadTs: command.threadTs ?? null,
     responseThreadTs,
     ...(command.eventKind ? { eventKind: command.eventKind } : {}),
+    ...(command.slackEventType ? { slackEventType: command.slackEventType } : {}),
     ...(hasAttachments ? { attachments: command.attachments } : {}),
     providerTarget: {
       hostRef: target.hostRef,
