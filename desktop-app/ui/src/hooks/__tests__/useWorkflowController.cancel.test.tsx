@@ -60,6 +60,9 @@ function Harness({ setStatus }: { setStatus: SetStatus }) {
       >
         Cancel latest
       </button>
+      <button type="button" onClick={() => void recent.refresh()}>
+        Refresh runs
+      </button>
     </div>
   )
 }
@@ -108,8 +111,8 @@ afterEach(() => {
 })
 
 describe('useWorkflowController cancelRun', () => {
-  it('cancelRun invalidates the runs query; a failure shows an error and changes nothing', async () => {
-    // Success: the IPC call is made once and the recipe's runs are read again once.
+  it('an accepted cancel shows a success toast and re-reads the row', async () => {
+    // The IPC call is made once and the recipe's runs are read again once.
     let requested = false
     const runs = vi.fn(async () =>
       runsOf(
@@ -140,32 +143,121 @@ describe('useWorkflowController cancelRun', () => {
       global: false,
       toast: true,
     })
-    cleanup()
+  })
 
-    // Failure: an error status, no refetch, the cell unchanged.
-    const failingRuns = vi.fn(async () => runsOf(makeRun()))
-    const failingCancel = vi.fn(async () => {
+  // Each refusal arrives behind Electron's IPC wrapper, as the renderer receives it.
+  const REFUSALS = [
+    {
+      case: 'the run can no longer be canceled',
+      verdict: '409 Conflict: workflow_run_not_cancellable',
+      toast: 'Cancel failed: The run can no longer be canceled.',
+    },
+    {
+      case: 'the run was not found',
+      verdict: '404 Not Found: workflow_run_not_found',
+      toast: 'Cancel failed: The run was not found.',
+    },
+    {
+      case: 'a server without the cancel route',
+      verdict: '404 Not Found: Not Found',
+      toast: 'Cancel failed: 404 Not Found: Not Found',
+    },
+    {
+      case: 'a message that only contains a refusal code',
+      verdict: '500 Internal Server Error: x workflow_run_not_found y',
+      toast: 'Cancel failed: 500 Internal Server Error: x workflow_run_not_found y',
+    },
+  ]
+
+  it.each(REFUSALS)(
+    'a refused cancel shows a readable message and re-reads the row: $case',
+    async refusal => {
+      let refused = false
+      const runs = vi.fn(async () =>
+        runsOf(
+          refused
+            ? makeRun({
+                phase: 'Succeeded',
+                completedAt: '2026-11-26T10:00:20Z',
+                viewerCanCancel: false,
+              })
+            : makeRun()
+        )
+      )
+      const cancelRun = vi.fn(async () => {
+        refused = true
+        throw new Error(
+          `Error invoking remote method 'workflows:cancelRun': Error: ${refusal.verdict}`
+        )
+      })
+      installClerum(runs, cancelRun)
+      const setStatus = vi.fn<SetStatus>()
+      renderHarness(setStatus)
+      await waitFor(() => expect(screen.getByTestId('latest-phase').textContent).toBe('Running'))
+      expect(runs).toHaveBeenCalledTimes(1)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel latest' }))
+
+      await waitFor(() => expect(setStatus).toHaveBeenCalledTimes(1))
+      // Liveness witness: the IPC call was made exactly once.
+      expect(cancelRun).toHaveBeenCalledTimes(1)
+      expect(setStatus).toHaveBeenCalledWith(refusal.toast, 'error')
+      // The row is read again and shows the run's stored phase.
+      await waitFor(() => expect(screen.getByTestId('latest-phase').textContent).toBe('Succeeded'))
+      expect(runs).toHaveBeenCalledTimes(2)
+    }
+  )
+
+  it('a read in flight when the cancel is refused does not win', async () => {
+    const heldRead: { release: (() => void) | null } = { release: null }
+    let reads = 0
+    const runs = vi.fn(async () => {
+      reads += 1
+      if (reads === 1) return runsOf(makeRun())
+      if (reads === 2) {
+        // The Refresh read: held open, it answers the phase it saw before the refusal.
+        await new Promise<void>(resolve => {
+          heldRead.release = resolve
+        })
+        return runsOf(makeRun())
+      }
+      return runsOf(
+        makeRun({ phase: 'Succeeded', completedAt: '2026-11-26T10:00:20Z', viewerCanCancel: false })
+      )
+    })
+    const cancelRun = vi.fn(async () => {
       throw new Error(
         "Error invoking remote method 'workflows:cancelRun': Error: 409 Conflict: workflow_run_not_cancellable"
       )
     })
-    installClerum(failingRuns, failingCancel)
-    const failureStatus = vi.fn<SetStatus>()
-    renderHarness(failureStatus)
+    installClerum(runs, cancelRun)
+    const setStatus = vi.fn<SetStatus>()
+    renderHarness(setStatus)
     await waitFor(() => expect(screen.getByTestId('latest-phase').textContent).toBe('Running'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh runs' }))
+    await waitFor(() => expect(runs).toHaveBeenCalledTimes(2))
+    expect(heldRead.release).not.toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel latest' }))
 
-    await waitFor(() => expect(failureStatus).toHaveBeenCalledTimes(1))
-    // Liveness witness: the IPC call was made exactly once.
-    expect(failingCancel).toHaveBeenCalledTimes(1)
-    expect(failureStatus).toHaveBeenCalledWith(
-      "Cancel failed: Error invoking remote method 'workflows:cancelRun': Error: 409 Conflict: workflow_run_not_cancellable",
+    await waitFor(() => expect(setStatus).toHaveBeenCalledTimes(1))
+    expect(cancelRun).toHaveBeenCalledTimes(1)
+    expect(setStatus).toHaveBeenCalledWith(
+      'Cancel failed: The run can no longer be canceled.',
       'error'
     )
-    expect(failingRuns).toHaveBeenCalledTimes(1)
-    expect(screen.getByTestId('latest-phase').textContent).toBe('Running')
-    expect(screen.getByTestId('latest-cancel-requested').textContent).toBe('none')
+    await waitFor(() => expect(screen.getByTestId('latest-phase').textContent).toBe('Succeeded'))
+
+    // The held Refresh read now answers; the row keeps the newer read.
+    await act(async () => {
+      if (!heldRead.release) throw new Error('the Refresh read was not held')
+      heldRead.release()
+      await new Promise(resolve => setTimeout(resolve, 0))
+    })
+    expect(screen.getByTestId('latest-phase').textContent).toBe('Succeeded')
+    // Both reads were started: the first load, the held Refresh read and the re-read.
+    expect(runs).toHaveBeenCalledTimes(3)
   })
 
   it('refetches while Canceling and stops at a terminal phase', async () => {

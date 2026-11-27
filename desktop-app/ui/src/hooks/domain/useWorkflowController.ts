@@ -8,6 +8,7 @@ import type {
   WorkflowRunsResult,
 } from '../../../../src/types'
 import { buildInitialInputValues } from '../../components/InputContractForm'
+import { stripIpcWrapper } from '../../lib/gfsGrantErrors'
 import { canTriggerWorkflowAsUser, summarizeWorkflowResource } from '../../lib/workflows'
 import type { WorkflowSummary } from '../../workflows.types'
 import { desktopQueryKeys } from './queryKeys'
@@ -22,6 +23,29 @@ const EMPTY_WORKFLOW_RUNS: WorkflowRunsResult['items'] = []
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+// A refused cancel reaches the renderer as `<status> <status text>: <code>` (the
+// Desktop HTTP client's message for the route's `{ error: code }` body) behind
+// Electron's IPC wrapper. Only a verdict of exactly that shape yields a code.
+const CANCEL_REFUSAL_VERDICT = /^\d{3} [^:]*: ([a-z_]+)$/
+
+/**
+ * The text a user reads after a refused cancel: the two refusal codes of the cancel
+ * route get a sentence; any other verdict is shown as it arrived, without the IPC
+ * wrapper.
+ */
+function cancelRunErrorMessage(error: unknown): string {
+  const verdict = stripIpcWrapper(toErrorMessage(error))
+  const code = CANCEL_REFUSAL_VERDICT.exec(verdict)?.[1]
+  switch (code) {
+    case 'workflow_run_not_found':
+      return 'The run was not found.'
+    case 'workflow_run_not_cancellable':
+      return 'The run can no longer be canceled.'
+    default:
+      return verdict
+  }
 }
 
 function isWorkflowApprovalRequestResult(
@@ -426,15 +450,21 @@ export function useWorkflowController(params: UseWorkflowControllerParams) {
 
   const cancelRun = useCallback(
     async (ns: string, name: string, runId: string) => {
+      let refusal: string | null = null
       try {
         await window.clerum.workflows.cancelRun(ns, name, runId)
       } catch (error) {
-        setStatus(`Cancel failed: ${toErrorMessage(error)}`, 'error')
-        return
+        refusal = cancelRunErrorMessage(error)
       }
-      setStatus('Cancel requested.', 'success', undefined, { global: false, toast: true })
-      // The table's Recent Runs cell reads the RECENT_RUNS_LIMIT key; re-read it so the
-      // row shows "Canceling" (or the terminal phase) without a manual Refresh.
+      if (refusal === null) {
+        setStatus('Cancel requested.', 'success', undefined, { global: false, toast: true })
+      } else {
+        setStatus(`Cancel failed: ${refusal}`, 'error')
+      }
+      // The table's Recent Runs cell reads the RECENT_RUNS_LIMIT key; re-read it on both
+      // paths without a manual Refresh. After an accepted cancel the row shows
+      // "Canceling" (or the terminal phase); after a refusal it shows the run's stored
+      // phase, so a run that already ended no longer offers Cancel.
       await queryClient.invalidateQueries({
         queryKey: desktopQueryKeys.workflowRuns(ns, name, RECENT_RUNS_LIMIT),
       })
