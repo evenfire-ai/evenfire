@@ -304,6 +304,17 @@ describe('OIDC member sign-in configuration', () => {
     }
   })
 
+  it.each([
+    ['CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS', 'retired-domain-list.example.test'],
+    ['CONTROL_API_OIDC_REQUIRED_ROLE', 'Retired.Role.Assignment'],
+  ])('fails to load a leftover %s when no registration is set', (name, value) => {
+    const message = refusal({ [name]: value })
+    expect(message).toBe(`Unsupported OIDC configuration field: ${name}`)
+    expect(message).not.toContain(value)
+    // No OIDC settings at all leaves the provider unconfigured.
+    expect(loadOidcProviderConfiguration({}, GENERATION_KEY)).toBeUndefined()
+  })
+
   it('refuses a bad ACCOUNT_CREATION value and a bad team id', () => {
     expect(refusal({ ...OIDC_ENV, CONTROL_API_OIDC_ACCOUNT_CREATION: 'true' })).toBe(
       'Invalid OIDC provider configuration field(s): CONTROL_API_OIDC_ACCOUNT_CREATION'
