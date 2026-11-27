@@ -232,7 +232,7 @@ function withDerivedFileReads(
   if (identity.provenance !== 'native') return own
   const reads = config.toolRegistry.get(name)?.fileReads?.(own.effectiveInput)
   if (reads === undefined) return own
-  const derived = config.guardrails?.derivedFileReadDecision?.(reads)
+  const derived = config.guardrails?.derivedFileReadDecision(reads)
   if (derived === undefined) return own
   if (derived.decision === own.decision || !atLeastAsStrict(derived.decision, own.decision)) {
     return own

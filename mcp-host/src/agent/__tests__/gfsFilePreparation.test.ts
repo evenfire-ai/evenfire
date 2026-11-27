@@ -197,6 +197,7 @@ describe('GFS file preparation', () => {
       errors: params.expectedVersion === 7 ? [] : ['version outside the pinned contract'],
     })
     test.config.guardrails = {
+      derivedFileReadDecision: () => undefined,
       async decide(_identity, params) {
         return {
           decision: 'allow',
@@ -217,6 +218,7 @@ describe('GFS file preparation', () => {
     const test = subject()
     const transformResult = vi.fn(async () => ({ content: '[policy redacted]', isError: false }))
     test.config.guardrails = {
+      derivedFileReadDecision: () => undefined,
       async decide(_identity, params) {
         return {
           decision: 'allow',
@@ -241,6 +243,7 @@ describe('GFS file preparation', () => {
   it('shares the conversation doom-loop state across repeated preparation calls', async () => {
     const test = subject()
     test.config.guardrails = {
+      derivedFileReadDecision: () => undefined,
       async decide(_identity, params) {
         return {
           decision: 'allow',

@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest'
 import type { GuardrailsConfig } from '../../config'
 import type { ToolIdentity } from '../provenance'
-import { buildToolLaneGuardrail } from '../toolLaneAdapter'
+import { type ToolLaneGuardrail, buildToolLaneGuardrail } from '../toolLaneAdapter'
 
 const fileWrite: ToolIdentity = { provenance: 'native', name: 'file_write' }
 
@@ -166,5 +166,19 @@ describe('derivedFileReadDecision', () => {
     )!
     expect(g.derivedFileReadDecision?.({ paths: ['secrets/a.json'] })).toBeUndefined()
     expect(hookCalls).toBe(0)
+  })
+})
+
+describe('ToolLaneGuardrail contract', () => {
+  it('a guardrail without derivedFileReadDecision does not type-check', () => {
+    // A guardrail that omitted the member would skip the derived file_read policy
+    // without notice, so the member is required (checked by tsc --noEmit).
+    // @ts-expect-error derivedFileReadDecision is required
+    const partial: ToolLaneGuardrail = {
+      async decide(_identity, input) {
+        return { decision: 'allow', reasonCode: 'r', effectiveInput: input, source: 'current' }
+      },
+    }
+    expect(partial.derivedFileReadDecision).toBeUndefined()
   })
 })
