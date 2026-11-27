@@ -449,15 +449,27 @@ With no run in progress, only a run started and canceled during the window can b
 **After the deploy.** List the runs whose cancel request did not take effect:
 
 ```sql
-SELECT run_id, recipe_namespace, recipe_name, actor_id, phase, failure_reason,
-       cancel_requested_at, completed_at
+SELECT 'live' AS source, run_id, recipe_namespace, recipe_name, actor_id::text AS user_id,
+       phase, failure_reason, cancel_requested_at, completed_at
   FROM workflow_runs
  WHERE cancel_requested_at IS NOT NULL
    AND phase IN ('Succeeded', 'Failed')
    AND completed_at >= cancel_requested_at
    AND completed_at <= '<time the workflow-recipes rollout finished>'
+UNION ALL
+SELECT 'archived', run_id, recipe_namespace, recipe_name,
+       COALESCE(triggerer_user_id, triggerer_admin_user_id)::text,
+       final_phase, error_message, cancel_requested_at, completed_at
+  FROM workflow_runs_audit
+ WHERE cancel_requested_at IS NOT NULL
+   AND final_phase IN ('Succeeded', 'Failed')
+   AND completed_at >= cancel_requested_at
+   AND completed_at <= '<time the workflow-recipes rollout finished>'
  ORDER BY completed_at;
 ```
+
+Finished runs move to `workflow_runs_audit` after their `ttlSecondsAfterFinished` (30 days when
+unset), so the query reads both tables.
 
 Run all three queries read-only (`PGOPTIONS='-c default_transaction_read_only=on'`). Do not
 rewrite the phase of the listed rows: it records what the run did.
