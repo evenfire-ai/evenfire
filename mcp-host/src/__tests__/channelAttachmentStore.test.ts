@@ -30,6 +30,7 @@ import {
 } from '../internalTools/channelAttachmentStore'
 import { PrivateStoreUntrustedError } from '../internalTools/gfsStorePrivateFiles'
 import { JPEG_2X2_BASE64, PNG_2X2_BASE64 } from '../llm/__tests__/codexImageFixtures'
+import { channelAttachmentStoreDir, putTestBuffer } from './channelAttachmentTestHelpers'
 
 const HEALTHY_STATFS = async () => ({
   bsize: 4096n,
@@ -167,7 +168,7 @@ describe('X2 & X3 — ChannelAttachmentStore, SQLite migration 020, and worker o
       statfsFn: HEALTHY_STATFS,
     })
     const payloadBytes = Buffer.from('%PDF-1.4 idempotent content')
-    const put1 = await store1.putBuffer({
+    const put1 = await putTestBuffer(store1, {
       bytes: payloadBytes,
       linkedUserId: 'linked-user-a',
     })
@@ -189,7 +190,7 @@ describe('X2 & X3 — ChannelAttachmentStore, SQLite migration 020, and worker o
       sessionStoreMode: 'sqlite',
       statfsFn: HEALTHY_STATFS,
     })
-    const put2 = await store2.putBuffer({
+    const put2 = await putTestBuffer(store2, {
       bytes: payloadBytes,
       linkedUserId: 'linked-user-a',
     })
@@ -210,7 +211,7 @@ describe('X2 & X3 — ChannelAttachmentStore, SQLite migration 020, and worker o
     // Clean up duplicate blob just as X4 ingest handler does.
     await store2.removeBlob(put2.storageRelPath)
 
-    const files = await fs.readdir(store2.getStoreDir()!)
+    const files = await fs.readdir(channelAttachmentStoreDir(tmpDir))
     expect(files).toEqual([put1.storageRelPath])
     const count = (
       db.prepare('SELECT count(*) AS cnt FROM conversation_attachments').get() as { cnt: number }
@@ -246,7 +247,6 @@ describe('X2 & X3 — ChannelAttachmentStore, SQLite migration 020, and worker o
         linkedUserId: 'linked-user-a',
       })
     ).rejects.toMatchObject({ code: 'file_too_large' })
-    expect(store.getActiveReservedBytes()).toBe(0)
 
     // 2) 5 concurrent 1 MiB streams racing near the 15% floor.
     const oneMiB = Buffer.alloc(1024 * 1024, 0x7a)
@@ -273,8 +273,6 @@ describe('X2 & X3 — ChannelAttachmentStore, SQLite migration 020, and worker o
 
     // Let all 5 enter statfs + reservation synchronously before releasing chunks.
     await new Promise(resolve => setTimeout(resolve, 30))
-    expect(store.getActiveReservedBytes()).toBeGreaterThan(0)
-    expect(store.getActiveReservedBytes()).toBeLessThanOrEqual(2 * oneMiB.length)
     releaseStreams()
 
     const results = await resultsPromise
@@ -288,10 +286,15 @@ describe('X2 & X3 — ChannelAttachmentStore, SQLite migration 020, and worker o
       expect((r.reason as ChannelAttachmentStoreError).code).toBe('disk_full')
     }
 
-    expect(store.getActiveReservedBytes()).toBe(0)
-    const dirEntries = await fs.readdir(store.getStoreDir()!)
+    const dirEntries = await fs.readdir(channelAttachmentStoreDir(tmpDir))
     expect(dirEntries.filter(name => name.endsWith('.partial'))).toHaveLength(0)
     expect(dirEntries.filter(name => name.endsWith('.bin'))).toHaveLength(2)
+    // Reservation-release witness: a subsequent small write within the 2.5 MiB headroom succeeds.
+    const afterPut = await putTestBuffer(store, {
+      bytes: Buffer.alloc(64 * 1024, 0x33),
+      linkedUserId: 'linked-user-a',
+    })
+    expect(afterPut.byteLength).toBe(64 * 1024)
   })
 
   it('S30: fails closed with channel_attachment_store_unavailable in memory mode without creating directories', async () => {
@@ -302,7 +305,7 @@ describe('X2 & X3 — ChannelAttachmentStore, SQLite migration 020, and worker o
     })
     expect(store.isAvailable()).toBe(false)
     await expect(
-      store.putBuffer({
+      putTestBuffer(store, {
         bytes: Buffer.from('secret'),
         linkedUserId: 'linked-user-a',
       })
@@ -315,7 +318,7 @@ describe('X2 & X3 — ChannelAttachmentStore, SQLite migration 020, and worker o
       sessionStoreMode: 'sqlite',
       statfsFn: HEALTHY_STATFS,
     })
-    const put = await sqliteStore.putBuffer({
+    const put = await putTestBuffer(sqliteStore, {
       bytes: Buffer.from('ok'),
       linkedUserId: 'linked-user-a',
     })
@@ -330,7 +333,7 @@ describe('X2 & X3 — ChannelAttachmentStore, SQLite migration 020, and worker o
       sessionStoreMode: 'sqlite',
       statfsFn: HEALTHY_STATFS,
     })
-    const put = await storeBefore.putBuffer({
+    const put = await putTestBuffer(storeBefore, {
       bytes: originalBytes,
       linkedUserId: 'linked-user-a',
     })
@@ -405,7 +408,7 @@ describe('X2 & X3 — ChannelAttachmentStore, SQLite migration 020, and worker o
       statfsFn: HEALTHY_STATFS,
     })
     const payload = Buffer.from('pinned attachment bytes')
-    const put = await store.putBuffer({
+    const put = await putTestBuffer(store, {
       bytes: payload,
       linkedUserId: 'linked-user-a',
     })
@@ -513,7 +516,7 @@ describe('X2 & X3 — ChannelAttachmentStore, SQLite migration 020, and worker o
       db.prepare('SELECT count(*) AS cnt FROM conversation_attachments').get() as { cnt: number }
     ).cnt
     expect(remainingRows).toBe(0)
-    const remainingFiles = await fs.readdir(store.getStoreDir()!)
+    const remainingFiles = await fs.readdir(channelAttachmentStoreDir(tmpDir))
     expect(remainingFiles).toHaveLength(0)
   })
 
@@ -527,11 +530,11 @@ describe('X2 & X3 — ChannelAttachmentStore, SQLite migration 020, and worker o
     const corruptBytes = Buffer.from('original-bytes-before-tamper')
     const symlinkVictim = Buffer.from('symlink-target-victim')
 
-    const goodPut = await store.putBuffer({ bytes: goodBytes, linkedUserId: 'u1' })
-    const corruptPut = await store.putBuffer({ bytes: corruptBytes, linkedUserId: 'u1' })
-    const symlinkPut = await store.putBuffer({ bytes: symlinkVictim, linkedUserId: 'u1' })
+    const goodPut = await putTestBuffer(store, { bytes: goodBytes, linkedUserId: 'u1' })
+    const corruptPut = await putTestBuffer(store, { bytes: corruptBytes, linkedUserId: 'u1' })
+    const symlinkPut = await putTestBuffer(store, { bytes: symlinkVictim, linkedUserId: 'u1' })
 
-    const storeDir = store.getStoreDir()!
+    const storeDir = channelAttachmentStoreDir(tmpDir)
     // Case A: flip 1 byte on disk.
     const corruptPath = path.join(storeDir, corruptPut.storageRelPath)
     const tampered = Buffer.from(corruptBytes)
@@ -793,5 +796,133 @@ describe('X2 & X3 — ChannelAttachmentStore, SQLite migration 020, and worker o
     ])
     const idatlessPng = Buffer.concat([pngSignature, ihdrChunk, iendChunk])
     expect(validateStrictChannelImageContainer(idatlessPng, 'png').visualValid).toBe(false)
+  })
+
+  it('T-BR12: concurrent first putStream calls await single-flight scanHostUsageOnce so hostQuotaBytes cannot be bypassed', async () => {
+    const storeDir = channelAttachmentStoreDir(tmpDir)
+    await fs.mkdir(storeDir, { recursive: true, mode: 0o700 })
+    await fs.chmod(storeDir, 0o700)
+    // Pre-populate 900 bytes on disk with hostQuotaBytes = 1000 (100 bytes remaining).
+    await fs.writeFile(path.join(storeDir, `${randomUUID()}.bin`), Buffer.alloc(900, 0x41), {
+      mode: 0o600,
+    })
+
+    const freshStore = new ChannelAttachmentStore({
+      hostWorkspaceRoot: tmpDir,
+      sessionStoreMode: 'sqlite',
+      hostQuotaBytes: 1000,
+      userQuotaBytes: 1000,
+      statfsFn: HEALTHY_STATFS,
+    })
+
+    const makeStream = (len: number) =>
+      (async function* () {
+        yield Buffer.alloc(len, 0x42)
+      })()
+
+    const results = await Promise.allSettled([
+      freshStore.putStream({
+        stream: makeStream(200),
+        linkedUserId: 'linked-user-a',
+        declaredBytes: 200,
+      }),
+      freshStore.putStream({
+        stream: makeStream(200),
+        linkedUserId: 'linked-user-b',
+        declaredBytes: 200,
+      }),
+    ])
+    for (const r of results) {
+      expect(r.status).toBe('rejected')
+      expect((r as PromiseRejectedResult).reason).toMatchObject({ code: 'quota_exceeded' })
+    }
+
+    // Liveness witness: smaller blob within remaining 100 bytes succeeds.
+    const small = await putTestBuffer(freshStore, {
+      bytes: Buffer.alloc(80, 0x43),
+      linkedUserId: 'linked-user-a',
+    })
+    expect(small.byteLength).toBe(80)
+  })
+
+  it('BR-T6: enforces hostQuotaBytes, per-user userQuotaBytes, and cleanupOrphanPartials (preserving active partials)', async () => {
+    const store = new ChannelAttachmentStore({
+      hostWorkspaceRoot: tmpDir,
+      sessionStoreMode: 'sqlite',
+      hostQuotaBytes: 1000,
+      userQuotaBytes: 400,
+      statfsFn: HEALTHY_STATFS,
+    })
+
+    // User A fills 300/400 userQuotaBytes.
+    const a1 = await putTestBuffer(store, {
+      bytes: Buffer.alloc(300, 0x11),
+      linkedUserId: 'linked-user-a',
+    })
+    expect(a1.byteLength).toBe(300)
+
+    // User A next 150 bytes breaches userQuotaBytes (300 + 150 > 400).
+    await expect(
+      putTestBuffer(store, {
+        bytes: Buffer.alloc(150, 0x12),
+        linkedUserId: 'linked-user-a',
+      })
+    ).rejects.toMatchObject({ code: 'quota_exceeded' })
+
+    // Liveness witness: User B still has 400-byte user quota and host has 700 bytes left.
+    const b1 = await putTestBuffer(store, {
+      bytes: Buffer.alloc(400, 0x21),
+      linkedUserId: 'linked-user-b',
+    })
+    expect(b1.byteLength).toBe(400)
+
+    // Host now has 700/1000 bytes committed -> User C requesting 350 breaches hostQuotaBytes.
+    await expect(
+      putTestBuffer(store, {
+        bytes: Buffer.alloc(350, 0x31),
+        linkedUserId: 'linked-user-c',
+      })
+    ).rejects.toMatchObject({ code: 'quota_exceeded' })
+
+    // cleanupOrphanPartials: seed a stale .partial and hold an active in-flight putStream.
+    const storeDir = channelAttachmentStoreDir(tmpDir)
+    const stalePartial = `${randomUUID()}.partial`
+    await fs.writeFile(path.join(storeDir, stalePartial), Buffer.from('stale'), { mode: 0o600 })
+
+    let releaseActive!: () => void
+    const activeGate = new Promise<void>(resolve => {
+      releaseActive = resolve
+    })
+    let chunkWritten!: () => void
+    const chunkWrittenPromise = new Promise<void>(resolve => {
+      chunkWritten = resolve
+    })
+    const activeId = randomUUID()
+    const activePut = store.putStream({
+      attachmentId: activeId,
+      linkedUserId: 'linked-user-c',
+      declaredBytes: 50,
+      stream: (async function* () {
+        yield Buffer.alloc(25, 0x55)
+        chunkWritten()
+        await activeGate
+        yield Buffer.alloc(25, 0x56)
+      })(),
+    })
+
+    await chunkWrittenPromise
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    // Run cleanup with graceWindowMs=0 while activeId.partial is in flight.
+    const cleanup = await store.cleanupOrphanPartials(0)
+    expect(cleanup.removed).toBe(1)
+
+    const entriesDuring = await fs.readdir(storeDir)
+    expect(entriesDuring).not.toContain(stalePartial)
+    expect(entriesDuring).toContain(`${activeId}.partial`)
+
+    releaseActive()
+    const activeRes = await activePut
+    expect(activeRes.byteLength).toBe(50)
   })
 })

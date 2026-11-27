@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs/promises'
+import type * as http from 'node:http'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { createIncomingAdmission } from '../agent/incomingAdmission'
 import { AgentStateMachine } from '../agent/stateMachine'
 import { config } from '../config'
+import { ConversationManager } from '../core/conversation/conversation'
 import {
   type StoreHandle,
   makeSqliteStore,
@@ -14,18 +17,25 @@ import { SessionSearchService } from '../core/sessionSearch/service'
 import { SpilloverStorage } from '../core/spillover/storage'
 import { SessionSearchTool } from '../core/tools/sessionSearch'
 import { SpilloverReadTool } from '../core/tools/spilloverRead'
+import { WorkflowBrokerRequestError } from '../core/tools/workflowBrokerClient'
 import { type ChatMessage, ConversationState, FinishReason } from '../core/types'
 import { ChannelAttachmentStore } from '../internalTools/channelAttachmentStore'
 import { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import { PromptCache } from '../llm/promptCache'
+import { mainRpcTestSeams } from '../main'
 import { IncomingMessageHandler, type PendingTaskEntry } from '../messageHandler'
 import { MessageQueue } from '../queue/messageQueue'
 import { ResultStore } from '../resultStore'
 import type { IncomingMessage, ProviderIdentity } from '../server/types'
-import { SessionProcessor, resolveCanonicalSessionKey } from '../session'
+import { SessionProcessor, normalizeSessionChannelId, resolveCanonicalSessionKey } from '../session'
+import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
 import { resolveLinkedUserCallerRootBinding } from '../workspace/callerRootBinding'
 import { ScopedWorkspaceProvider } from '../workspace/scopedWorkspace'
 import { deriveLinkedUserKey } from '../workspace/userKey'
+
+vi.mock('../workflow/providerWorkflowCallerContextClient', () => ({
+  resolveProviderWorkflowCallerContext: vi.fn(),
+}))
 
 const HEALTHY_STATFS = async () => ({
   bsize: 4096n,
@@ -56,15 +66,20 @@ describe('Channel attachment & identity isolation (S68, S71, S72, S73, S77, S78,
   let tmpDir: string
   let dbPath: string
   const origEnableApproval = config.enableApproval
+  const origServerPort = config.serverPort
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'clerum-ch-iso-'))
     dbPath = path.join(tmpDir, 'state.db')
     config.enableApproval = false
+    vi.mocked(resolveProviderWorkflowCallerContext).mockReset()
   })
 
   afterEach(async () => {
     config.enableApproval = origEnableApproval
+    config.serverPort = origServerPort
+    mainRpcTestSeams.setAgent(null)
+    mainRpcTestSeams.setMessageQueue(null)
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 
@@ -104,7 +119,13 @@ describe('Channel attachment & identity isolation (S68, S71, S72, S73, S77, S78,
     const lifecycle = new TaskLifecycle()
     queue.setLifecycle(lifecycle)
     const pendingTaskResults = new ResultStore<PendingTaskEntry>(10 * 60 * 1000, e => e.storedAt)
-    const agent = new AgentStateMachine(queue, lifecycle, { autoStart: false })
+    const agent = new AgentStateMachine(queue, lifecycle, {
+      autoStart: false,
+      channelCallerContextResolver: async msg => {
+        if (!opts.liveUserRef.current) return null
+        return { targetUserId: opts.liveUserRef.current, conversationId: msg.channelId }
+      },
+    })
     agent.setConversationStore(storeHandle.store)
     agent.setChannelAttachmentStore(attachmentStore)
     agent.setSpilloverStorage(spilloverStorage)
@@ -113,10 +134,6 @@ describe('Channel attachment & identity isolation (S68, S71, S72, S73, S77, S78,
     agent.setWorkspaceProvider(workspaceProvider)
     agent.setGfsWorkspaceProvider(gfsWorkspaceProvider)
     agent.setPendingTaskResults(pendingTaskResults)
-    agent.setChannelCallerContextResolver(async msg => {
-      if (!opts.liveUserRef.current) return null
-      return { targetUserId: opts.liveUserRef.current, conversationId: msg.channelId }
-    })
 
     const capturedPrompts: ChatMessage[][] = []
     let callIdx = 0
@@ -985,6 +1002,605 @@ describe('Channel attachment & identity isolation (S68, S71, S72, S73, S77, S78,
       expect(JSON.stringify(stackB.capturedPrompts[1]!)).not.toContain('USERA-SSN-999')
     } finally {
       await stackB.shutdown()
+    }
+  })
+
+  it('T-BR03: external-channel /mode command rotates User A idle session, fires onSessionRotated, and stamps linked_user_id on fresh sessions', async () => {
+    const storeHandle = makeSqliteStore({ dbPath })
+    const manager = new ConversationManager(storeHandle.store)
+    const onSessionRotated = vi.fn()
+    const admit = createIncomingAdmission({
+      limits: { maxCount: 10, maxBytes: 16 * 1024 * 1024, maxFileBytes: 11 * 1024 * 1024 },
+      queueReady: () => true,
+      degradedReason: () => null,
+      hostProvider: () => 'openai',
+      getConversationByKey: async () => undefined,
+      resolveTaskModel: () => null,
+      resolveImageInput: () => undefined,
+      applySessionModelSelection: async () => ({
+        ok: true,
+        provider: 'openai',
+        model: 'gpt-4o',
+        modelSelectionRevision: 1,
+      }),
+      dispatch: async () => ({ success: true, status: 'completed', response: 'dispatched' }),
+      fileReferenceGfs: () => ({ status: 'unsupported' }),
+      getConversationManager: () => manager,
+      onSessionRotated,
+      approvalSnapshot: () => ({
+        effective: {
+          defaultPolicy: 'channel_users',
+          modeCeiling: 'allow_all',
+          channels: { telegram: { enabled: true, allowModeChange: true } },
+        },
+        hostSpec: {
+          defaultPolicy: 'channel_users',
+          modeCeiling: 'allow_all',
+          channels: { telegram: { enabled: true, allowModeChange: true } },
+        },
+      }),
+      logger: { info: vi.fn(), warn: vi.fn() },
+    })
+
+    try {
+      // (a) User A owns idle session on (telegram, chat-br03) with approval_mode = 'auto'.
+      const keyA = resolveCanonicalSessionKey({
+        sender: 'tg-br03',
+        channelType: 'telegram',
+        channelId: 'chat-br03',
+      })
+      const convA = await manager.getOrCreate(keyA, {
+        userId: 'tg-br03',
+        channelType: 'telegram',
+        channelId: 'chat-br03',
+        source: 'telegram',
+        linkedUserId: 'user-a',
+      })
+      await manager.setApprovalMode(
+        convA,
+        'auto',
+        { ceiling: 'allow_all', cap: 'allow_all', channelSwitch: 'allow_all' },
+        'command'
+      )
+
+      // Relinked User B sends approval-mode manual first.
+      const resB = await admit({
+        content: 'approval-mode manual',
+        channelType: 'telegram',
+        channelId: 'chat-br03',
+        sender: 'tg-br03',
+        timestamp: new Date().toISOString(),
+        messageId: 'm-br03-1',
+        hostRef: 'ns/host-iso',
+        admittedLinkedUserId: 'user-b',
+      })
+      expect(resB.success).toBe(true)
+      expect(onSessionRotated).toHaveBeenCalledTimes(1)
+      expect(onSessionRotated).toHaveBeenCalledWith(keyA)
+
+      const rowsA = storeHandle.worker.db
+        .prepare(
+          'SELECT id, state, end_reason, linked_user_id, approval_mode FROM sessions WHERE session_key = ? ORDER BY rowid ASC'
+        )
+        .all(keyA) as Array<{
+        id: string
+        state: string
+        end_reason: string | null
+        linked_user_id: string | null
+        approval_mode: string
+      }>
+      expect(rowsA).toHaveLength(2)
+      expect(rowsA[0]).toMatchObject({
+        id: convA.id,
+        state: 'ended',
+        end_reason: 'identity_changed',
+        linked_user_id: 'user-a',
+      })
+      expect(rowsA[1]).toMatchObject({
+        state: 'idle',
+        linked_user_id: 'user-b',
+        approval_mode: 'manual',
+      })
+
+      // (b) First message on a brand-new chat is approval-mode manual -> row stamped linked_user_id = 'user-b'.
+      const freshKey = resolveCanonicalSessionKey({
+        sender: 'tg-br03-new',
+        channelType: 'telegram',
+        channelId: 'chat-br03-fresh',
+      })
+      const freshRes = await admit({
+        content: 'approval-mode manual',
+        channelType: 'telegram',
+        channelId: 'chat-br03-fresh',
+        sender: 'tg-br03-new',
+        timestamp: new Date().toISOString(),
+        messageId: 'm-br03-2',
+        hostRef: 'ns/host-iso',
+        admittedLinkedUserId: 'user-b',
+      })
+      expect(freshRes.success).toBe(true)
+      const freshRow = storeHandle.worker.db
+        .prepare('SELECT state, linked_user_id FROM sessions WHERE session_key = ?')
+        .get(freshKey) as { state: string; linked_user_id: string | null }
+      expect(freshRow).toEqual({ state: 'idle', linked_user_id: 'user-b' })
+    } finally {
+      await storeHandle.shutdown()
+    }
+  })
+
+  it('T-BR05: same-millisecond session rotation generates distinct UUID Conversation.id and insertSession refuses to un-end ended sessions', async () => {
+    const storeHandle = makeSqliteStore({ dbPath })
+    const manager = new ConversationManager(storeHandle.store)
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_123)
+
+    try {
+      const sessionKey = 'U_BR05:slack:D_BR05:default'
+      const convA = await manager.getOrCreate(sessionKey, {
+        userId: 'U_BR05',
+        channelType: 'slack',
+        channelId: 'D_BR05',
+        source: 'slack',
+        linkedUserId: 'user-a',
+      })
+      await storeHandle.store.rotateSessionOnIdentityChange!({
+        sessionKey,
+        expectedLinkedUserId: 'user-b',
+        endReason: 'identity_changed',
+      })
+      const convB = await manager.getOrCreate(sessionKey, {
+        userId: 'U_BR05',
+        channelType: 'slack',
+        channelId: 'D_BR05',
+        source: 'slack',
+        linkedUserId: 'user-b',
+      })
+
+      expect(convB.id).not.toBe(convA.id)
+
+      const rows = storeHandle.worker.db
+        .prepare(
+          'SELECT id, state, linked_user_id FROM sessions WHERE session_key = ? ORDER BY rowid ASC'
+        )
+        .all(sessionKey) as Array<{ id: string; state: string; linked_user_id: string | null }>
+      expect(rows).toEqual([
+        { id: convA.id, state: 'ended', linked_user_id: 'user-a' },
+        { id: convB.id, state: 'idle', linked_user_id: 'user-b' },
+      ])
+
+      // Direct insertSession replay with User A's ended id MUST NOT un-end User A's row.
+      await storeHandle.store.persistSessionCreate(
+        { ...convA, state: ConversationState.Idle },
+        { userId: 'U_BR05', channelType: 'slack', channelId: 'D_BR05', linkedUserId: 'user-a' }
+      )
+      await storeHandle.persistQueue.drainSessionKey(sessionKey)
+      const rowA = storeHandle.worker.db
+        .prepare('SELECT state FROM sessions WHERE id = ?')
+        .get(convA.id) as { state: string }
+      expect(rowA.state).toBe('ended')
+    } finally {
+      nowSpy.mockRestore()
+      await storeHandle.shutdown()
+    }
+  })
+
+  it('T-BR09 & BR-T4: main.ts handleIncomingMessage reconciles User A pending work on User B admission, preserves same-user work, and surfaces unresolved/503 branches', async () => {
+    config.enableApproval = true
+    config.serverPort = 0
+
+    const storeHandle = makeSqliteStore({ dbPath })
+    const queue = new MessageQueue()
+    const lifecycle = new TaskLifecycle()
+    queue.setLifecycle(lifecycle)
+    let liveUser: string | null = 'linked-user-a'
+    const agent = new AgentStateMachine(queue, lifecycle, {
+      autoStart: false,
+      channelCallerContextResolver: async msg =>
+        liveUser ? { targetUserId: liveUser, conversationId: msg.channelId } : null,
+    })
+    agent.setConversationStore(storeHandle.store)
+    agent.setApprovalConfig({
+      defaultPolicy: 'allow_all',
+      tools: { shell_exec: true },
+    } as never)
+
+    let llmCalls = 0
+    agent.setLLMProvider(
+      {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: vi.fn(async () => {
+          llmCalls += 1
+          if (llmCalls === 1) {
+            return {
+              content: null,
+              tool_calls: [{ id: 'tc-br09', name: 'shell_exec', arguments: { command: 'echo 1' } }],
+              usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+              finish_reason: FinishReason.ToolUse,
+            }
+          }
+          return {
+            content: `ok-${llmCalls}`,
+            tool_calls: null,
+            usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+            finish_reason: FinishReason.Stop,
+          }
+        }),
+        getProviderType: () => 'openai' as const,
+      } as never,
+      'gpt-4o'
+    )
+    agent.setMcpManager({ getAllTools: () => [], callTool: vi.fn() } as never)
+    const sessionProcessor = new SessionProcessor({
+      maxConcurrent: 4,
+      lifecycle,
+      executor: task => agent.executeTask(task),
+    })
+    agent.setSessionProcessor(sessionProcessor)
+
+    mainRpcTestSeams.setAgent(agent)
+    mainRpcTestSeams.setMessageQueue(queue)
+    const rpcServer = await mainRpcTestSeams.startRPCServer()
+    const addr = (rpcServer as unknown as { server: http.Server }).server.address()
+    if (!addr || typeof addr === 'string') throw new Error('Expected TCP port')
+    const baseUrl = `http://127.0.0.1:${addr.port}`
+
+    const identity = slackIdentity('U_BR09', 'D_BR09')
+    const edgeHeaders = {
+      'content-type': 'application/json',
+      'x-clerum-edge-caller': 'channel-reader',
+      'x-clerum-edge-host-ref': config.hostName,
+      'x-clerum-edge-channel-type': 'slack',
+      'x-clerum-edge-channel-id': 'D_BR09',
+      'x-clerum-edge-sender': 'U_BR09',
+    }
+
+    try {
+      // 1) User A creates a suspended approval via agent directly.
+      const pendingTaskResults = new ResultStore<PendingTaskEntry>(10 * 60 * 1000, e => e.storedAt)
+      agent.setPendingTaskResults(pendingTaskResults)
+      const hA = new IncomingMessageHandler(
+        {
+          content: 'Suspend for User A',
+          channelType: 'slack',
+          channelId: 'D_BR09',
+          sender: 'U_BR09',
+          timestamp: new Date().toISOString(),
+          messageId: 'm-br09-a1',
+          hostRef: config.hostName,
+          admittedLinkedUserId: 'linked-user-a',
+          providerIdentity: identity,
+        },
+        {
+          messageQueue: queue,
+          agent,
+          pendingTaskResults,
+          getModel: () => 'gpt-4o',
+          sanitizeAttachments: a => a,
+          sessionProcessor,
+          taskLifecycle: lifecycle,
+        }
+      )
+      const resA = await hA.execute()
+      expect(resA.status).toBe('waiting_approval')
+      expect(agent.getPendingApprovals()).toHaveLength(1)
+
+      // 2) Liveness witness: same-user message via main.ts handleIncomingMessage does NOT purge User A's pending approval!
+      vi.mocked(resolveProviderWorkflowCallerContext).mockResolvedValueOnce({
+        targetUserId: 'linked-user-a',
+        conversationId: 'D_BR09',
+      } as never)
+      const sameUserRes = await fetch(`${baseUrl}/v1/runtime/messages?async=true`, {
+        method: 'POST',
+        headers: edgeHeaders,
+        body: JSON.stringify({
+          content: 'Same user follow-up',
+          channelType: 'slack',
+          channelId: 'D_BR09',
+          sender: 'U_BR09',
+          timestamp: new Date().toISOString(),
+          messageId: 'm-br09-a2',
+          hostRef: config.hostName,
+          providerIdentity: identity,
+        }),
+      })
+      expect(sameUserRes.status).toBe(200)
+      expect(agent.getPendingApprovals()).toHaveLength(1)
+
+      // 3) Transient broker 5xx -> HTTP 503 CHANNEL_IDENTITY_CHECK_UNAVAILABLE, preserves approval!
+      vi.mocked(resolveProviderWorkflowCallerContext).mockRejectedValueOnce(
+        new WorkflowBrokerRequestError(503, 'upstream_down', '503')
+      )
+      const err503 = await fetch(`${baseUrl}/v1/runtime/messages?async=true`, {
+        method: 'POST',
+        headers: edgeHeaders,
+        body: JSON.stringify({
+          content: 'Transient outage',
+          channelType: 'slack',
+          channelId: 'D_BR09',
+          sender: 'U_BR09',
+          timestamp: new Date().toISOString(),
+          messageId: 'm-br09-503',
+          hostRef: config.hostName,
+          providerIdentity: identity,
+        }),
+      })
+      expect(err503.status).toBe(503)
+      expect(await err503.json()).toMatchObject({
+        success: false,
+        error: { code: 'CHANNEL_IDENTITY_CHECK_UNAVAILABLE', retryable: true },
+      })
+      expect(agent.getPendingApprovals()).toHaveLength(1)
+
+      // 4) Relinked User B sends a message -> handleIncomingMessage reconciles & purges User A's pending approval!
+      liveUser = 'linked-user-b'
+      vi.mocked(resolveProviderWorkflowCallerContext).mockResolvedValueOnce({
+        targetUserId: 'linked-user-b',
+        conversationId: 'D_BR09',
+      } as never)
+      const userBRes = await fetch(`${baseUrl}/v1/runtime/messages?async=true`, {
+        method: 'POST',
+        headers: edgeHeaders,
+        body: JSON.stringify({
+          content: 'User B hello',
+          channelType: 'slack',
+          channelId: 'D_BR09',
+          sender: 'U_BR09',
+          timestamp: new Date().toISOString(),
+          messageId: 'm-br09-b1',
+          hostRef: config.hostName,
+          providerIdentity: identity,
+        }),
+      })
+      expect(userBRes.status).toBe(200)
+      expect(agent.getPendingApprovals()).toHaveLength(0)
+
+      // 5) Unresolved identity -> HTTP 200 CHANNEL_IDENTITY_UNRESOLVED
+      vi.mocked(resolveProviderWorkflowCallerContext).mockRejectedValueOnce(
+        new WorkflowBrokerRequestError(404, 'medium_account_not_found', 'not linked')
+      )
+      const unresolved = await fetch(`${baseUrl}/v1/runtime/messages?async=true`, {
+        method: 'POST',
+        headers: edgeHeaders,
+        body: JSON.stringify({
+          content: 'Unlinked sender',
+          channelType: 'slack',
+          channelId: 'D_BR09',
+          sender: 'U_BR09',
+          timestamp: new Date().toISOString(),
+          messageId: 'm-br09-unres',
+          hostRef: config.hostName,
+          providerIdentity: identity,
+        }),
+      })
+      expect(unresolved.status).toBe(200)
+      expect(await unresolved.json()).toMatchObject({
+        success: false,
+        error: { code: 'CHANNEL_IDENTITY_UNRESOLVED', retryable: false },
+      })
+    } finally {
+      await rpcServer.stop()
+      await agent.stop()
+      await storeHandle.shutdown()
+    }
+  })
+
+  it('T-BR11: PromptCache scopes hits and dailyLogSnapshot by linkedUserId and skips promptCache.set on identity abort', async () => {
+    const liveUser = { current: 'linked-user-a' as string | null }
+    const stack = makeStack({ dbPath, tmpDir, liveUserRef: liveUser })
+    const sessionKey = resolveCanonicalSessionKey({
+      sender: 'U_BR11',
+      channelType: 'slack',
+      channelId: 'D_BR11',
+    })
+
+    try {
+      await stack.workspaceProvider.forLinkedUser('linked-user-a').appendDailyLog('DAILY-A-1101')
+      await stack.workspaceProvider.forLinkedUser('linked-user-b').appendDailyLog('DAILY-B-1102')
+
+      // 1) User A populates PromptCache with linkedUserId = 'linked-user-a'.
+      const rA = await stack.send({
+        content: 'Turn A',
+        channelType: 'slack',
+        channelId: 'D_BR11',
+        sender: 'U_BR11',
+        timestamp: new Date().toISOString(),
+        messageId: 'm-br11-a1',
+        hostRef: 'ns/host-iso',
+        admittedLinkedUserId: 'linked-user-a',
+        providerIdentity: slackIdentity('U_BR11', 'D_BR11'),
+      })
+      expect(rA.success).toBe(true)
+      const cachedA = stack.promptCache.get(sessionKey)
+      expect(cachedA?.linkedUserId).toBe('linked-user-a')
+      expect(cachedA?.dailyLogSnapshot).toContain('DAILY-A-1101')
+
+      // 2) Even if cache entry for User A is still present, User B MUST miss it and rebuild fresh dailyLogSnapshot!
+      liveUser.current = 'linked-user-b'
+      const wsB = stack.workspaceProvider.forLinkedUser('linked-user-b')
+      const snapSpy = vi.spyOn(wsB, 'snapshotDailyLogs')
+      const origForLinkedUser = stack.workspaceProvider.forLinkedUser.bind(stack.workspaceProvider)
+      vi.spyOn(stack.workspaceProvider, 'forLinkedUser').mockImplementation(id =>
+        id === 'linked-user-b' ? wsB : origForLinkedUser(id)
+      )
+
+      // Re-seed User A's entry right before User B executes (simulating race where drop was missed)
+      stack.promptCache.set(sessionKey, cachedA!)
+      const rB1 = await stack.send({
+        content: 'Turn B1',
+        channelType: 'slack',
+        channelId: 'D_BR11',
+        sender: 'U_BR11',
+        timestamp: new Date().toISOString(),
+        messageId: 'm-br11-b1',
+        hostRef: 'ns/host-iso',
+        admittedLinkedUserId: 'linked-user-b',
+        providerIdentity: slackIdentity('U_BR11', 'D_BR11'),
+      })
+      expect(rB1.success).toBe(true)
+      expect(snapSpy).toHaveBeenCalledTimes(1)
+      const cachedB = stack.promptCache.get(sessionKey)
+      expect(cachedB?.linkedUserId).toBe('linked-user-b')
+      expect(cachedB?.dailyLogSnapshot).toContain('DAILY-B-1102')
+      expect(cachedB?.dailyLogSnapshot).not.toContain('DAILY-A-1101')
+
+      // Liveness witness: second turn for User B hits cache (snapshotDailyLogs still called once!).
+      const rB2 = await stack.send({
+        content: 'Turn B2',
+        channelType: 'slack',
+        channelId: 'D_BR11',
+        sender: 'U_BR11',
+        timestamp: new Date().toISOString(),
+        messageId: 'm-br11-b2',
+        hostRef: 'ns/host-iso',
+        admittedLinkedUserId: 'linked-user-b',
+        providerIdentity: slackIdentity('U_BR11', 'D_BR11'),
+      })
+      expect(rB2.success).toBe(true)
+      expect(snapSpy).toHaveBeenCalledTimes(1)
+
+      // 3) Identity abort during readIdentityFiles() MUST skip promptCache.set!
+      const abortKey = resolveCanonicalSessionKey({
+        sender: 'U_BR11_ABORT',
+        channelType: 'slack',
+        channelId: 'D_BR11_ABORT',
+      })
+      const setSpy = vi.spyOn(stack.promptCache, 'set')
+      let enteredRead!: () => void
+      const enteredReadPromise = new Promise<void>(resolve => {
+        enteredRead = resolve
+      })
+      let releaseRead!: () => void
+      const readGate = new Promise<void>(resolve => {
+        releaseRead = resolve
+      })
+      const wsAbort = origForLinkedUser('linked-user-c')
+      const origReadIdentity = wsAbort.readIdentityFiles.bind(wsAbort)
+      const readSpy = vi.spyOn(wsAbort, 'readIdentityFiles').mockImplementation(async () => {
+        enteredRead()
+        await readGate
+        return origReadIdentity()
+      })
+      vi.spyOn(stack.workspaceProvider, 'forLinkedUser').mockImplementation(id =>
+        id === 'linked-user-c' ? wsAbort : origForLinkedUser(id)
+      )
+
+      liveUser.current = 'linked-user-c'
+      const abortTurn = stack.send({
+        content: 'Turn C aborted mid prompt build',
+        channelType: 'slack',
+        channelId: 'D_BR11_ABORT',
+        sender: 'U_BR11_ABORT',
+        timestamp: new Date().toISOString(),
+        messageId: 'm-br11-c1',
+        hostRef: 'ns/host-iso',
+        admittedLinkedUserId: 'linked-user-c',
+        providerIdentity: slackIdentity('U_BR11_ABORT', 'D_BR11_ABORT'),
+      })
+      await enteredReadPromise
+
+      const reconcile = stack.agent.reconcileChannelIdentity({
+        medium: 'slack',
+        workspaceOrTargetKey: 'T_WS_1',
+        providerUserId: 'U_BR11_ABORT',
+        channelScope: null,
+        liveLinkedUserId: 'linked-user-d',
+      })
+      releaseRead()
+      await reconcile
+      await abortTurn.catch(() => undefined)
+
+      expect(readSpy).toHaveBeenCalledTimes(1)
+      expect(setSpy.mock.calls.filter(([k]) => k === abortKey)).toHaveLength(0)
+      expect(stack.promptCache.has(abortKey)).toBe(false)
+    } finally {
+      await stack.shutdown()
+    }
+  })
+
+  it('T-BR25: normalizeSessionChannelId strips mid-string ;messageid=...;extra=1 on Teams consistently with rootTeamsConversationId', () => {
+    expect(normalizeSessionChannelId('teams', '19:abc@thread.tacv2;messageid=123;extra=1')).toBe(
+      '19:abc@thread.tacv2'
+    )
+    expect(normalizeSessionChannelId('teams', '19:abc@thread.tacv2;messageid=123')).toBe(
+      '19:abc@thread.tacv2'
+    )
+    expect(normalizeSessionChannelId('teams', '19:abc@thread.tacv2?messageid=123&foo=bar')).toBe(
+      '19:abc@thread.tacv2'
+    )
+    // Liveness witness: non-Teams channel IDs are not stripped.
+    expect(normalizeSessionChannelId('slack', 'C123;messageid=1;extra=2')).toBe(
+      'C123;messageid=1;extra=2'
+    )
+  })
+
+  it('BR-T4: IncomingMessageHandler.duplicateSuppressedResponse blocks cross-user replay while allowing same-user replay', async () => {
+    const lifecycle = new TaskLifecycle()
+    const queue = new MessageQueue()
+    queue.setLifecycle(lifecycle)
+    const pendingTaskResults = new ResultStore<PendingTaskEntry>(10 * 60 * 1000, e => e.storedAt)
+
+    const priorMsg: IncomingMessage = {
+      content: 'Prior turn',
+      channelType: 'slack',
+      channelId: 'D_DUP',
+      sender: 'U_DUP',
+      timestamp: new Date().toISOString(),
+      messageId: 'm-dup-guard',
+      hostRef: 'ns/host-iso',
+      admittedLinkedUserId: 'linked-user-a',
+      providerIdentity: slackIdentity('U_DUP', 'D_DUP'),
+    }
+    const priorTask = queue.createTaskFromMessage(priorMsg, async () => undefined, 'normal')
+    lifecycle.register(priorTask)
+    lifecycle.transition(priorTask.id, 'processing', 'dispatched')
+    lifecycle.transition(priorTask.id, 'completed', 'natural', {
+      response: 'USERA-PRIOR-SECRET-REPLY',
+    })
+
+    // Force a duplicate_delivery collision in MessageQueue.admit (simulating any collision path).
+    const admitStub = vi.spyOn(queue, 'admit').mockReturnValue({
+      admitted: false,
+      reason: 'duplicate_delivery',
+      priorTaskId: priorTask.id,
+      prior: lifecycle.get(priorTask.id)!,
+    } as never)
+
+    try {
+      const dummyAgent = new AgentStateMachine(queue, lifecycle, { autoStart: false })
+      // Cross-user User B attempt MUST be refused with approval_identity_mismatch and 0 response leak.
+      const crossUserHandler = new IncomingMessageHandler(
+        { ...priorMsg, admittedLinkedUserId: 'linked-user-b' },
+        {
+          messageQueue: queue,
+          agent: dummyAgent,
+          pendingTaskResults,
+          getModel: () => 'gpt-4o',
+          sanitizeAttachments: a => a,
+          taskLifecycle: lifecycle,
+        }
+      )
+      const crossRes = crossUserHandler.executeAsync()
+      expect(crossRes.success).toBe(false)
+      expect(crossRes.error?.code).toBe('approval_identity_mismatch')
+      expect(crossRes.response).toBeUndefined()
+
+      // Liveness witness: same-user User A replay succeeds and returns the prior response.
+      const sameUserHandler = new IncomingMessageHandler(
+        { ...priorMsg, admittedLinkedUserId: 'linked-user-a' },
+        {
+          messageQueue: queue,
+          agent: dummyAgent,
+          pendingTaskResults,
+          getModel: () => 'gpt-4o',
+          sanitizeAttachments: a => a,
+          taskLifecycle: lifecycle,
+        }
+      )
+      const sameRes = sameUserHandler.executeAsync()
+      expect(sameRes.success).toBe(true)
+      expect(sameRes.status).toBe('completed')
+      expect(sameRes.response).toBe('USERA-PRIOR-SECRET-REPLY')
+    } finally {
+      admitStub.mockRestore()
     }
   })
 })

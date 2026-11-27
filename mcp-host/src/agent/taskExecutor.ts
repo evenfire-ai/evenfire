@@ -788,8 +788,9 @@ export class TaskExecutor {
         )
       }
 
+      const currentReceived = this.hydratedChannelAttachments.filter(item => item.isCurrentTurn)
       const persistedUserInput = isChannelAttachmentOnly
-        ? attachmentOnlyUserInputMarker(msg?.channelAttachmentIds?.length ?? 0)
+        ? attachmentOnlyUserInputMarker(currentReceived.length)
         : rawUserInput
 
       // Auto-title (spec 15 / #1640 R32): skip on attachment-only turns and
@@ -841,7 +842,6 @@ export class TaskExecutor {
       // Issue #1640 (X9): deterministic early exit for attachment-only channel
       // turns — ZERO LLM calls, ZERO tool executions.
       if (isChannelAttachmentOnly) {
-        const currentReceived = this.hydratedChannelAttachments.filter(item => item.isCurrentTurn)
         const confirmation = buildAttachmentOnlyConfirmationReply({
           received: currentReceived,
           ingestErrors: msg?.attachmentIngestErrors,
@@ -890,17 +890,17 @@ export class TaskExecutor {
         logger.info({ taskId: this.taskId }, 'Task cancelled')
       }
     } catch (error) {
+      if (this.identityAbortReason !== null) {
+        logger.info(
+          { taskId: this.taskId, reason: this.identityAbortReason },
+          'Task unwound cleanly after channel identity abort'
+        )
+        return
+      }
       if (
         this.abortController.signal.aborted &&
         !(this.abortController.signal.reason instanceof TaskLimitError)
       ) {
-        if (this.identityAbortReason !== null) {
-          logger.info(
-            { taskId: this.taskId, reason: this.identityAbortReason },
-            'Task unwound cleanly after channel identity abort'
-          )
-          return
-        }
         if (this.conversation)
           await this.handleLoopResult({ type: 'cancelled', reason: 'signal_aborted' })
         return
@@ -1283,6 +1283,13 @@ export class TaskExecutor {
         logger.info({ taskId: this.taskId }, 'Task cancelled')
       }
     } catch (error) {
+      if (this.identityAbortReason !== null) {
+        logger.info(
+          { taskId: this.taskId, reason: this.identityAbortReason },
+          'Task unwound cleanly after channel identity abort'
+        )
+        return
+      }
       if (
         this.legacyApprovalBudget &&
         !this.abortController.signal.aborted &&
@@ -1302,13 +1309,6 @@ export class TaskExecutor {
         this.abortController.signal.aborted &&
         !(this.abortController.signal.reason instanceof TaskLimitError)
       ) {
-        if (this.identityAbortReason !== null) {
-          logger.info(
-            { taskId: this.taskId, reason: this.identityAbortReason },
-            'Task unwound cleanly after channel identity abort'
-          )
-          return
-        }
         if (this.conversation)
           await this.handleLoopResult({ type: 'cancelled', reason: 'signal_aborted' })
         return
@@ -1470,12 +1470,18 @@ export class TaskExecutor {
    * `expiresAt`, whichever comes first: expiry is absolute and a pin never
    * protects an expired copy.
    */
+  private resolveGfsStoreCallerIdentity(): string {
+    return this.resolvedLinkedUserId
+      ? gfsStoreCallerIdentityForLinkedUser(this.resolvedLinkedUserId)
+      : gfsStoreCallerIdentity(this.task.sourceMessage)
+  }
+
   private settleGfsRetentionOwner(): Promise<void> {
     if (this.state === 'waiting_approval' && !this.abortController.signal.aborted)
       return Promise.resolve()
     if (this.gfsRetentionOwnerSettlement) return this.gfsRetentionOwnerSettlement
     this.gfsRetentionOwnerSettlement = (async () => {
-      const callerIdentity = gfsStoreCallerIdentity(this.task.sourceMessage)
+      const callerIdentity = this.resolveGfsStoreCallerIdentity()
       const store = this.deps.gfsDownloadStore
       if (!store?.isAvailable()) return
       try {
@@ -1719,6 +1725,7 @@ export class TaskExecutor {
           : undefined,
         attachedFiles,
         channelImages,
+        attachmentIngestErrors: this.task.sourceMessage?.attachmentIngestErrors,
         attachmentSave: saveAvailable
           ? { images: attachedImagesForTurnContext(this.task.sourceMessage?.attachments) }
           : undefined,
@@ -1812,7 +1819,9 @@ export class TaskExecutor {
         try {
           await this.deps.conversationManager.completeTurn(this.conversation!, content)
         } catch (err) {
-          await this.deps.conversationManager.failTurn(this.conversation!)
+          if (this.identityAbortReason === null) {
+            await this.deps.conversationManager.failTurn(this.conversation!)
+          }
           throw err
         }
         if (this.identityAbortReason !== null) {
@@ -1830,6 +1839,13 @@ export class TaskExecutor {
       }
 
       case 'need_approval': {
+        if (this.identityAbortReason !== null) {
+          logger.info(
+            { taskId: this.taskId, reason: this.identityAbortReason },
+            'Suppressing approval suspension after channel identity abort'
+          )
+          break
+        }
         // C15/C16 — every pause (first, legacy re-pause, connect re-pause)
         // funnels through here, so the turn's attachment read ledger is stamped
         // inside the existing `task_budget` JSON column. Compaction cannot
@@ -1858,9 +1874,16 @@ export class TaskExecutor {
             result.approval
           )
         } catch (err) {
-          if (!result.approval.replaces_request_id)
+          if (!result.approval.replaces_request_id && this.identityAbortReason === null)
             await this.deps.conversationManager.failTurn(this.conversation!)
           throw err
+        }
+        if (this.identityAbortReason !== null) {
+          logger.info(
+            { taskId: this.taskId, reason: this.identityAbortReason },
+            'Suppressing approval registration after channel identity abort'
+          )
+          break
         }
         if (result.approval.replaces_request_id) this.legacyApprovalBudget = false
         const reporter = progressReporterRegistry.get(this.taskId)
@@ -2710,8 +2733,15 @@ export class TaskExecutor {
     // R2 — the system prompt embeds the model name, so a cache entry built for a
     // different (e.g. just-swapped) model is a miss: rebuild, but keep the frozen
     // dailyLogSnapshot so the daily-freeze invariant holds.
+    // BR-11 — external-channel prompt cache entries are scoped by linkedUserId
+    // so a relinked user never inherits the prior user's cached prompt or
+    // dailyLogSnapshot.
+    const linkedUserMatches =
+      cached !== undefined &&
+      (cached.linkedUserId ?? undefined) === (this.resolvedLinkedUserId ?? undefined)
     if (
-      cached?.parts &&
+      linkedUserMatches &&
+      cached.parts &&
       cached.model === this.deps.modelName &&
       cached.provider === provider &&
       cached.toolGuidanceKey === toolGuidanceKey
@@ -2719,7 +2749,8 @@ export class TaskExecutor {
       return cached.parts
 
     const dailyLogSnapshot =
-      cached?.dailyLogSnapshot ?? (await this.workspaceService.snapshotDailyLogs(2))
+      (linkedUserMatches ? cached?.dailyLogSnapshot : undefined) ??
+      (await this.workspaceService.snapshotDailyLogs(2))
     const identityFiles = await this.workspaceService.readIdentityFiles()
     const builder = new DefaultPromptBuilder({
       nativeToolPresentation: appConfig.nativeToolPresentation,
@@ -2766,12 +2797,18 @@ export class TaskExecutor {
         : '',
       memoryGuidance: hasMemoryTools ? MEMORY_GUIDANCE_TEXT : '',
     })
+    if (this.identityAbortReason !== null) {
+      return parts
+    }
     this.deps.promptCache.set(sessionKey, {
       parts,
       dailyLogSnapshot,
       model: this.deps.modelName,
       provider,
       toolGuidanceKey,
+      ...(this.resolvedLinkedUserId !== undefined
+        ? { linkedUserId: this.resolvedLinkedUserId }
+        : {}),
     })
     // P1-005: persist the stable_hash for auditability and so post-eviction
     // rebuilds in the same session can verify identity-files didn't drift.
@@ -2944,9 +2981,7 @@ export class TaskExecutor {
     // it never depends on the MCP presentation resolved above.
     const nativeAuto = appConfig.nativeToolPresentation === 'auto'
     // The store is keyed like the caller root, never by the raw sender.
-    const gfsCallerIdentity = this.resolvedLinkedUserId
-      ? gfsStoreCallerIdentityForLinkedUser(this.resolvedLinkedUserId)
-      : gfsStoreCallerIdentity(this.task.sourceMessage)
+    const gfsCallerIdentity = this.resolveGfsStoreCallerIdentity()
     const gfsWorkspace = gfsManagedWorkspaceExecution({
       approvalEnabled: appConfig.enableApproval,
       source: this.task.source,
@@ -3346,7 +3381,9 @@ export class TaskExecutor {
     const imageItems = this.hydratedChannelAttachments.filter(item => item.isImage)
     if (imageItems.length === 0) return null
 
-    const messageId = this.task.sourceMessage?.messageId?.trim() || this.task.id
+    const rawMessageId = this.task.sourceMessage?.messageId?.trim() ?? ''
+    const V2_IMAGE_SOURCE_ID_RE = /^[A-Za-z0-9._:/-]{1,128}$/
+    const messageId = V2_IMAGE_SOURCE_ID_RE.test(rawMessageId) ? rawMessageId : this.task.id
     const bindSource = this.providerChainRequiresImageSourceIdentity()
     const loader =
       this.deps.channelAttachmentStore && this.resolvedLinkedUserId && this.sessionKey

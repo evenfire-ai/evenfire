@@ -6,6 +6,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { buildAttachmentFileReference, classifyBytes } from '@clerum/gfs-interaction-policy'
 import { AgentStateMachine } from '../agent/stateMachine'
+import { TaskLimitError } from '../agent/taskExecutionBudget'
 import { config } from '../config'
 import {
   type StoreHandle,
@@ -25,11 +26,15 @@ import { PNG_2X2_BASE64 } from '../llm/__tests__/codexImageFixtures'
 import { PromptCache } from '../llm/promptCache'
 import { handleProviderMessageAuthorization, mainRpcTestSeams } from '../main'
 import { IncomingMessageHandler, type PendingTaskEntry } from '../messageHandler'
+import { progressReporterRegistry } from '../progress/sseProgressReporter'
 import { MessageQueue } from '../queue/messageQueue'
 import { ResultStore } from '../resultStore'
 import type { IncomingMessage, ProviderIdentity } from '../server/types'
 import { SessionProcessor, resolveCanonicalSessionKey } from '../session'
+import { parseSessionKey } from '../session/types'
+import { workspaceOrTargetKeyForIdentity } from '../workflow/channelIdentity'
 import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
+import { putTestBuffer } from './channelAttachmentTestHelpers'
 
 vi.mock('../workflow/providerWorkflowCallerContextClient', () => ({
   resolveProviderWorkflowCallerContext: vi.fn(),
@@ -84,7 +89,7 @@ async function seedAttachment(params: {
     channelId,
     threadId: params.threadId,
   })
-  const put = await params.store.putBuffer({ bytes: params.bytes, linkedUserId })
+  const put = await putTestBuffer(params.store, { bytes: params.bytes, linkedUserId })
   const classification = classifyBytes({
     bytes: params.bytes,
     totalByteLength: params.bytes.length,
@@ -152,6 +157,7 @@ describe('Channel attachment approval resume, revocation, CAS races, scoping & l
     config.serverPort = origServerPort
     mainRpcTestSeams.setAgent(null)
     mainRpcTestSeams.setMessageQueue(null)
+    mainRpcTestSeams.setTaskLifecycle(null)
     await fs.rm(tmpDir, { recursive: true, force: true })
   })
 
@@ -183,13 +189,15 @@ describe('Channel attachment approval resume, revocation, CAS races, scoping & l
     const lifecycle = new TaskLifecycle()
     queue.setLifecycle(lifecycle)
     const pendingTaskResults = new ResultStore<PendingTaskEntry>(10 * 60 * 1000, e => e.storedAt)
-    const agent = new AgentStateMachine(queue, lifecycle, { autoStart: false })
+    const resolverSpy = vi.fn(opts.resolveCaller)
+    const agent = new AgentStateMachine(queue, lifecycle, {
+      autoStart: false,
+      channelCallerContextResolver: resolverSpy,
+    })
     agent.setConversationStore(storeHandle.store)
     agent.setChannelAttachmentStore(attachmentStore)
     agent.setPromptCache(promptCache)
     agent.setPendingTaskResults(pendingTaskResults)
-    const resolverSpy = vi.fn(opts.resolveCaller)
-    agent.setChannelCallerContextResolver(resolverSpy)
     agent.setApprovalConfig({
       defaultPolicy: 'allow_all',
       tools: opts.approvalTools ?? { shell_exec: true, srv__gated_action: true },
@@ -1122,6 +1130,7 @@ describe('Channel attachment approval resume, revocation, CAS races, scoping & l
 
     mainRpcTestSeams.setAgent(agent)
     mainRpcTestSeams.setMessageQueue(queue)
+    mainRpcTestSeams.setTaskLifecycle(lifecycle)
     const rpcServer = await mainRpcTestSeams.startRPCServer()
     const rawServer = (rpcServer as unknown as { server: http.Server }).server
     const addr = rawServer.address()
@@ -1637,6 +1646,797 @@ describe('Channel attachment approval resume, revocation, CAS races, scoping & l
       expect(rowAfterIdle).toBeNull()
     } finally {
       await pod.shutdown()
+    }
+  })
+
+  it('BR-T1 & T-BR01-d: real HTTP /v1/runtime/tasks/:id/result serves 200 completed/waiting_approval/failed for owner, cancelled pre-purge, 404 post-purge, and 403 wrong edge caller', async () => {
+    config.enableApproval = true
+    config.serverPort = 0
+
+    const storeHandle = makeSqliteStore({ dbPath })
+    const queue = new MessageQueue()
+    const lifecycle = new TaskLifecycle()
+    queue.setLifecycle(lifecycle)
+    let llmMode: 'complete' | 'suspend' | 'fail' = 'complete'
+
+    const agent = mainRpcTestSeams.createAgent(queue, lifecycle)
+    agent.setConversationStore(storeHandle.store)
+    agent.setApprovalConfig({
+      defaultPolicy: 'allow_all',
+      tools: { srv__gated_action: true },
+    } as never)
+    agent.setLLMProvider(
+      {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: vi.fn(async () => {
+          if (llmMode === 'fail') {
+            throw new Error('simulated-llm-failure-brt1')
+          }
+          if (llmMode === 'suspend') {
+            return {
+              content: null,
+              tool_calls: [
+                { id: 'tc-brt1', name: 'srv__gated_action', arguments: { note: 'brt1' } },
+              ],
+              usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+              finish_reason: FinishReason.ToolUse,
+            }
+          }
+          return {
+            content: 'OWNER-COMPLETED-WITNESS-BRT1',
+            tool_calls: null,
+            usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+            finish_reason: FinishReason.Stop,
+          }
+        }),
+        getProviderType: () => 'openai' as const,
+        classifyError: (err: unknown) => ({
+          code: 'LLM_API_CALL_FAILED',
+          retryable: false,
+          message: err instanceof Error ? err.message : String(err),
+        }),
+      } as never,
+      'gpt-4o'
+    )
+    agent.setMcpManager({
+      getAllTools: () => [
+        {
+          name: 'srv__gated_action',
+          description: 'Gated tool for BR-T1',
+          inputSchema: { type: 'object', properties: { note: { type: 'string' } } },
+          serverName: 'srv',
+        },
+      ],
+      callTool: vi.fn(async () => ({ content: [{ type: 'text', text: 'ok' }] })),
+    } as never)
+    const sessionProcessor = new SessionProcessor({
+      maxConcurrent: 4,
+      lifecycle,
+      executor: task => agent.executeTask(task),
+    })
+    agent.setSessionProcessor(sessionProcessor)
+
+    mainRpcTestSeams.setAgent(agent)
+    mainRpcTestSeams.setMessageQueue(queue)
+    mainRpcTestSeams.setTaskLifecycle(lifecycle)
+    const rpcServer = await mainRpcTestSeams.startRPCServer()
+    const addr = (rpcServer as unknown as { server: http.Server }).server.address()
+    if (!addr || typeof addr === 'string') throw new Error('Expected TCP port')
+    const baseUrl = `http://127.0.0.1:${addr.port}`
+
+    const identity = makeIdentity('telegram', 'u-brt1', 'chat-brt1')
+    const edgeHeaders = {
+      'content-type': 'application/json',
+      'x-clerum-edge-caller': 'channel-reader',
+      'x-clerum-edge-host-ref': config.hostName,
+      'x-clerum-edge-channel-type': 'telegram',
+      'x-clerum-edge-channel-id': 'chat-brt1',
+      'x-clerum-edge-sender': 'u-brt1',
+    }
+
+    const submitAndDispatch = async (msgId: string, channelId = 'chat-brt1') => {
+      const headers = { ...edgeHeaders, 'x-clerum-edge-channel-id': channelId }
+      const res = await fetch(`${baseUrl}/v1/runtime/messages?async=true`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          content: `turn ${msgId}`,
+          channelType: 'telegram',
+          channelId,
+          sender: 'u-brt1',
+          timestamp: new Date().toISOString(),
+          messageId: msgId,
+          hostRef: config.hostName,
+          providerIdentity: makeIdentity('telegram', 'u-brt1', channelId),
+        }),
+      })
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { success: boolean; taskId?: string }
+      expect(body.success).toBe(true)
+      const taskId = body.taskId!
+      const admitted = queue.getTask(taskId)!
+      sessionProcessor.enqueue(
+        resolveCanonicalSessionKey({
+          sender: 'u-brt1',
+          channelType: 'telegram',
+          channelId,
+        }),
+        admitted
+      )
+      return taskId
+    }
+
+    try {
+      vi.mocked(resolveProviderWorkflowCallerContext).mockResolvedValue({
+        targetUserId: 'linked-user-a',
+        conversationId: 'chat-brt1',
+      } as never)
+
+      // 1) Positive 200 witness: completed task
+      llmMode = 'complete'
+      const completedId = await submitAndDispatch('m-brt1-completed')
+      await vi.waitFor(() => expect(lifecycle.getStatus(completedId)).toBe('completed'))
+      const pollCompleted = await fetch(`${baseUrl}/v1/runtime/tasks/${completedId}/result`, {
+        headers: edgeHeaders,
+      })
+      expect(pollCompleted.status).toBe(200)
+      expect(await pollCompleted.json()).toMatchObject({
+        success: true,
+        status: 'completed',
+        response: 'OWNER-COMPLETED-WITNESS-BRT1',
+      })
+
+      // 2) Unauthorized edge caller -> 401; wrong sender -> 404 (ownership mismatch)
+      const wrongCaller = await fetch(`${baseUrl}/v1/runtime/tasks/${completedId}/result`, {
+        headers: {
+          ...edgeHeaders,
+          'x-clerum-edge-caller': 'unauthorized-caller',
+        },
+      })
+      expect(wrongCaller.status).toBe(401)
+      const wrongSender = await fetch(`${baseUrl}/v1/runtime/tasks/${completedId}/result`, {
+        headers: {
+          ...edgeHeaders,
+          'x-clerum-edge-sender': 'u-other-caller',
+        },
+      })
+      expect(wrongSender.status).toBe(404)
+
+      // 3) Positive 200 witness: failed task
+      llmMode = 'fail'
+      const failedId = await submitAndDispatch('m-brt1-failed', 'chat-brt1-fail')
+      await vi.waitFor(() => expect(lifecycle.getStatus(failedId)).toBe('failed'))
+      const pollFailed = await fetch(`${baseUrl}/v1/runtime/tasks/${failedId}/result`, {
+        headers: { ...edgeHeaders, 'x-clerum-edge-channel-id': 'chat-brt1-fail' },
+      })
+      expect(pollFailed.status).toBe(200)
+      expect(await pollFailed.json()).toMatchObject({
+        success: false,
+        status: 'completed',
+        error: expect.objectContaining({
+          message: expect.stringContaining('simulated-llm-failure-brt1'),
+        }),
+      })
+
+      // 4) Positive 200 witness: waiting_approval task, then revoked/purged -> 404
+      llmMode = 'suspend'
+      const waitingId = await submitAndDispatch('m-brt1-wait', 'chat-brt1-wait')
+      await vi.waitFor(() => expect(agent.getPendingApprovals()).toHaveLength(1))
+      const pollWaiting = await fetch(`${baseUrl}/v1/runtime/tasks/${waitingId}/result`, {
+        headers: { ...edgeHeaders, 'x-clerum-edge-channel-id': 'chat-brt1-wait' },
+      })
+      expect(pollWaiting.status).toBe(200)
+      expect(await pollWaiting.json()).toMatchObject({
+        success: true,
+        status: 'waiting_approval',
+        approval: expect.objectContaining({ taskId: waitingId }),
+      })
+
+      // Revoke and purge waiting task via reconcileChannelIdentity -> poll returns 404!
+      await agent.reconcileChannelIdentity({
+        medium: 'telegram',
+        workspaceOrTargetKey: workspaceOrTargetKeyForIdentity(
+          makeIdentity('telegram', 'u-brt1', 'chat-brt1-wait')
+        ),
+        providerUserId: 'u-brt1',
+        channelScope: 'chat-brt1-wait',
+        liveLinkedUserId: null,
+      })
+      const pollAfterRevoke = await fetch(`${baseUrl}/v1/runtime/tasks/${waitingId}/result`, {
+        headers: { ...edgeHeaders, 'x-clerum-edge-channel-id': 'chat-brt1-wait' },
+      })
+      expect(pollAfterRevoke.status).toBe(404)
+
+      // 5) T-BR01-d: pre-purge cancelled task returns 200 { success: false, status: 'cancelled' }!
+      const cancelledTask = queue.createTaskFromMessage(
+        {
+          content: 'cancel me',
+          channelType: 'telegram',
+          channelId: 'chat-brt1-cancel',
+          sender: 'u-brt1',
+          timestamp: new Date().toISOString(),
+          messageId: 'm-brt1-cancel',
+          hostRef: config.hostName,
+          admittedLinkedUserId: 'linked-user-a',
+          providerIdentity: makeIdentity('telegram', 'u-brt1', 'chat-brt1-cancel'),
+        },
+        async () => undefined,
+        'normal'
+      )
+      lifecycle.register(cancelledTask)
+      lifecycle.transition(cancelledTask.id, 'cancelled', 'user_requested')
+
+      const pollCancelled = await fetch(`${baseUrl}/v1/runtime/tasks/${cancelledTask.id}/result`, {
+        headers: { ...edgeHeaders, 'x-clerum-edge-channel-id': 'chat-brt1-cancel' },
+      })
+      expect(pollCancelled.status).toBe(200)
+      expect(await pollCancelled.json()).toEqual({
+        success: false,
+        status: 'cancelled',
+      })
+    } finally {
+      await rpcServer.stop()
+      await agent.stop()
+      await storeHandle.shutdown()
+    }
+  })
+
+  it('BR-T2 (mcp-host): real HTTP POST /v1/runtime/approvals/{approve,deny} returns 503 retryable (retaining approval), 409 in-flight, and 403 {cancelled:true} on revocation', async () => {
+    config.enableApproval = true
+    config.serverPort = 0
+
+    let brokerMode: 'userA' | 'revoked' | 'error503' | 'hold' = 'userA'
+    let releaseHold!: () => void
+    let holdPromise = new Promise<void>(resolve => {
+      releaseHold = resolve
+    })
+
+    const storeHandle = makeSqliteStore({ dbPath })
+    const queue = new MessageQueue()
+    const lifecycle = new TaskLifecycle()
+    queue.setLifecycle(lifecycle)
+    const agent = new AgentStateMachine(queue, lifecycle, {
+      autoStart: false,
+      channelCallerContextResolver: async msg => {
+        if (brokerMode === 'hold') {
+          await holdPromise
+          return { targetUserId: 'linked-user-a', conversationId: msg.channelId }
+        }
+        if (brokerMode === 'error503') {
+          throw new WorkflowBrokerRequestError(503, 'upstream_down', '503')
+        }
+        if (brokerMode === 'revoked') {
+          throw new WorkflowBrokerRequestError(404, 'medium_account_not_found', 'revoked')
+        }
+        return { targetUserId: 'linked-user-a', conversationId: msg.channelId }
+      },
+    })
+    agent.setConversationStore(storeHandle.store)
+    agent.setApprovalConfig({
+      defaultPolicy: 'allow_all',
+      tools: { shell_exec: true },
+    } as never)
+
+    let nextSuspend = true
+    agent.setLLMProvider(
+      {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: vi.fn(async () => {
+          if (nextSuspend) {
+            nextSuspend = false
+            return {
+              content: null,
+              tool_calls: [
+                { id: 'tc-brt2', name: 'shell_exec', arguments: { command: 'echo ok' } },
+              ],
+              usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+              finish_reason: FinishReason.ToolUse,
+            }
+          }
+          return {
+            content: 'done',
+            tool_calls: null,
+            usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+            finish_reason: FinishReason.Stop,
+          }
+        }),
+        getProviderType: () => 'openai' as const,
+      } as never,
+      'gpt-4o'
+    )
+    agent.setMcpManager({ getAllTools: () => [], callTool: vi.fn() } as never)
+    const sessionProcessor = new SessionProcessor({
+      maxConcurrent: 4,
+      lifecycle,
+      executor: task => agent.executeTask(task),
+    })
+    agent.setSessionProcessor(sessionProcessor)
+
+    mainRpcTestSeams.setAgent(agent)
+    mainRpcTestSeams.setMessageQueue(queue)
+    mainRpcTestSeams.setTaskLifecycle(lifecycle)
+    const rpcServer = await mainRpcTestSeams.startRPCServer()
+    const addr = (rpcServer as unknown as { server: http.Server }).server.address()
+    if (!addr || typeof addr === 'string') throw new Error('Expected TCP port')
+    const baseUrl = `http://127.0.0.1:${addr.port}`
+
+    const pendingTaskResults = new ResultStore<PendingTaskEntry>(10 * 60 * 1000, e => e.storedAt)
+    agent.setPendingTaskResults(pendingTaskResults)
+
+    const suspendTurn = async (channelId: string) => {
+      nextSuspend = true
+      const handler = new IncomingMessageHandler(
+        {
+          content: `run in ${channelId}`,
+          channelType: 'telegram',
+          channelId,
+          sender: 'u-brt2',
+          timestamp: new Date().toISOString(),
+          messageId: `m-${channelId}-${randomUUID().slice(0, 6)}`,
+          hostRef: config.hostName,
+          admittedLinkedUserId: 'linked-user-a',
+          providerIdentity: makeIdentity('telegram', 'u-brt2', channelId),
+        },
+        {
+          messageQueue: queue,
+          agent,
+          pendingTaskResults,
+          getModel: () => 'gpt-4o',
+          sanitizeAttachments: a => a,
+          sessionProcessor,
+          taskLifecycle: lifecycle,
+        }
+      )
+      const res = await handler.execute()
+      expect(res.status).toBe('waiting_approval')
+      return res.approval!.requestId
+    }
+
+    const postDecision = (action: 'approve' | 'deny', requestId: string, channelId: string) =>
+      fetch(`${baseUrl}/v1/runtime/approvals/${action}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-clerum-edge-caller': 'channel-reader',
+          'x-clerum-edge-host-ref': config.hostName,
+          'x-clerum-edge-channel-type': 'telegram',
+          'x-clerum-edge-channel-id': channelId,
+          'x-clerum-edge-sender': 'u-brt2',
+        },
+        body: JSON.stringify({
+          userId: 'u-brt2',
+          requestId,
+          channelType: 'telegram',
+          channelId,
+          ...(action === 'approve' ? { alwaysApprove: false } : {}),
+        }),
+      })
+
+    try {
+      // 1) 503 retryable retains approval, 409 blocks concurrent double-click, then retry succeeds (liveness witness).
+      const req1 = await suspendTurn('chat-brt2-1')
+      brokerMode = 'error503'
+      const res503 = await postDecision('approve', req1, 'chat-brt2-1')
+      expect(res503.status).toBe(503)
+      expect(await res503.json()).toMatchObject({
+        success: false,
+        retryable: true,
+        error: 'approval_identity_check_unavailable',
+      })
+      expect(agent.getPendingApprovals().map(a => a.requestId)).toContain(req1)
+
+      brokerMode = 'hold'
+      const firstReqPromise = postDecision('approve', req1, 'chat-brt2-1')
+      await new Promise(resolve => setTimeout(resolve, 25))
+      const res409 = await postDecision('approve', req1, 'chat-brt2-1')
+      expect(res409.status).toBe(409)
+      expect(await res409.json()).toMatchObject({
+        success: false,
+        error: 'approval_decision_in_flight',
+      })
+      releaseHold()
+      const firstRes = await firstReqPromise
+      expect(firstRes.status).toBe(200)
+      expect(await firstRes.json()).toMatchObject({ success: true })
+
+      // 2) Revoked approval on /approve -> 403 { success: false, cancelled: true }
+      brokerMode = 'userA'
+      const req2 = await suspendTurn('chat-brt2-2')
+      brokerMode = 'revoked'
+      const res403Approve = await postDecision('approve', req2, 'chat-brt2-2')
+      expect(res403Approve.status).toBe(403)
+      expect(await res403Approve.json()).toMatchObject({
+        success: false,
+        cancelled: true,
+        error: 'approval_identity_revoked',
+      })
+      expect(agent.getPendingApprovals().map(a => a.requestId)).not.toContain(req2)
+
+      // 3) Revoked approval on /deny -> 403 { success: false, cancelled: true }
+      brokerMode = 'userA'
+      const req3 = await suspendTurn('chat-brt2-3')
+      brokerMode = 'revoked'
+      const res403Deny = await postDecision('deny', req3, 'chat-brt2-3')
+      expect(res403Deny.status).toBe(403)
+      expect(await res403Deny.json()).toMatchObject({
+        success: false,
+        cancelled: true,
+        error: 'approval_identity_revoked',
+      })
+      expect(agent.getPendingApprovals().map(a => a.requestId)).not.toContain(req3)
+    } finally {
+      await rpcServer.stop()
+      await agent.stop()
+      await storeHandle.shutdown()
+    }
+  })
+
+  it('T-BR07-a, T-BR07-b & T-BR07-c: identity abort suppresses need_approval (pre & post suspendForApproval), TaskLimitError/failTurn catch writes, and Step 4 purges approvalMap', async () => {
+    const pod = buildPod({
+      dbPath,
+      tmpDir,
+      resolveCaller: async msg => ({
+        targetUserId: 'linked-user-a',
+        conversationId: msg.channelId,
+      }),
+      llmResponder: async () => ({
+        content: null,
+        tool_calls: [{ id: 'tc-br07', name: 'srv__gated_action', arguments: { note: 'br07' } }],
+        finish_reason: FinishReason.ToolUse,
+      }),
+    })
+
+    try {
+      const cm = pod.agent.getConversationManager()
+      const origSuspend = cm.suspendForApproval.bind(cm)
+      const origComplete = cm.completeTurn.bind(cm)
+      const failTurnSpy = vi.spyOn(cm, 'failTurn')
+
+      // --- T-BR07-a (1): Liveness witness — without abort, onApprovalNeeded IS called & DB state === awaiting_approval ---
+      const witnessRes = await pod.send({
+        content: 'Witness suspend',
+        channelType: 'slack',
+        channelId: 'D_BR07_WITNESS',
+        sender: 'u-br07',
+        timestamp: new Date().toISOString(),
+        messageId: 'm-br07-witness',
+        hostRef: 'ns/host-appr',
+        admittedLinkedUserId: 'linked-user-a',
+        providerIdentity: makeIdentity('slack', 'u-br07', 'D_BR07_WITNESS', 'W07'),
+      })
+      expect(witnessRes.status).toBe('waiting_approval')
+      const witnessKey = resolveCanonicalSessionKey({
+        sender: 'u-br07',
+        channelType: 'slack',
+        channelId: 'D_BR07_WITNESS',
+      })
+      const witnessRow = pod.storeHandle.worker.db
+        .prepare('SELECT state FROM sessions WHERE session_key = ?')
+        .get(witnessKey) as { state: string }
+      expect(witnessRow.state).toBe('awaiting_approval')
+
+      // --- T-BR07-a (2): Abort during await suspendForApproval -> emitSuspended & onApprovalNeeded NOT called ---
+      let suspendEntered!: () => void
+      const suspendEnteredPromise = new Promise<void>(resolve => {
+        suspendEntered = resolve
+      })
+      let releaseSuspend!: () => void
+      const suspendGate = new Promise<void>(resolve => {
+        releaseSuspend = resolve
+      })
+      const suspendSpy = vi.spyOn(cm, 'suspendForApproval').mockImplementationOnce(async (c, a) => {
+        suspendEntered()
+        await suspendGate
+        return origSuspend(c, a)
+      })
+      const approvalNeededEvents: unknown[] = []
+      pod.agent.on('tool:approval_needed', e => approvalNeededEvents.push(e))
+
+      const racePromise = pod.send({
+        content: 'Suspend raced by identity abort',
+        channelType: 'slack',
+        channelId: 'D_BR07_A',
+        sender: 'u-br07-a',
+        timestamp: new Date().toISOString(),
+        messageId: 'm-br07-a',
+        hostRef: 'ns/host-appr',
+        admittedLinkedUserId: 'linked-user-a',
+        providerIdentity: makeIdentity('slack', 'u-br07-a', 'D_BR07_A', 'W07'),
+      })
+      await suspendEnteredPromise
+
+      // Register a spy reporter for this taskId to verify emitSuspended is NOT called.
+      const activeExecutors = (
+        pod.agent as unknown as {
+          activeExecutors: Map<
+            string,
+            { abortForIdentity: (r: 'identity_changed' | 'identity_revoked') => void }
+          >
+          approvalMap: Map<
+            string,
+            {
+              taskId: string
+              timerId?: ReturnType<typeof setTimeout>
+              registeredAt: Date
+              binding: Record<string, unknown>
+            }
+          >
+        }
+      ).activeExecutors
+      const racedTaskId = Array.from(activeExecutors.keys()).find(
+        id => id !== witnessRes.approval!.taskId
+      )!
+      const emitSuspendedSpy = vi.fn()
+      progressReporterRegistry.set(racedTaskId, { emitSuspended: emitSuspendedSpy } as never)
+
+      const reconcilePromise = pod.agent.reconcileChannelIdentity({
+        medium: 'slack',
+        workspaceOrTargetKey: 'W07',
+        providerUserId: 'u-br07-a',
+        channelScope: null,
+        liveLinkedUserId: 'linked-user-b',
+      })
+      releaseSuspend()
+      await reconcilePromise
+      await racePromise.catch(() => undefined)
+      progressReporterRegistry.delete(racedTaskId)
+
+      expect(suspendSpy).toHaveBeenCalledTimes(1)
+      expect(emitSuspendedSpy).toHaveBeenCalledTimes(0)
+      expect(approvalNeededEvents).toHaveLength(0)
+      const racedKey = resolveCanonicalSessionKey({
+        sender: 'u-br07-a',
+        channelType: 'slack',
+        channelId: 'D_BR07_A',
+      })
+      const racedRow = pod.storeHandle.worker.db
+        .prepare('SELECT state FROM sessions WHERE session_key = ?')
+        .get(racedKey) as { state: string }
+      expect(racedRow.state).toBe('ended')
+
+      // --- T-BR07-b: TaskLimitError + abortForIdentity in run() AND suspendForApproval throwing while identityAbortReason !== null ---
+      failTurnSpy.mockClear()
+      let limitThrowEntered!: () => void
+      const limitThrowEnteredPromise = new Promise<void>(resolve => {
+        limitThrowEntered = resolve
+      })
+      let releaseLimitThrow!: () => void
+      const limitThrowGate = new Promise<void>(resolve => {
+        releaseLimitThrow = resolve
+      })
+      const completeTurnSpy = vi
+        .spyOn(cm, 'completeTurn')
+        .mockImplementation(async (c, r) => origComplete(c, r))
+      vi.spyOn(cm, 'suspendForApproval').mockImplementationOnce(async () => {
+        limitThrowEntered()
+        await limitThrowGate
+        throw new TaskLimitError('TASK_DURATION_LIMIT', 'duration hit during abort')
+      })
+
+      const failSpyEvents: unknown[] = []
+      pod.agent.on('task:failed', e => failSpyEvents.push(e))
+
+      const limitRace = pod.send({
+        content: 'TaskLimitError during identity abort',
+        channelType: 'slack',
+        channelId: 'D_BR07_B',
+        sender: 'u-br07-b',
+        timestamp: new Date().toISOString(),
+        messageId: 'm-br07-b',
+        hostRef: 'ns/host-appr',
+        admittedLinkedUserId: 'linked-user-a',
+        providerIdentity: makeIdentity('slack', 'u-br07-b', 'D_BR07_B', 'W07'),
+      })
+      await limitThrowEnteredPromise
+      const reconcileB = pod.agent.reconcileChannelIdentity({
+        medium: 'slack',
+        workspaceOrTargetKey: 'W07',
+        providerUserId: 'u-br07-b',
+        channelScope: null,
+        liveLinkedUserId: null,
+      })
+      releaseLimitThrow()
+      await reconcileB
+      await limitRace.catch(() => undefined)
+
+      expect(failTurnSpy).toHaveBeenCalledTimes(0)
+      expect(completeTurnSpy).toHaveBeenCalledTimes(0)
+      expect(failSpyEvents).toHaveLength(0)
+
+      // Liveness witness for T-BR07-b: without abortForIdentity, TaskLimitError DOES call failTurn and emit task:failed!
+      vi.spyOn(cm, 'suspendForApproval').mockRejectedValueOnce(
+        new TaskLimitError('TASK_DURATION_LIMIT', 'normal duration limit')
+      )
+      const normalLimitRes = await pod.send({
+        content: 'Normal TaskLimitError',
+        channelType: 'slack',
+        channelId: 'D_BR07_B_WITNESS',
+        sender: 'u-br07-bw',
+        timestamp: new Date().toISOString(),
+        messageId: 'm-br07-bw',
+        hostRef: 'ns/host-appr',
+        admittedLinkedUserId: 'linked-user-a',
+        providerIdentity: makeIdentity('slack', 'u-br07-bw', 'D_BR07_B_WITNESS', 'W07'),
+      })
+      expect(normalLimitRes.success).toBe(false)
+      expect(failTurnSpy).toHaveBeenCalled()
+      expect(failSpyEvents.length).toBeGreaterThan(0)
+
+      // --- T-BR07-c: Step 4 purges any approvalMap entry matching the aborted processing taskId ---
+      let step4Entered!: () => void
+      const step4EnteredPromise = new Promise<void>(resolve => {
+        step4Entered = resolve
+      })
+      let releaseStep4!: () => void
+      const step4Gate = new Promise<void>(resolve => {
+        releaseStep4 = resolve
+      })
+      pod.llmMock.mockImplementationOnce(async () => {
+        step4Entered()
+        await step4Gate
+        return {
+          content: 'late reply',
+          tool_calls: null,
+          usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+          finish_reason: FinishReason.Stop,
+        }
+      })
+
+      const step4Turn = pod.send({
+        content: 'Processing with stray approvalMap entry',
+        channelType: 'slack',
+        channelId: 'D_BR07_C',
+        sender: 'u-br07-c',
+        timestamp: new Date().toISOString(),
+        messageId: 'm-br07-c',
+        hostRef: 'ns/host-appr',
+        admittedLinkedUserId: 'linked-user-a',
+        providerIdentity: makeIdentity('slack', 'u-br07-c', 'D_BR07_C', 'W07'),
+      })
+      await step4EnteredPromise
+
+      const step4TaskId = Array.from(activeExecutors.keys()).find(
+        id => id !== witnessRes.approval!.taskId
+      )!
+      const approvalMap = (
+        pod.agent as unknown as {
+          approvalMap: Map<
+            string,
+            {
+              taskId: string
+              timerId?: ReturnType<typeof setTimeout>
+              registeredAt: Date
+              binding: Record<string, unknown>
+            }
+          >
+        }
+      ).approvalMap
+      approvalMap.set('req-stray-step4', {
+        taskId: step4TaskId,
+        registeredAt: new Date(),
+        binding: { channelType: 'slack', userId: 'u-br07-c', channelId: 'D_BR07_C' },
+      })
+      expect(approvalMap.has('req-stray-step4')).toBe(true)
+
+      const reconcileC = pod.agent.reconcileChannelIdentity({
+        medium: 'slack',
+        workspaceOrTargetKey: 'W07',
+        providerUserId: 'u-br07-c',
+        channelScope: null,
+        liveLinkedUserId: 'linked-user-b',
+      })
+      releaseStep4()
+      await reconcileC
+      await step4Turn.catch(() => undefined)
+
+      expect(approvalMap.has('req-stray-step4')).toBe(false)
+    } finally {
+      await pod.coldCrash()
+    }
+  })
+
+  it('T-BR08-a & T-BR08-b: bootstrap() reaps legacy colon-bearing Teams approval with source_message=NULL while preserving rpc approval, and parseSessionKey handles Teams & colon-bearing threadIds', async () => {
+    // --- T-BR08-b: parseSessionKey unit tests ---
+    expect(parseSessionKey('29:aad:teams:19:room@thread.tacv2:default')).toEqual({
+      userId: '29:aad',
+      channelType: 'teams',
+      channelId: '19:room@thread.tacv2',
+      threadId: undefined,
+    })
+    expect(parseSessionKey('u1:teams:19:room@thread.tacv2:default')).toEqual({
+      userId: 'u1',
+      channelType: 'teams',
+      channelId: '19:room@thread.tacv2',
+      threadId: undefined,
+    })
+    expect(parseSessionKey('29:aad:teams:19:room@thread.tacv2:170001')).toEqual({
+      userId: '29:aad',
+      channelType: 'teams',
+      channelId: '19:room@thread.tacv2',
+      threadId: '170001',
+    })
+    expect(parseSessionKey('u1:slack:C1:t:1')).toEqual({
+      userId: 'u1',
+      channelType: 'slack',
+      channelId: 'C1',
+      threadId: 't:1',
+    })
+    expect(parseSessionKey('foo:bar')).toBeNull()
+
+    // --- T-BR08-a: cold-boot reap of legacy Teams approval with source_message = NULL ---
+    const pod = buildPod({
+      dbPath,
+      tmpDir,
+      resolveCaller: async msg => ({
+        targetUserId: 'linked-user-a',
+        conversationId: msg.channelId,
+      }),
+    })
+    try {
+      const db = pod.storeHandle.worker.db
+      const now = Math.floor(Date.now() / 1000)
+      const teamsKey = '29:aad-user-1:teams:19:abc@thread.tacv2:default'
+      const rpcKey = 'desk-user-br08:rpc:agent-1:chat-br08'
+
+      db.prepare(
+        `INSERT INTO sessions (
+          id, session_key, source, user_id, channel_type, channel_id, started_at, last_activity_at,
+          turn_count, message_count, tool_call_count, input_tokens, output_tokens,
+          cache_read_tokens, cache_write_tokens, cache_tokens_reported, state, active_task_id, approval_mode, linked_user_id
+        ) VALUES ('sess-teams-br08', ?, 'teams', '29:aad-user-1', 'teams', '19:abc@thread.tacv2', ?, ?, 1, 1, 0, 0, 0, 0, 0, 0, 'awaiting_approval', 'task-teams-br08', 'manual', NULL)`
+      ).run(teamsKey, now - 60, now - 60)
+      db.prepare(
+        `INSERT INTO pending_approvals (
+          request_id, session_id, task_id, tool_name, tool_call_id, parameters, description,
+          context_snapshot, source_message, task_budget, registered_at, expires_at
+        ) VALUES ('req-teams-br08', 'sess-teams-br08', 'task-teams-br08', 'shell_exec', 'tc-1', '{}', 'legacy teams', '[]', NULL, 'legacy', ?, ?)`
+      ).run(now - 60, now + 3600)
+
+      // Sibling Desktop rpc approval (liveness witness: MUST survive bootstrap)
+      db.prepare(
+        `INSERT INTO sessions (
+          id, session_key, source, user_id, channel_type, channel_id, thread_id, started_at, last_activity_at,
+          turn_count, message_count, tool_call_count, input_tokens, output_tokens,
+          cache_read_tokens, cache_write_tokens, cache_tokens_reported, state, active_task_id, approval_mode, linked_user_id
+        ) VALUES ('sess-rpc-br08', ?, 'rpc', 'desk-user-br08', 'rpc', 'agent-1', 'chat-br08', ?, ?, 1, 1, 0, 0, 0, 0, 0, 0, 'awaiting_approval', 'task-rpc-br08', 'manual', NULL)`
+      ).run(rpcKey, now - 60, now - 60)
+      db.prepare(
+        `INSERT INTO pending_approvals (
+          request_id, session_id, task_id, tool_name, tool_call_id, parameters, description,
+          context_snapshot, source_message, task_budget, registered_at, expires_at
+        ) VALUES ('req-rpc-br08', 'sess-rpc-br08', 'task-rpc-br08', 'shell_exec', 'tc-2', '{}', 'desktop', ?, ?, ?, ?, ?)`
+      ).run(
+        JSON.stringify([{ role: 'user', content: 'desktop task' }]),
+        JSON.stringify({
+          content: 'desktop task',
+          channelType: 'rpc',
+          channelId: 'agent-1',
+          threadId: 'chat-br08',
+          sender: 'desk-user-br08',
+          timestamp: new Date().toISOString(),
+          messageId: 'm-rpc-br08',
+          hostRef: 'ns/host',
+        }),
+        JSON.stringify({
+          elapsedActiveMs: 0,
+          iterationsUsed: 1,
+          durationMs: 86_400_000,
+          maxIterations: 1000,
+        }),
+        now - 60,
+        now + 3600
+      )
+
+      await pod.agent.bootstrap()
+
+      // Legacy Teams row reaped; Desktop rpc approval preserved!
+      expect(pod.agent.getPendingApprovals().map(p => p.requestId)).toEqual(['req-rpc-br08'])
+      const teamsRow = db
+        .prepare('SELECT state, end_reason FROM sessions WHERE id = ?')
+        .get('sess-teams-br08') as { state: string; end_reason: string }
+      expect(teamsRow).toEqual({ state: 'ended', end_reason: 'legacy_approval_reaped' })
+    } finally {
+      await pod.coldCrash()
     }
   })
 })

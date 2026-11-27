@@ -161,6 +161,9 @@ export interface RehydratedApproval {
   request_id: string
   task_id: string
   session_key?: string
+  channel_type?: string
+  user_id?: string
+  channel_id?: string
   approval: PendingApproval
   expiresAt?: number
   /**
@@ -375,6 +378,7 @@ export class AgentStateMachine extends EventEmitter {
     this.queue = queue
     this.lifecycle = lifecycle
     this.config = { ...DEFAULT_AGENT_CONFIG, ...config }
+    this.resolveChannelCallerContext = config.channelCallerContextResolver
     this.startedAt = new Date()
 
     // Subscribe to TaskLifecycle cancel transitions (spec §4.4)
@@ -529,17 +533,6 @@ export class AgentStateMachine extends EventEmitter {
 
   setPendingTaskResults(store: ResultStore<PendingTaskEntry> | undefined): void {
     this.pendingTaskResults = store
-  }
-
-  setChannelCallerContextResolver(
-    resolver:
-      | ((
-          message: IncomingMessage,
-          traceContext?: Task['traceContext']
-        ) => Promise<WorkflowCallerContext | null>)
-      | undefined
-  ): void {
-    this.resolveChannelCallerContext = resolver
   }
 
   /**
@@ -809,7 +802,8 @@ export class AgentStateMachine extends EventEmitter {
   private buildApprovalBinding(
     sourceMessage: Task['sourceMessage'] | undefined,
     sessionKey?: string,
-    linkedUserId?: string
+    linkedUserId?: string,
+    fallback?: { userId?: string; channelType?: string; channelId?: string }
   ): ApprovalDecisionBinding {
     const parsed = sessionKey ? parseSessionKey(sessionKey) : null
     const allowlistedIdentity = allowlistProviderIdentity(sourceMessage?.providerIdentity)
@@ -821,9 +815,9 @@ export class AgentStateMachine extends EventEmitter {
       sourceMessage?.admittedLinkedUserId?.trim() ||
       undefined
     return {
-      userId: sourceMessage?.sender ?? parsed?.userId,
-      channelType: sourceMessage?.channelType ?? parsed?.channelType,
-      channelId: sourceMessage?.channelId ?? parsed?.channelId,
+      userId: sourceMessage?.sender ?? fallback?.userId ?? parsed?.userId,
+      channelType: sourceMessage?.channelType ?? fallback?.channelType ?? parsed?.channelType,
+      channelId: sourceMessage?.channelId ?? fallback?.channelId ?? parsed?.channelId,
       sessionKey,
       ...(resolvedLinkedUserId ? { linkedUserId: resolvedLinkedUserId } : {}),
       ...(allowlistedIdentity
@@ -941,7 +935,8 @@ export class AgentStateMachine extends EventEmitter {
         | (Task['sourceMessage'] & { linkedUserId?: string })
         | undefined
       const parsedKey = parseSessionKey(entry.session_key)
-      const effectiveChannelType = sourceMessage?.channelType ?? parsedKey?.channelType
+      const effectiveChannelType =
+        sourceMessage?.channelType ?? entry.channel_type ?? parsedKey?.channelType
       const persistedLinkedUserId =
         typeof sourceMessage?.linkedUserId === 'string' &&
         sourceMessage.linkedUserId.trim().length > 0
@@ -1000,7 +995,16 @@ export class AgentStateMachine extends EventEmitter {
         registeredAt: new Date(now),
         expiresAt: entry.expiresAt,
         timerId: this.makeApprovalTimeout(entry.request_id, entry.expiresAt, now),
-        binding: this.buildApprovalBinding(sourceMessage, entry.session_key, persistedLinkedUserId),
+        binding: this.buildApprovalBinding(
+          sourceMessage,
+          entry.session_key,
+          persistedLinkedUserId,
+          {
+            userId: entry.user_id,
+            channelType: entry.channel_type,
+            channelId: entry.channel_id,
+          }
+        ),
       })
       // Issue #1640 (X9/R52): mark the session suspended on cold boot so new
       // messages for the same session queue behind the rehydrated approval
@@ -1596,6 +1600,11 @@ export class AgentStateMachine extends EventEmitter {
         executor.waitForCompletion(),
         new Promise<void>(resolve => setTimeout(resolve, 5_000)),
       ])
+      for (const [reqId, approvalEntry] of Array.from(this.approvalMap.entries())) {
+        if (approvalEntry.taskId !== taskId) continue
+        if (approvalEntry.timerId) clearTimeout(approvalEntry.timerId)
+        this.approvalMap.delete(reqId)
+      }
       this.activeExecutors.delete(taskId)
       this.pendingTaskResults?.delete(taskId)
       this.lifecycle.purgeRecord(taskId)

@@ -941,7 +941,7 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
               provider_event_id: row.provider_event_id,
               provider_attachment_id: row.provider_attachment_id,
             }) as RetainedChannelAttachmentRow | undefined
-            if (existing && existing.status === 'ready') {
+            if (existing && existing.status === 'ready' && existing.expires_at > row.created_at) {
               return { record: existing, deduplicated: true }
             }
             const params = {
@@ -961,12 +961,20 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
               expires_at: row.expires_at,
               status: row.status,
             }
+            let replacedStorageRelPath: string | undefined
             if (existing) {
+              if (existing.storage_rel_path !== row.storage_rel_path) {
+                replacedStorageRelPath = existing.storage_rel_path
+              }
               s.replaceChannelAttachmentByIdempotencyKey.run(params)
             } else {
               s.insertChannelAttachment.run(params)
             }
-            return { record: row, deduplicated: false }
+            return {
+              record: row,
+              deduplicated: false,
+              ...(replacedStorageRelPath ? { replacedStorageRelPath } : {}),
+            }
           }
         )
         return tx.immediate(op.payload)

@@ -5,6 +5,7 @@ import * as http from 'node:http'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { buildAttachmentFileReference, classifyBytes } from '@clerum/gfs-interaction-policy'
+import { gfsStoreCallerIdentityForLinkedUser } from '../agent/gfsExecutionCapability'
 import { AgentStateMachine } from '../agent/stateMachine'
 import { config } from '../config'
 import {
@@ -33,6 +34,7 @@ import { MessageQueue } from '../queue/messageQueue'
 import { ResultStore } from '../resultStore'
 import type { IncomingMessage, ProviderIdentity } from '../server/types'
 import { SessionProcessor, resolveCanonicalSessionKey } from '../session'
+import { channelAttachmentStoreDir, putTestBuffer } from './channelAttachmentTestHelpers'
 
 const HEALTHY_STATFS = async () => ({
   bsize: 4096n,
@@ -142,7 +144,7 @@ async function seedAttachment(params: {
     channelType: 'telegram',
     channelId,
   })
-  const put = await params.store.putBuffer({ bytes: params.bytes, linkedUserId })
+  const put = await putTestBuffer(params.store, { bytes: params.bytes, linkedUserId })
   const classification = classifyBytes({
     bytes: params.bytes,
     totalByteLength: params.bytes.length,
@@ -240,15 +242,16 @@ describe('S44 & E9 — Explicit EvenDrive save (clerum__gfs_save_attachment) for
     const lifecycle = new TaskLifecycle()
     queue.setLifecycle(lifecycle)
     const pendingTaskResults = new ResultStore<PendingTaskEntry>(10 * 60 * 1000, e => e.storedAt)
-    const agent = new AgentStateMachine(queue, lifecycle, { autoStart: false })
+    const agent = new AgentStateMachine(queue, lifecycle, {
+      autoStart: false,
+      channelCallerContextResolver: async msg =>
+        msg.sender === 'tg-user-1'
+          ? { targetUserId: 'linked-user-a', conversationId: msg.channelId }
+          : null,
+    })
     agent.setConversationStore(storeHandle.store)
     agent.setChannelAttachmentStore(attachmentStore)
     agent.setPendingTaskResults(pendingTaskResults)
-    agent.setChannelCallerContextResolver(async msg =>
-      msg.sender === 'tg-user-1'
-        ? { targetUserId: 'linked-user-a', conversationId: msg.channelId }
-        : null
-    )
     let callIdx = 0
     agent.setLLMProvider(
       {
@@ -578,7 +581,7 @@ describe('S44 & E9 — Explicit EvenDrive save (clerum__gfs_save_attachment) for
       })
 
       // Tamper 1 byte of tampered.txt on disk
-      const tamperedPath = path.join(attachmentStore.getStoreDir()!, tampered.storageRelPath)
+      const tamperedPath = path.join(channelAttachmentStoreDir(tmpDir), tampered.storageRelPath)
       const modified = Buffer.from(tamperedBytes)
       modified[0] = modified[0]! ^ 0xff
       await fs.writeFile(tamperedPath, modified, { mode: 0o600 })
@@ -674,6 +677,65 @@ describe('S44 & E9 — Explicit EvenDrive save (clerum__gfs_save_attachment) for
       expect(limitRes.error).not.toContain('/var/gfs/write-body-too-large')
     } finally {
       await storeHandle.shutdown()
+    }
+  })
+
+  it('T-BR04: settleGfsRetentionOwner releases external-channel GFS pins using gfsStoreCallerIdentityForLinkedUser on completion and preserves pins while waiting_approval', async () => {
+    config.enableApproval = true
+    const releaseReceiptOwner = vi.fn(async () => undefined)
+    const mockGfsStore = {
+      isAvailable: () => true,
+      releaseReceiptOwner,
+    }
+
+    let callCount = 0
+    const runtime = buildRuntime({
+      dbPath,
+      tmpDir,
+      llmResponder: async () => {
+        callCount += 1
+        if (callCount === 1) {
+          return {
+            content: null,
+            tool_calls: [
+              { id: 'tc-gfs-pin', name: 'shell_exec', arguments: { command: 'echo ok' } },
+            ],
+            finish_reason: FinishReason.ToolUse,
+          }
+        }
+        return { content: 'Done with pin' }
+      },
+    })
+    runtime.agent.setGfsDownloadStore(mockGfsStore as never)
+    runtime.agent.setApprovalConfig({
+      defaultPolicy: 'allow_all',
+      tools: { shell_exec: true },
+    } as never)
+
+    try {
+      const suspended = await runtime.send('Run gated task with GFS pin')
+      expect(suspended.status).toBe('waiting_approval')
+      // Pin MUST remain retained while waiting_approval (not aborted).
+      expect(releaseReceiptOwner).toHaveBeenCalledTimes(0)
+
+      const approved = await runtime.agent.handleApproval(
+        'tg-user-1',
+        suspended.approval!.requestId,
+        false,
+        'telegram',
+        'chat-gfs'
+      )
+      expect(approved.success).toBe(true)
+
+      await vi.waitFor(() => {
+        expect(releaseReceiptOwner).toHaveBeenCalledTimes(1)
+      })
+      expect(releaseReceiptOwner).toHaveBeenCalledWith(
+        suspended.approval!.taskId,
+        gfsStoreCallerIdentityForLinkedUser('linked-user-a')
+      )
+    } finally {
+      await runtime.shutdown()
     }
   })
 })

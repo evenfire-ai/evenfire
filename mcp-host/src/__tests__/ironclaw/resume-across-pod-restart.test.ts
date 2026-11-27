@@ -209,10 +209,19 @@ describe('IronClaw invariant #3: resume across Pod restart', () => {
       channelType: 'telegram',
       channelId: 'chat-1',
     })
-    agent.setChannelCallerContextResolver(async () => ({
-      targetUserId: 'linked-alice',
-      conversationId: 'chat-1',
-    }))
+    agent = new AgentStateMachine(new MessageQueue(), new TaskLifecycle(), {
+      autoStart: false,
+      channelCallerContextResolver: async () => ({
+        targetUserId: 'linked-alice',
+        conversationId: 'chat-1',
+      }),
+    })
+    agent.setLLMProvider({
+      completeSingleTurn: vi.fn(),
+      completeSingleTurnWithTools: vi.fn(),
+      getProviderType: () => 'openai' as const,
+    } as any)
+    agent.setMcpManager({ getAllTools: () => [], callTool: vi.fn() } as any)
     await seedRehydratedApproval({
       requestId: 'req-bound',
       taskId: 'task-bound',
@@ -257,10 +266,19 @@ describe('IronClaw invariant #3: resume across Pod restart', () => {
         channelType: 'telegram',
         channelId: 'chat-1',
       })
-      agent.setChannelCallerContextResolver(async () => ({
-        targetUserId: 'linked-alice',
-        conversationId: 'chat-1',
-      }))
+      agent = new AgentStateMachine(new MessageQueue(), new TaskLifecycle(), {
+        autoStart: false,
+        channelCallerContextResolver: async () => ({
+          targetUserId: 'linked-alice',
+          conversationId: 'chat-1',
+        }),
+      })
+      agent.setLLMProvider({
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: vi.fn(),
+        getProviderType: () => 'openai' as const,
+      } as any)
+      agent.setMcpManager({ getAllTools: () => [], callTool: vi.fn() } as any)
       await seedRehydratedApproval({
         requestId: 'req-expiring',
         taskId: 'task-expiring',

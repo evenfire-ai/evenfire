@@ -7,6 +7,7 @@ import type {
   RotateSessionOnIdentityChangeResult,
   SweptChannelAttachmentRef,
 } from '../../db/worker/protocol'
+import { parseSessionKey } from '../../session/types'
 import type { ApprovalMode } from '../approval/approvalMode'
 import {
   type Conversation,
@@ -67,6 +68,8 @@ export interface GetOrCreateOptions {
 export interface PersistedSessionListing {
   sessionKey: string
   channelType?: string | null
+  userId?: string | null
+  channelId?: string | null
   approval: PendingApproval
   taskId: string
   sourceMessage?: Record<string, unknown>
@@ -561,10 +564,17 @@ export class InMemoryConversationStore implements ConversationStore {
         if (!conv.activeTaskId) {
           throw new Error(`Pending approval ${conv.pending_approval.request_id} has no active task`)
         }
+        const parsed = parseSessionKey(sessionKey)
         out.push({
           sessionKey,
+          channelType: conv.channel_type ?? parsed?.channelType ?? null,
+          userId: conv.user_id ?? parsed?.userId ?? null,
+          channelId: parsed?.channelId ?? null,
           approval: conv.pending_approval,
           taskId: conv.activeTaskId,
+          ...(conv.pending_approval.sourceMessage
+            ? { sourceMessage: conv.pending_approval.sourceMessage }
+            : {}),
         })
       }
     }

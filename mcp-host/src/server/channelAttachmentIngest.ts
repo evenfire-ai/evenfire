@@ -11,7 +11,6 @@ import {
 } from '@clerum/gfs-interaction-policy'
 import { config } from '../config'
 import { DEFAULT_DOCUMENT_READ_LIMITS } from '../core/tools/documentRead/types'
-import { WorkflowBrokerRequestError } from '../core/tools/workflowBrokerClient'
 import type {
   InsertChannelAttachmentResult,
   RetainedChannelAttachmentRow,
@@ -27,6 +26,7 @@ import {
 import type { RuntimeLifecycleGate } from '../lifecycle/statelessHeartbeat'
 import { logger } from '../logger'
 import { resolveCanonicalSessionKey } from '../session/types'
+import { classifyAuthorizationFailureDetailed } from '../workflow/channelIdentity'
 import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
 import type {
   ChannelAttachmentIngestHandler,
@@ -216,6 +216,9 @@ export function parseChannelAttachmentMetaHeader(
   if (!providerIdentity) {
     return { ok: false, message: 'providerIdentity is missing or invalid' }
   }
+  if (parsed.sender.trim() !== providerIdentity.providerUserId.trim()) {
+    return { ok: false, message: 'sender must match providerIdentity.providerUserId' }
+  }
 
   return {
     ok: true,
@@ -231,25 +234,6 @@ export function parseChannelAttachmentMetaHeader(
       declaredMediaType: parsed.declaredMediaType,
     },
   }
-}
-
-function isUnresolvedIdentityError(err: unknown): boolean {
-  if (err instanceof WorkflowBrokerRequestError) {
-    return (
-      err.status === 403 ||
-      err.status === 404 ||
-      err.code === 'medium_account_not_found' ||
-      err.code === 'communication_channel_access_denied'
-    )
-  }
-  const status = (err as { status?: unknown })?.status
-  const code = (err as { code?: unknown })?.code
-  return (
-    status === 403 ||
-    status === 404 ||
-    code === 'medium_account_not_found' ||
-    code === 'communication_channel_access_denied'
-  )
 }
 
 function receiptFromRow(
@@ -376,7 +360,8 @@ export function createChannelAttachmentIngestHandler(
         }
         linkedUserId = trimmedUserId
       } catch (err) {
-        if (isUnresolvedIdentityError(err)) {
+        const kind = classifyAuthorizationFailureDetailed(err)
+        if (kind === 'account_unresolved' || kind === 'channel_access_denied') {
           return {
             status: 403,
             body: {
@@ -597,6 +582,22 @@ export function createChannelAttachmentIngestHandler(
             }
           }
           return { status: 200, body: existingReceipt }
+        }
+
+        if (
+          insertResult.replacedStorageRelPath &&
+          insertResult.replacedStorageRelPath !== stored.storageRelPath
+        ) {
+          await deps.store.removeBlob(insertResult.replacedStorageRelPath).catch(unlinkErr => {
+            logger.warn(
+              {
+                component: 'ChannelAttachmentIngest',
+                replacedStorageRelPath: insertResult.replacedStorageRelPath,
+                err: unlinkErr,
+              },
+              'Failed to remove superseded channel attachment blob'
+            )
+          })
         }
 
         const documentReadOverLimit =

@@ -25,6 +25,7 @@ import {
   parseChannelAttachmentMetaHeader,
 } from '../server/channelAttachmentIngest'
 import type { ChannelAttachmentIngestMetadataV1, ChannelAttachmentReceiptV1 } from '../server/types'
+import { channelAttachmentStoreDir } from './channelAttachmentTestHelpers'
 import { withRpcProxyEdgeTestAuthentication } from './rpcProxyEdgeTestHeaders'
 
 function encodeMeta(meta: ChannelAttachmentIngestMetadataV1): string {
@@ -481,7 +482,7 @@ describe('X4 — POST /v1/runtime/channel-attachments/ingest & handleMessageRout
     expect(firstRes.body.ok).toBe(true)
     expect(drained).toBe(true)
     expect(localTracker.hasActive()).toBe(false)
-    const dirEntries = await fs.readdir(store.getStoreDir()!)
+    const dirEntries = await fs.readdir(channelAttachmentStoreDir(tmpDir))
     expect(dirEntries.filter(f => f.endsWith('.partial'))).toHaveLength(0)
   })
 
@@ -574,5 +575,378 @@ describe('X4 — POST /v1/runtime/channel-attachments/ingest & handleMessageRout
     expect(
       (receivedMessages[0] as { channelAttachmentIds?: string[] }).channelAttachmentIds
     ).toEqual(['att-1', 'att-2', 'att-3'])
+  })
+
+  it('T-BR13: classifies unrecognized 404/403 broker errors as retryable 503 while mapping medium_account_not_found and communication_channel_access_denied to 403', async () => {
+    const meta = makeMeta()
+
+    resolveCaller.mockRejectedValueOnce(
+      new WorkflowBrokerRequestError(404, 'route_not_found', 'gateway route missing')
+    )
+    const route404 = await fetch(`${baseUrl}/v1/runtime/channel-attachments/ingest`, {
+      method: 'POST',
+      headers: channelReaderHeaders(meta),
+      body: Buffer.from('transient-404'),
+    })
+    expect(route404.status).toBe(503)
+    expect(await route404.json()).toMatchObject({
+      ok: false,
+      error: { code: 'identity_check_unavailable', retryable: true },
+    })
+
+    resolveCaller.mockRejectedValueOnce(
+      new WorkflowBrokerRequestError(403, 'service_token_invalid', 'token rotation in flight')
+    )
+    const token403 = await fetch(`${baseUrl}/v1/runtime/channel-attachments/ingest`, {
+      method: 'POST',
+      headers: channelReaderHeaders(meta),
+      body: Buffer.from('transient-403'),
+    })
+    expect(token403.status).toBe(503)
+    expect(await token403.json()).toMatchObject({
+      ok: false,
+      error: { code: 'identity_check_unavailable', retryable: true },
+    })
+
+    // Liveness witness: genuine unresolved / denied codes still return 403 linked_user_unresolved.
+    resolveCaller.mockRejectedValueOnce(
+      new WorkflowBrokerRequestError(404, 'medium_account_not_found', 'not linked')
+    )
+    const unresolved = await fetch(`${baseUrl}/v1/runtime/channel-attachments/ingest`, {
+      method: 'POST',
+      headers: channelReaderHeaders(meta),
+      body: Buffer.from('unresolved'),
+    })
+    expect(unresolved.status).toBe(403)
+    expect(await unresolved.json()).toMatchObject({
+      ok: false,
+      error: { code: 'linked_user_unresolved', retryable: false },
+    })
+
+    resolveCaller.mockRejectedValueOnce(
+      new WorkflowBrokerRequestError(403, 'communication_channel_access_denied', 'channel denied')
+    )
+    const denied = await fetch(`${baseUrl}/v1/runtime/channel-attachments/ingest`, {
+      method: 'POST',
+      headers: channelReaderHeaders(meta),
+      body: Buffer.from('denied'),
+    })
+    expect(denied.status).toBe(403)
+    expect(await denied.json()).toMatchObject({
+      ok: false,
+      error: { code: 'linked_user_unresolved', retryable: false },
+    })
+  })
+
+  it('T-BR18: rejects metadata header when sender does not match providerIdentity.providerUserId (400) while matching sender succeeds (200)', async () => {
+    const mismatchedMeta = makeMeta({
+      sender: 'tg-user-spoofed',
+      providerIdentity: {
+        medium: 'telegram',
+        providerUserId: 'tg-user-real',
+        providerChannelId: 'chat-101',
+        providerEventId: 'evt-br18',
+      },
+    })
+    expect(parseChannelAttachmentMetaHeader(encodeMeta(mismatchedMeta))).toMatchObject({
+      ok: false,
+      message: 'sender must match providerIdentity.providerUserId',
+    })
+
+    const mismatchRes = await fetch(`${baseUrl}/v1/runtime/channel-attachments/ingest`, {
+      method: 'POST',
+      headers: channelReaderHeaders(mismatchedMeta),
+      body: Buffer.from('spoofed-sender'),
+    })
+    expect(mismatchRes.status).toBe(400)
+
+    // Liveness witness: matching sender succeeds with 200.
+    const matchingMeta = makeMeta({
+      sender: 'tg-user-real',
+      providerIdentity: {
+        medium: 'telegram',
+        providerUserId: 'tg-user-real',
+        providerChannelId: 'chat-101',
+        providerEventId: 'evt-br18-ok',
+      },
+    })
+    const okRes = await fetch(`${baseUrl}/v1/runtime/channel-attachments/ingest`, {
+      method: 'POST',
+      headers: channelReaderHeaders(matchingMeta),
+      body: Buffer.from('matching-sender'),
+    })
+    expect(okRes.status).toBe(200)
+  })
+
+  it('T-BR19: main.ts shutdown() drains inFlightChannelAttachmentIngests AFTER rpcServer.stop() and BEFORE conversationStoreHandle.shutdown()', async () => {
+    const mainSource = await fs.readFile(path.resolve(__dirname, '../main.ts'), 'utf8')
+    const shutdownStart = mainSource.indexOf('async function shutdown(')
+    expect(shutdownStart).toBeGreaterThan(-1)
+    const shutdownBody = mainSource.slice(shutdownStart, shutdownStart + 3_000)
+
+    const rpcStopIdx = shutdownBody.indexOf('await rpcServer?.stop()')
+    const waitIngestsIdx = shutdownBody.indexOf(
+      'await inFlightChannelAttachmentIngests.waitForAll()'
+    )
+    const storeShutdownIdx = shutdownBody.indexOf('handle.shutdown()')
+
+    expect(rpcStopIdx).toBeGreaterThan(-1)
+    expect(waitIngestsIdx).toBeGreaterThan(rpcStopIdx)
+    expect(storeShutdownIdx).toBeGreaterThan(waitIngestsIdx)
+  })
+
+  it('T-BR21-b: re-ingests expired-but-unswept ready rows with deduplicated=false and unlinks superseded .bin blob while preserving unexpired deduplication', async () => {
+    const deps = createDispatcher(db)
+    let clockMs = 1_700_000_000_000
+    const timedHandler = createChannelAttachmentIngestHandler({
+      store,
+      insertAttachment: row =>
+        dispatch(
+          { kind: 'insert_channel_attachment', payload: row },
+          deps
+        ) as Promise<InsertChannelAttachmentResult>,
+      resolveCallerContext: async () => ({ targetUserId: 'linked-user-1' }),
+      sessionStoreMode: 'sqlite',
+      ttlHours: 1,
+      now: () => clockMs,
+    })
+
+    const meta = makeMeta({ filename: 'doc.txt', declaredMediaType: 'text/plain' })
+    const caller = {
+      caller: 'channel-reader' as const,
+      channelType: meta.channelType,
+      channelId: meta.channelId,
+      sender: meta.sender,
+    }
+
+    // 1) First ingest at t=0.
+    const first = await timedHandler({
+      metadata: meta,
+      stream: Readable.from([Buffer.from('version-1')]),
+      caller,
+    })
+    expect(first.status).toBe(200)
+    expect(first.body.ok).toBe(true)
+    const firstId = (first.body as Extract<ChannelAttachmentReceiptV1, { ok: true }>).attachmentId
+    const firstRelPath = `${firstId}.bin`
+
+    // 2) Liveness witness: retry before TTL expiry -> deduplicated: true, original .bin preserved.
+    clockMs += 60_000
+    const deduped = await timedHandler({
+      metadata: meta,
+      stream: Readable.from([Buffer.from('version-1')]),
+      caller,
+    })
+    expect(deduped.status).toBe(200)
+    expect(deduped.body).toMatchObject({
+      ok: true,
+      attachmentId: firstId,
+      deduplicated: true,
+    })
+    expect(await fs.readdir(channelAttachmentStoreDir(tmpDir))).toEqual([firstRelPath])
+
+    // 3) Advance clock past TTL without running sweep (row remains status='ready' with expires_at <= now).
+    clockMs += 2 * 3600 * 1000
+    const reingested = await timedHandler({
+      metadata: meta,
+      stream: Readable.from([Buffer.from('version-2')]),
+      caller,
+    })
+    expect(reingested.status).toBe(200)
+    const reingestedBody = reingested.body as Extract<ChannelAttachmentReceiptV1, { ok: true }>
+    expect(reingestedBody.ok).toBe(true)
+    expect(reingestedBody.deduplicated).toBeUndefined()
+    expect(reingestedBody.attachmentId).not.toBe(firstId)
+
+    // Old superseded .bin blob was unlinked; only the new .bin blob remains on disk.
+    const filesOnDisk = await fs.readdir(channelAttachmentStoreDir(tmpDir))
+    expect(filesOnDisk).toEqual([`${reingestedBody.attachmentId}.bin`])
+    expect(filesOnDisk).not.toContain(firstRelPath)
+  })
+
+  it('BR-T6 & BR-T4: HTTP /ingest covers dedupe, 413, 507, 503 memory mode, and DB-failure .bin rollback; /messages returns 503 vs 200 on identity codes', async () => {
+    // 1) Real HTTP deduplication -> second identical request returns 200 deduplicated: true.
+    const dupMeta = makeMeta({ filename: 'dup.txt', declaredMediaType: 'text/plain' })
+    const r1 = await fetch(`${baseUrl}/v1/runtime/channel-attachments/ingest`, {
+      method: 'POST',
+      headers: channelReaderHeaders(dupMeta),
+      body: Buffer.from('dedupe-body'),
+    })
+    expect(r1.status).toBe(200)
+    const b1 = (await r1.json()) as Extract<ChannelAttachmentReceiptV1, { ok: true }>
+    const r2 = await fetch(`${baseUrl}/v1/runtime/channel-attachments/ingest`, {
+      method: 'POST',
+      headers: channelReaderHeaders(dupMeta),
+      body: Buffer.from('dedupe-body'),
+    })
+    expect(r2.status).toBe(200)
+    const b2 = (await r2.json()) as Extract<ChannelAttachmentReceiptV1, { ok: true }>
+    expect(b2.deduplicated).toBe(true)
+    expect(b2.attachmentId).toBe(b1.attachmentId)
+
+    // 2) HTTP 413 file_too_large via small maxBytes handler.
+    const smallLimitServer = new RPCServer(0)
+    const smallTmp = await fs.mkdtemp(path.join(os.tmpdir(), 'clerum-ingest-err-'))
+    try {
+      const tightStore = new ChannelAttachmentStore({
+        hostWorkspaceRoot: smallTmp,
+        sessionStoreMode: 'sqlite',
+        maxFileBytes: 16,
+        hostQuotaBytes: 24,
+        userQuotaBytes: 24,
+        statfsFn: async () => ({
+          bsize: 4096n,
+          blocks: (100n * 1024n * 1024n * 1024n) / 4096n,
+          bavail: (50n * 1024n * 1024n * 1024n) / 4096n,
+        }),
+      })
+      let failDbInsert = false
+      let mode: 'sqlite' | 'memory' = 'sqlite'
+      const localDeps = createDispatcher(db)
+      smallLimitServer.onChannelAttachmentIngest(
+        createChannelAttachmentIngestHandler({
+          store: tightStore,
+          insertAttachment: async row => {
+            if (failDbInsert) throw new Error('SQLITE_IOERR simulated failure')
+            return dispatch(
+              { kind: 'insert_channel_attachment', payload: row },
+              localDeps
+            ) as Promise<InsertChannelAttachmentResult>
+          },
+          resolveCallerContext: async () => ({ targetUserId: 'linked-user-1' }),
+          maxBytes: 16,
+          get sessionStoreMode() {
+            return mode
+          },
+        })
+      )
+      smallLimitServer.onMessage(async msg => {
+        if (msg.content === 'transient-err') {
+          return {
+            success: false,
+            error: {
+              code: 'CHANNEL_IDENTITY_CHECK_UNAVAILABLE',
+              message: 'broker unavailable',
+              retryable: true,
+              provider: 'openai',
+            },
+          }
+        }
+        return {
+          success: false,
+          status: 'completed',
+          response: 'not linked',
+          error: {
+            code: 'CHANNEL_IDENTITY_UNRESOLVED',
+            message: 'not linked',
+            retryable: false,
+            provider: 'openai',
+          },
+        }
+      })
+      await smallLimitServer.start()
+      const addr = (smallLimitServer as unknown as { server: http.Server }).server.address()
+      if (!addr || typeof addr === 'string') throw new Error('Expected TCP port')
+      const errBaseUrl = `http://127.0.0.1:${addr.port}`
+
+      // 413 file_too_large
+      const res413 = await fetch(`${errBaseUrl}/v1/runtime/channel-attachments/ingest`, {
+        method: 'POST',
+        headers: channelReaderHeaders(makeMeta()),
+        body: Buffer.alloc(32, 0x41),
+      })
+      expect(res413.status).toBe(413)
+      expect(await res413.json()).toMatchObject({ ok: false, error: { code: 'file_too_large' } })
+
+      // DB insert failure rolls back committed .bin blob -> 500 + 0 .bin files on disk.
+      failDbInsert = true
+      const resDbFail = await fetch(`${errBaseUrl}/v1/runtime/channel-attachments/ingest`, {
+        method: 'POST',
+        headers: channelReaderHeaders(makeMeta()),
+        body: Buffer.alloc(12, 0x42),
+      })
+      expect(resDbFail.status).toBe(500)
+      const filesAfterRollback = await fs.readdir(channelAttachmentStoreDir(smallTmp))
+      expect(filesAfterRollback.filter(f => f.endsWith('.bin'))).toHaveLength(0)
+
+      // 507 quota_exceeded: commit 16 bytes, then next 12 bytes exceeds 24-byte hostQuotaBytes.
+      failDbInsert = false
+      const resCommit = await fetch(`${errBaseUrl}/v1/runtime/channel-attachments/ingest`, {
+        method: 'POST',
+        headers: channelReaderHeaders(makeMeta()),
+        body: Buffer.alloc(16, 0x43),
+      })
+      expect(resCommit.status).toBe(200)
+      const res507 = await fetch(`${errBaseUrl}/v1/runtime/channel-attachments/ingest`, {
+        method: 'POST',
+        headers: channelReaderHeaders(makeMeta()),
+        body: Buffer.alloc(12, 0x44),
+      })
+      expect(res507.status).toBe(507)
+      expect(await res507.json()).toMatchObject({ ok: false, error: { code: 'quota_exceeded' } })
+
+      // 503 channel_attachment_store_unavailable when storeMode === 'memory'.
+      mode = 'memory'
+      const res503Store = await fetch(`${errBaseUrl}/v1/runtime/channel-attachments/ingest`, {
+        method: 'POST',
+        headers: channelReaderHeaders(makeMeta()),
+        body: Buffer.alloc(4, 0x45),
+      })
+      expect(res503Store.status).toBe(503)
+      expect(await res503Store.json()).toMatchObject({
+        ok: false,
+        error: { code: 'channel_attachment_store_unavailable' },
+      })
+
+      // BR-T4: handleMessageRoute returns HTTP 503 on CHANNEL_IDENTITY_CHECK_UNAVAILABLE vs 200 on CHANNEL_IDENTITY_UNRESOLVED.
+      const msgHeaders = {
+        'content-type': 'application/json',
+        'x-clerum-edge-caller': 'channel-reader',
+        'x-clerum-edge-host-ref': config.hostName,
+        'x-clerum-edge-channel-type': 'telegram',
+        'x-clerum-edge-channel-id': 'chat-101',
+        'x-clerum-edge-sender': 'tg-user-1',
+      }
+      const msg503 = await fetch(`${errBaseUrl}/v1/runtime/messages`, {
+        method: 'POST',
+        headers: msgHeaders,
+        body: JSON.stringify({
+          content: 'transient-err',
+          channelType: 'telegram',
+          channelId: 'chat-101',
+          sender: 'tg-user-1',
+          timestamp: new Date().toISOString(),
+          messageId: 'm-503',
+          hostRef: config.hostName,
+        }),
+      })
+      expect(msg503.status).toBe(503)
+      expect(await msg503.json()).toMatchObject({
+        success: false,
+        error: { code: 'CHANNEL_IDENTITY_CHECK_UNAVAILABLE', retryable: true },
+      })
+
+      const msg200Unresolved = await fetch(`${errBaseUrl}/v1/runtime/messages`, {
+        method: 'POST',
+        headers: msgHeaders,
+        body: JSON.stringify({
+          content: 'unresolved-err',
+          channelType: 'telegram',
+          channelId: 'chat-101',
+          sender: 'tg-user-1',
+          timestamp: new Date().toISOString(),
+          messageId: 'm-200-unres',
+          hostRef: config.hostName,
+        }),
+      })
+      expect(msg200Unresolved.status).toBe(200)
+      expect(await msg200Unresolved.json()).toMatchObject({
+        success: false,
+        error: { code: 'CHANNEL_IDENTITY_UNRESOLVED', retryable: false },
+      })
+    } finally {
+      await smallLimitServer.stop()
+      await fs.rm(smallTmp, { recursive: true, force: true })
+    }
   })
 })

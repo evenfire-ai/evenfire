@@ -324,7 +324,7 @@ export class ChannelAttachmentStore {
   private readonly blobOwnerAndSize = new Map<string, { linkedUserId?: string; bytes: bigint }>()
   private readonly activePartials = new Set<string>()
   private committedHostBytes = 0n
-  private hostUsageScanned = false
+  private hostUsageScanPromise: Promise<void> | null = null
 
   constructor(options: ChannelAttachmentStoreOptions) {
     this.sessionStoreMode = options.sessionStoreMode
@@ -355,14 +355,6 @@ export class ChannelAttachmentStore {
 
   isAvailable(): boolean {
     return this.storeDir !== null && this.sessionStoreMode !== 'memory'
-  }
-
-  getStoreDir(): string | null {
-    return this.storeDir
-  }
-
-  getActiveReservedBytes(): number {
-    return Number(this.activeReservedBytes)
   }
 
   private assertAvailable(): string {
@@ -397,28 +389,36 @@ export class ChannelAttachmentStore {
   }
 
   private async scanHostUsageOnce(storeDir: string): Promise<void> {
-    if (this.hostUsageScanned) return
-    this.hostUsageScanned = true
-    let total = 0n
-    try {
-      const entries = await fs.readdir(storeDir)
-      for (const entry of entries) {
-        if (!ATTACHMENT_BLOB_RE.test(entry)) continue
+    if (!this.hostUsageScanPromise) {
+      this.hostUsageScanPromise = (async () => {
+        let total = 0n
         try {
-          const stat = await fs.lstat(path.join(storeDir, entry))
-          if (stat.isFile()) {
-            const size = BigInt(stat.size)
-            total += size
-            this.blobOwnerAndSize.set(entry, { bytes: size })
+          const entries = await fs.readdir(storeDir)
+          for (const entry of entries) {
+            if (!ATTACHMENT_BLOB_RE.test(entry)) continue
+            try {
+              const stat = await fs.lstat(path.join(storeDir, entry))
+              if (stat.isFile()) {
+                const size = BigInt(stat.size)
+                total += size
+                this.blobOwnerAndSize.set(entry, { bytes: size })
+              }
+            } catch {
+              // Ignore disappeared entries during initial scan.
+            }
           }
-        } catch {
-          // Ignore disappeared entries during initial scan.
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+            throw err
+          }
         }
-      }
-    } catch {
-      // Directory verified just before; keep 0 on empty/unreadable race.
+        this.committedHostBytes = total
+      })().catch(err => {
+        this.hostUsageScanPromise = null
+        throw err
+      })
     }
-    this.committedHostBytes = total
+    await this.hostUsageScanPromise
   }
 
   private async measureVolume(storeDir: string): Promise<{
@@ -594,27 +594,6 @@ export class ChannelAttachmentStore {
       this.activePartials.delete(partialName)
       this.releaseReservation(input.linkedUserId, reserveBytes)
     }
-  }
-
-  async putBuffer(input: {
-    bytes: Buffer | Uint8Array
-    linkedUserId: string
-    maxBytes?: number
-    attachmentId?: string
-  }): Promise<ChannelAttachmentPutResult> {
-    const buf = Buffer.isBuffer(input.bytes)
-      ? input.bytes
-      : Buffer.from(input.bytes.buffer, input.bytes.byteOffset, input.bytes.byteLength)
-    async function* singleChunk() {
-      if (buf.length > 0) yield buf
-    }
-    return this.putStream({
-      stream: singleChunk(),
-      linkedUserId: input.linkedUserId,
-      declaredBytes: buf.length,
-      maxBytes: input.maxBytes,
-      attachmentId: input.attachmentId,
-    })
   }
 
   private releaseReservation(linkedUserId: string, reserveBytes: bigint): void {

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { ModelSelectionWriteOutcome } from '../../db/worker/protocol'
 import { logger } from '../../logger'
 import { parseSessionKey } from '../../session/types'
@@ -137,7 +138,7 @@ export class ConversationManager {
     const parsed = parseSessionKey(sessionKey)
 
     const conv: Conversation = {
-      id: `conv-${sessionKey}-${Date.now()}`,
+      id: `conv-${sessionKey}-${Date.now()}-${randomUUID()}`,
       session_key: sessionKey,
       user_id: opts?.userId ?? parsed?.userId ?? sessionKey,
       state: ConversationState.Idle,

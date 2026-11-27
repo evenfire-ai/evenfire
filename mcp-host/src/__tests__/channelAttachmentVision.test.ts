@@ -1,6 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
+import { randomUUID } from 'node:crypto'
+import * as fs from 'node:fs/promises'
+import * as os from 'node:os'
+import * as path from 'node:path'
+import { buildAttachmentFileReference, classifyBytes } from '@clerum/gfs-interaction-policy'
 import { createIncomingAdmission } from '../agent/incomingAdmission'
+import { AgentStateMachine } from '../agent/stateMachine'
+import { config } from '../config'
+import { maybeWrapFailover } from '../core/adapters/failoverLlmPort'
 import { LlmPortAdapter } from '../core/adapters/llmPortAdapter'
+import { makeSqliteStore } from '../core/conversation/persistence/__tests__/testHelpers'
 import { LlmError, LlmErrorCode } from '../core/errors'
 import {
   type ChatMessage,
@@ -9,15 +18,28 @@ import {
   type PendingApproval,
 } from '../core/types'
 import {
+  ChannelAttachmentStore,
+  normalizeChannelFilename,
+  validateStrictChannelImageContainer,
+} from '../internalTools/channelAttachmentStore'
+import { TaskLifecycle } from '../lifecycle/taskLifecycle'
+import {
   JPEG_2X2_BASE64,
   PNG_2X2_BASE64,
   realPngOfDecodedBytesBase64,
 } from '../llm/__tests__/codexImageFixtures'
+import { FailoverEngine } from '../llm/failover/engine'
+import type { LlmPolicy } from '../llm/failover/types'
 import { GrokSubscriptionProvider } from '../llm/grokSubscription'
 import type { ImageInputResolver } from '../llm/imageInput'
+import { IncomingMessageHandler, type PendingTaskEntry } from '../messageHandler'
+import { MessageQueue } from '../queue/messageQueue'
+import { ResultStore } from '../resultStore'
 import type { IncomingMessage } from '../server/types'
+import { SessionProcessor, resolveCanonicalSessionKey } from '../session'
 import { resolveVisualDeliveryLimits } from '../visualInput/deliveryLimits'
 import { projectGfsApproval } from '../visualInput/suspension'
+import { putTestBuffer } from './channelAttachmentTestHelpers'
 
 const VISION_SUPPORTED: ImageInputResolver = () => ({
   capability: {
@@ -140,7 +162,8 @@ describe('X12 & projectGfsApproval — channel_retained vision projection, limit
     ).rejects.toBeInstanceOf(LlmError)
   })
 
-  it('S43: degrades channel_retained image cleanly when failover switches from vision primary to non-vision fallback', async () => {
+  it('S43 (BR-T3): real maybeWrapFailover / FailoverLlmPort degrades channel_retained image cleanly on failover from vision primary to non-vision fallback AND preserves source binding on failover to Codex/Grok secondary', async () => {
+    // Part A: vision Codex primary fails retryably -> real FailoverLlmPort switches to non-vision OpenAI fallback.
     const primaryMock = makeProviderMock(
       'codex-subscription',
       resolveVisualDeliveryLimits('codex-subscription')
@@ -153,7 +176,6 @@ describe('X12 & projectGfsApproval — channel_retained vision projection, limit
     }))
 
     const fallbackMock = makeProviderMock('openai', null)
-
     const primaryAdapter = new LlmPortAdapter(
       primaryMock.provider as never,
       'vision-model',
@@ -177,6 +199,20 @@ describe('X12 & projectGfsApproval — channel_retained vision projection, limit
       VISION_UNSUPPORTED
     )
 
+    const policyA: LlmPolicy = {
+      cooldownSeconds: 300,
+      triggerOn: ['provider_unavailable'],
+      fallbacks: [{ provider: 'openai', model: 'text-fallback' }],
+    }
+    const engineA = new FailoverEngine(policyA)
+    const portA = maybeWrapFailover({
+      primaryPort: primaryAdapter,
+      primaryPair: { provider: 'codex-subscription', model: 'vision-model' },
+      engine: engineA,
+      policy: policyA,
+      buildFallbackPort: () => fallbackAdapter,
+    })
+
     const messages = [
       channelImageMessage([
         {
@@ -192,18 +228,110 @@ describe('X12 & projectGfsApproval — channel_retained vision projection, limit
       ]),
     ]
 
-    // Attempt 1 on vision primary carries the image part and fails retryably.
-    await expect(primaryAdapter.completeWithTools({ messages, tools: [] })).rejects.toThrow()
+    const resA = await portA.completeWithTools({ messages, tools: [] })
+    expect(resA.content).toBe('analysis complete')
+    expect(engineA.servedBy()).toEqual({
+      provider: 'openai',
+      model: 'text-fallback',
+      fallback: true,
+    })
     const attempt1Sent = primaryMock.completeSingleTurnWithTools.mock.calls[0]![0]!
     expect(attempt1Sent[0]!.contentParts?.filter(p => p.type === 'image')).toHaveLength(1)
-
-    // Attempt 2 on text-only fallback strips the image part, injects notice, and succeeds.
-    const res2 = await fallbackAdapter.completeWithTools({ messages, tools: [] })
-    expect(res2.content).toBe('analysis complete')
     const attempt2Sent = fallbackMock.completeSingleTurnWithTools.mock.calls[0]![0]!
     expect(attempt2Sent[0]!.contentParts).toBeUndefined()
     expect(attempt2Sent[0]!.content).toContain('receipt.png')
     expect(attempt2Sent[0]!.content).toContain('does not support image input')
+
+    // Part B: OpenAI primary fails retryably -> real FailoverLlmPort fails over to Grok vision secondary,
+    // preserving source binding on valid images and demoting framing-invalid ones.
+    const primaryOpenAi = makeProviderMock('openai', null)
+    primaryOpenAi.completeSingleTurnWithTools.mockRejectedValueOnce(new Error('503 openai down'))
+    primaryOpenAi.provider.classifyError = vi.fn(() => ({
+      code: LlmErrorCode.ApiCallFailed,
+      retryable: true,
+      message: '503 openai down',
+    }))
+    const grokSecondary = makeProviderMock(
+      'grok-subscription',
+      resolveVisualDeliveryLimits('grok-subscription')
+    )
+    const policyB: LlmPolicy = {
+      cooldownSeconds: 300,
+      triggerOn: ['provider_unavailable'],
+      fallbacks: [{ provider: 'grok-subscription', model: 'grok-4' }],
+    }
+    const engineB = new FailoverEngine(policyB)
+    const portB = maybeWrapFailover({
+      primaryPort: new LlmPortAdapter(
+        primaryOpenAi.provider as never,
+        'gpt-4o',
+        'openai',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        VISION_SUPPORTED
+      ),
+      primaryPair: { provider: 'openai', model: 'gpt-4o' },
+      engine: engineB,
+      policy: policyB,
+      buildFallbackPort: () =>
+        new LlmPortAdapter(
+          grokSecondary.provider as never,
+          'grok-4',
+          'grok-subscription',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          VISION_SUPPORTED
+        ),
+    })
+
+    const resB = await portB.completeWithTools({
+      messages: [
+        channelImageMessage([
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: PNG_2X2_BASE64,
+            width: 2,
+            height: 2,
+            filename: 'valid.png',
+            visualValid: true,
+            source: { kind: 'attachment', attachmentId: 'att-ok', messageId: 'm-ok' },
+          },
+          {
+            type: 'image',
+            mimeType: 'image/jpeg',
+            data: JPEG_2X2_BASE64,
+            width: 2,
+            height: 2,
+            filename: 'bad-motion.jpg',
+            visualValid: false,
+            source: { kind: 'attachment', attachmentId: 'att-bad', messageId: 'm-ok' },
+          },
+        ]),
+      ],
+      tools: [],
+    })
+    expect(resB.content).toBe('analysis complete')
+    expect(engineB.servedBy()).toEqual({
+      provider: 'grok-subscription',
+      model: 'grok-4',
+      fallback: true,
+    })
+    const grokSent = grokSecondary.completeSingleTurnWithTools.mock.calls[0]![0]!
+    const grokImgParts = grokSent[0]!.contentParts!.filter(p => p.type === 'image')
+    expect(grokImgParts).toHaveLength(1)
+    expect(grokImgParts[0]!.source).toEqual({
+      kind: 'attachment',
+      attachmentId: 'att-ok',
+      messageId: 'm-ok',
+    })
+    expect(grokSent[0]!.content).toContain('bad-motion.jpg')
   })
 
   it('S51 & S67: two-phase fitGfsImages demotes per-image oversized Turn-1 4032x3024 photo first while preserving valid Turn-2 diagram, and trims aggregate overflow oldest-first', async () => {
@@ -555,5 +683,169 @@ describe('X12 & projectGfsApproval — channel_retained vision projection, limit
     expect(rpcRes.success).toBe(false)
     expect(rpcRes.error?.code).toBe(LlmErrorCode.ImageInputUnsupported)
     expect(dispatchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('T-BR20 (V4): buildChannelRetainedImageContentParts validates source.messageId against strict V2 ID_PATTERN (no @) and falls back to task.id while preserving valid Slack ts', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'clerum-br20-'))
+    const dbPath = path.join(tmpDir, 'state.db')
+    const origEnableApproval = config.enableApproval
+    config.enableApproval = false
+    const storeHandle = makeSqliteStore({ dbPath })
+    const attachmentStore = new ChannelAttachmentStore({
+      hostWorkspaceRoot: tmpDir,
+      sessionStoreMode: 'sqlite',
+      statfsFn: async () => ({
+        bsize: 4096n,
+        blocks: (100n * 1024n * 1024n * 1024n) / 4096n,
+        bavail: (50n * 1024n * 1024n * 1024n) / 4096n,
+      }),
+    })
+    const queue = new MessageQueue()
+    const lifecycle = new TaskLifecycle()
+    queue.setLifecycle(lifecycle)
+    const pendingTaskResults = new ResultStore<PendingTaskEntry>(10 * 60 * 1000, e => e.storedAt)
+    const agent = new AgentStateMachine(queue, lifecycle, {
+      autoStart: false,
+      channelCallerContextResolver: async msg => ({
+        targetUserId: 'linked-user-a',
+        conversationId: msg.channelId,
+      }),
+    })
+    agent.setConversationStore(storeHandle.store)
+    agent.setChannelAttachmentStore(attachmentStore)
+    agent.setPendingTaskResults(pendingTaskResults)
+
+    const capturedMessages: ChatMessage[][] = []
+    agent.setLLMProvider(
+      {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: vi.fn(async (msgs: ChatMessage[]) => {
+          capturedMessages.push(msgs)
+          return {
+            content: 'vision ok',
+            tool_calls: null,
+            usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+            finish_reason: FinishReason.Stop,
+          }
+        }),
+        getProviderType: () => 'codex-subscription' as const,
+        getVisualDeliveryLimits: () => resolveVisualDeliveryLimits('codex-subscription'),
+      } as never,
+      'gpt-5.3-codex'
+    )
+    agent.setImageInputResolver(VISION_SUPPORTED)
+    agent.setMcpManager({ getAllTools: () => [], callTool: vi.fn() } as never)
+    const sessionProcessor = new SessionProcessor({
+      maxConcurrent: 4,
+      lifecycle,
+      executor: task => agent.executeTask(task),
+    })
+    agent.setSessionProcessor(sessionProcessor)
+
+    const V2_ID_PATTERN = /^[A-Za-z0-9._:/-]{1,128}$/
+
+    try {
+      const pngBytes = Buffer.from(PNG_2X2_BASE64, 'base64')
+      const sessionKey = resolveCanonicalSessionKey({
+        sender: 'u-br20',
+        channelType: 'teams',
+        channelId: '19:room@thread.tacv2',
+      })
+      const put = await putTestBuffer(attachmentStore, {
+        bytes: pngBytes,
+        linkedUserId: 'linked-user-a',
+      })
+      const classification = classifyBytes({
+        bytes: pngBytes,
+        totalByteLength: pngBytes.length,
+        declaredMediaType: 'image/png',
+        filename: 'shot.png',
+      })
+      const name = normalizeChannelFilename('shot.png', classification.class, 'br20')
+      const ref = buildAttachmentFileReference({
+        attachmentId: put.attachmentId,
+        messageId: 'seed-msg',
+        name,
+        declaredMediaType: 'image/png',
+        byteLength: put.byteLength,
+        digestHex: put.sha256,
+        classification,
+      })
+      if (!ref.ok) throw new Error(ref.message)
+      const framing = validateStrictChannelImageContainer(pngBytes, 'png')
+      const now = Math.floor(Date.now() / 1000)
+      await storeHandle.store.insertChannelAttachment!({
+        attachment_id: put.attachmentId,
+        session_key: sessionKey,
+        linked_user_id: 'linked-user-a',
+        provider_event_id: `evt-${randomUUID().slice(0, 8)}`,
+        provider_attachment_id: `patt-${randomUUID().slice(0, 8)}`,
+        storage_rel_path: put.storageRelPath,
+        sha256: put.sha256,
+        byte_length: put.byteLength,
+        file_reference_json: JSON.stringify(ref.value),
+        width: framing.width,
+        height: framing.height,
+        visual_valid: framing.visualValid ? 1 : 0,
+        created_at: now,
+        expires_at: now + 3600,
+        status: 'ready',
+      })
+
+      const runWithMessageId = async (messageId: string) => {
+        const handler = new IncomingMessageHandler(
+          {
+            content: 'Inspect screenshot',
+            channelType: 'teams',
+            channelId: '19:room@thread.tacv2',
+            sender: 'u-br20',
+            timestamp: new Date().toISOString(),
+            messageId,
+            hostRef: 'ns/host',
+            admittedLinkedUserId: 'linked-user-a',
+            providerIdentity: {
+              medium: 'teams',
+              providerUserId: 'u-br20',
+              providerWorkspaceId: 'tenant-1',
+              providerChannelId: '19:room@thread.tacv2',
+              providerChannelType: 'channel',
+            },
+          },
+          {
+            messageQueue: queue,
+            agent,
+            pendingTaskResults,
+            getModel: () => 'gpt-5.3-codex',
+            sanitizeAttachments: a => a,
+            sessionProcessor,
+            taskLifecycle: lifecycle,
+          }
+        )
+        const res = await handler.execute()
+        expect(res.success).toBe(true)
+        const lastMsgs = capturedMessages[capturedMessages.length - 1]!
+        const userMsg = [...lastMsgs].reverse().find(m => m.role === 'user')!
+        const imgPart = userMsg.contentParts!.find(p => p.type === 'image')!
+        expect(imgPart.source?.kind).toBe('attachment')
+        return (imgPart.source as { kind: 'attachment'; attachmentId: string; messageId: string })
+          .messageId
+      }
+
+      // Invalid @-bearing Teams messageId, spaces/semicolons, and >128 chars MUST fall back to valid task.id!
+      for (const badId of ['19:abc@thread.tacv2', 'bad; id with space', 'x'.repeat(129)]) {
+        const emittedId = await runWithMessageId(badId)
+        expect(emittedId).not.toBe(badId)
+        expect(V2_ID_PATTERN.test(emittedId)).toBe(true)
+      }
+
+      // Liveness witness: valid Slack ts '1700000001.000200' is preserved verbatim!
+      const validTs = '1700000001.000200'
+      expect(await runWithMessageId(validTs)).toBe(validTs)
+    } finally {
+      config.enableApproval = origEnableApproval
+      await agent.stop()
+      await storeHandle.shutdown()
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    }
   })
 })

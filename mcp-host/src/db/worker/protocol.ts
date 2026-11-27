@@ -229,6 +229,7 @@ export interface RetainedChannelAttachmentRow {
 export interface InsertChannelAttachmentResult {
   record: RetainedChannelAttachmentRow
   deduplicated: boolean
+  replacedStorageRelPath?: string
 }
 
 export interface SweptChannelAttachmentRef {

@@ -168,7 +168,7 @@ export interface RuntimeCallerContext {
 
 export interface MessageResponse {
   success: boolean
-  status?: 'completed' | 'waiting_approval' | 'pending'
+  status?: 'completed' | 'waiting_approval' | 'pending' | 'cancelled'
   response?: string
   attachments?: Attachment[]
   error?: TaskError

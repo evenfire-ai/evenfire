@@ -68,6 +68,40 @@ export function down(db: Database): void {
   db.exec(`
     DROP INDEX IF EXISTS idx_sessions_linked_user_id;
     DROP INDEX IF EXISTS idx_sessions_active_session_key;
+
+    -- Deduplicate rotated rows sharing a session_key before restoring the
+    -- unconditional unique index, clearing parent_session_id references first
+    -- so PRAGMA foreign_keys = ON cannot fail with a FK violation.
+    WITH ranked_sessions AS (
+      SELECT id,
+             ROW_NUMBER() OVER (
+               PARTITION BY session_key
+               ORDER BY CASE WHEN state != 'ended' THEN 0 ELSE 1 END,
+                        started_at DESC,
+                        rowid DESC
+             ) AS rn
+        FROM sessions
+    ),
+    duplicate_sessions AS (
+      SELECT id FROM ranked_sessions WHERE rn > 1
+    )
+    UPDATE sessions
+       SET parent_session_id = NULL
+     WHERE parent_session_id IN (SELECT id FROM duplicate_sessions);
+
+    WITH ranked_sessions AS (
+      SELECT id,
+             ROW_NUMBER() OVER (
+               PARTITION BY session_key
+               ORDER BY CASE WHEN state != 'ended' THEN 0 ELSE 1 END,
+                        started_at DESC,
+                        rowid DESC
+             ) AS rn
+        FROM sessions
+    )
+    DELETE FROM sessions
+     WHERE id IN (SELECT id FROM ranked_sessions WHERE rn > 1);
+
     CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_session_key
       ON sessions(session_key);
     DROP TABLE IF EXISTS conversation_attachments;

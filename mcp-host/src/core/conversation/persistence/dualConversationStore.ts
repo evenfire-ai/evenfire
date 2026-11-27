@@ -248,7 +248,18 @@ export class DualConversationStore implements ConversationStore {
     // keeps divergence observability intact.
     const bySessionKey = new Map<string, PersistedSessionListing>()
     for (const entry of sqlList) bySessionKey.set(entry.sessionKey, entry)
-    for (const entry of memList) bySessionKey.set(entry.sessionKey, entry)
+    for (const entry of memList) {
+      const durable = bySessionKey.get(entry.sessionKey)
+      bySessionKey.set(entry.sessionKey, {
+        ...durable,
+        ...entry,
+        channelType: entry.channelType ?? durable?.channelType,
+        userId: entry.userId ?? durable?.userId,
+        channelId: entry.channelId ?? durable?.channelId,
+        sourceMessage: entry.sourceMessage ?? durable?.sourceMessage,
+        expiresAt: entry.expiresAt ?? durable?.expiresAt,
+      })
+    }
     return Array.from(bySessionKey.values())
   }
 

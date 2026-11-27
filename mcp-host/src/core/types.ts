@@ -222,6 +222,7 @@ export type ResumeSourceMessage = Pick<
   | 'locationReferenceResolutions'
   | 'authorityV2'
   | 'channelAttachmentIds'
+  | 'attachmentIngestErrors'
 > & {
   /** Only the team scope survives; the channel's raw payload is not persisted. */
   metadata?: { teamId: string }

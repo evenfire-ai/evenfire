@@ -2436,6 +2436,13 @@ async function handleIncomingMessage(
           model,
         }
       }
+      await agent?.reconcileChannelIdentity({
+        medium: identity.medium,
+        workspaceOrTargetKey: workspaceOrTargetKeyForIdentity(identity),
+        providerUserId: identity.providerUserId,
+        channelScope: null,
+        liveLinkedUserId,
+      })
       effectiveMessage = { ...message, admittedLinkedUserId: liveLinkedUserId }
     } catch (error) {
       const kind = classifyAuthorizationFailureDetailed(error)
@@ -2515,6 +2522,7 @@ const prepareIncomingMessage = createIncomingAdmission({
   applySessionModelSelection,
   dispatch: dispatchIncomingMessage,
   getConversationManager: () => agent!.getConversationManager(),
+  onSessionRotated: sessionKey => promptCache?.drop(sessionKey),
   approvalSnapshot: () => agent!.approvalSnapshot(),
   fileReferenceGfs: fileReferenceGfsGate,
   gfsSurfaceRuntimeCapability: message => {
@@ -2780,6 +2788,13 @@ async function handleTaskResult(
     // ResultStore TTL so the first poll cannot consume the downloadable file
     // before the visible chat bubble renders it.
     return response
+  }
+
+  if (taskLifecycle?.getStatus(taskId) === 'cancelled') {
+    return {
+      success: false,
+      status: 'cancelled',
+    }
   }
 
   // Task still processing or not found
@@ -3768,7 +3783,6 @@ async function shutdown(signal: string): Promise<void> {
   if (agent) {
     await agent.stop()
   }
-  await inFlightChannelAttachmentIngests.waitForAll()
 
   // Best-effort drain of the LLM usage buffer before the process exits.
   // Without this a routine rolling deploy loses up to a minute of buffered
@@ -3797,6 +3811,7 @@ async function shutdown(signal: string): Promise<void> {
   await pluginWorkloadSdkBootstrapServer?.stop()
   await pluginWorkloadSdkServer?.stop()
   await rpcServer?.stop()
+  await inFlightChannelAttachmentIngests.waitForAll()
 
   // T2.1 — drain pending DB writes, then terminate the SQLite worker. A
   // write that could not be persisted makes the process exit 1.
@@ -4350,6 +4365,9 @@ export const mainRpcTestSeams = {
   },
   setMessageQueue(next: MessageQueue | null): void {
     messageQueue = next
+  },
+  setTaskLifecycle(next: TaskLifecycle | null): void {
+    taskLifecycle = next
   },
   failoverEngine(): FailoverEngine | null {
     return failoverEngine

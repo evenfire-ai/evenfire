@@ -33,6 +33,7 @@ import { logger } from '../logger'
 import type { TaskError } from '../queue/types'
 import type { IncomingMessage, MessageResponse, SetModelResult } from '../server/types'
 import { normalizeSessionChannelId, resolveCanonicalSessionKey } from '../session/types.js'
+import { isExternalChannelType } from '../workflow/channelIdentity'
 import type { FileReferenceGfsAccess } from './fileReferenceGfsGate'
 import {
   type FileReferenceCheckFailure,
@@ -99,6 +100,8 @@ export interface IncomingAdmissionDeps {
   }
   /** Live session store for the first-message mode and the messaging command. */
   getConversationManager?: () => ConversationManager
+  /** Called after an external-channel session rotates on linked-identity change (BR-03). */
+  onSessionRotated?: (sessionKey: string) => void
   /**
    * Live ceiling, channel switch and approver policy. Read when a writer runs,
    * not at wiring time.
@@ -349,6 +352,20 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
         try {
           const manager = deps.getConversationManager!()
           const key = resolveCanonicalSessionKey(normalizedMessage)
+          const isExternalChannel = isExternalChannelType(normalizedMessage.channelType)
+          const admittedLinkedUserId = isExternalChannel
+            ? normalizedMessage.admittedLinkedUserId?.trim() || undefined
+            : undefined
+          if (admittedLinkedUserId) {
+            const rotated = await manager.getStore().rotateSessionOnIdentityChange?.({
+              sessionKey: key,
+              expectedLinkedUserId: admittedLinkedUserId,
+              endReason: 'identity_changed',
+            })
+            if (rotated?.rotated) {
+              deps.onSessionRotated?.(key)
+            }
+          }
           const { conversation } = await manager.getOrCreateDetailed(key, {
             userId: normalizedMessage.sender,
             channelType: normalizedMessage.channelType,
@@ -358,6 +375,7 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
             ),
             threadId: normalizedMessage.threadId,
             source: normalizedMessage.channelType,
+            ...(admittedLinkedUserId ? { linkedUserId: admittedLinkedUserId } : {}),
           })
           sessionLogId = approvalLogId(conversation.id)
           const live = deps.approvalSnapshot()

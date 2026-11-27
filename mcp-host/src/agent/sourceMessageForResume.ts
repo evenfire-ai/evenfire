@@ -1,3 +1,4 @@
+import { config } from '../config'
 import type { Attachment, ResumeFileAttachment, ResumeSourceMessage } from '../core/types'
 import type { IncomingMessage } from '../server'
 import { allowlistProviderIdentity, isExternalChannelType } from '../workflow/channelIdentity'
@@ -52,6 +53,14 @@ export function sourceMessageForResume(
     Array.isArray(message.channelAttachmentIds) && message.channelAttachmentIds.length > 0
       ? [...message.channelAttachmentIds]
       : undefined
+  const attachmentIngestErrors =
+    Array.isArray(message.attachmentIngestErrors) && message.attachmentIngestErrors.length > 0
+      ? message.attachmentIngestErrors.slice(0, config.fileReferenceMaxCount).map(entry => ({
+          filename: entry.filename,
+          code: entry.code,
+          message: entry.message,
+        }))
+      : undefined
   return {
     content: message.content,
     channelType: message.channelType,
@@ -74,6 +83,7 @@ export function sourceMessageForResume(
     ...(linkedUserId ? { linkedUserId } : {}),
     ...(providerIdentity ? { providerIdentity } : {}),
     ...(channelAttachmentIds ? { channelAttachmentIds } : {}),
+    ...(attachmentIngestErrors ? { attachmentIngestErrors } : {}),
   }
 }
 

@@ -101,6 +101,7 @@ export function prepareStatements(db: Database): PreparedStatements {
         state = excluded.state,
         ended_at = excluded.ended_at,
         end_reason = excluded.end_reason
+       WHERE sessions.state != 'ended'
     `),
     updateSessionState: db.prepare(`
       UPDATE sessions

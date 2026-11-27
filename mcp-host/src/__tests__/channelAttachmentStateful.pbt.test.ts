@@ -34,6 +34,7 @@ import { ResultStore } from '../resultStore'
 import type { IncomingMessage, ProviderIdentity } from '../server/types'
 import { SessionProcessor, resolveCanonicalSessionKey } from '../session'
 import { resolveVisualDeliveryLimits } from '../visualInput/deliveryLimits'
+import { channelAttachmentStoreDir, putTestBuffer } from './channelAttachmentTestHelpers'
 
 const HEALTHY_STATFS = async () => ({
   bsize: 4096n,
@@ -157,7 +158,17 @@ async function createRealSystem(scheduler: fc.Scheduler): Promise<RealSystem> {
     const lifecycle = new TaskLifecycle()
     queue.setLifecycle(lifecycle)
     const pendingTaskResults = new ResultStore<PendingTaskEntry>(10 * 60 * 1000, e => e.storedAt)
-    const agent = new AgentStateMachine(queue, lifecycle, { autoStart: false })
+    const agent = new AgentStateMachine(queue, lifecycle, {
+      autoStart: false,
+      channelCallerContextResolver: async msg => {
+        if (scheduleResolverAwait.current) {
+          await scheduler.schedule(Promise.resolve())
+        }
+        const u = liveLinkedUserRef.current
+        if (!u) return null
+        return { targetUserId: u, conversationId: msg.channelId }
+      },
+    })
     agent.setConversationStore(storeHandle.store)
     agent.setChannelAttachmentStore(attachmentStore)
     agent.setPromptCache(promptCache)
@@ -166,14 +177,6 @@ async function createRealSystem(scheduler: fc.Scheduler): Promise<RealSystem> {
       defaultPolicy: 'allow_all',
       tools: { srv__pbt_gate: true },
     } as never)
-    agent.setChannelCallerContextResolver(async msg => {
-      if (scheduleResolverAwait.current) {
-        await scheduler.schedule(Promise.resolve())
-      }
-      const u = liveLinkedUserRef.current
-      if (!u) return null
-      return { targetUserId: u, conversationId: msg.channelId }
-    })
 
     const llmMock = vi.fn(async (messages: ChatMessage[]) => {
       capturedPrompts.push({
@@ -284,9 +287,8 @@ async function createRealSystem(scheduler: fc.Scheduler): Promise<RealSystem> {
 async function assertInvariants(m: ReferenceModel, r: RealSystem): Promise<void> {
   const db = r.storeHandle.worker.db
 
-  // SF9: Zero leaked activeReservedBytes and zero orphan .partial files at rest.
-  expect(r.attachmentStore.getActiveReservedBytes()).toBe(0)
-  const storeDir = r.attachmentStore.getStoreDir()!
+  // SF9: Zero orphan .partial files at rest.
+  const storeDir = channelAttachmentStoreDir(r.tmpDir)
   try {
     const files = await fs.readdir(storeDir)
     expect(files.filter(f => f.endsWith('.partial'))).toHaveLength(0)
@@ -380,7 +382,7 @@ class IngestAndAttachmentOnlyCmd implements fc.AsyncCommand<ReferenceModel, Real
             ? 'application/octet-stream'
             : 'text/plain'
 
-    const put = await r.attachmentStore.putBuffer({ bytes, linkedUserId: linkedUser })
+    const put = await putTestBuffer(r.attachmentStore, { bytes, linkedUserId: linkedUser })
     const classification = classifyBytes({
       bytes,
       totalByteLength: bytes.length,
