@@ -47,6 +47,7 @@ describe('executeSingleTool — thrown error text is sanitized (A15 item 6)', ()
     const tool = throwingTool()
     const seenByTransform: Array<{ content: string; isError: boolean }> = []
     const guardrails: ToolLaneGuardrail = {
+      derivedFileReadDecision: () => undefined,
       async decide(_id, input) {
         return { decision: 'allow', reasonCode: 'r', effectiveInput: input, source: 'host_rule' }
       },

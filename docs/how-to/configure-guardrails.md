@@ -41,6 +41,26 @@ Because of step 3, adding a single `deny` rule turns **every other** tool
 call into an `ask`. Pair specific rules with a catch-all `allow` per
 provenance (see the example below).
 
+### `file_read` rules cover `json_transform` file reads
+
+`json_transform` can read a workspace JSON file through its `file` input.
+When it does, the call also gets the decision your rules give
+`file_read {path: <file>}`, and the stricter of the two decisions applies. A
+`deny` on `file_read` under `secrets` therefore also blocks
+`json_transform {file: "secrets/a.json"}`. On a Host whose rules allow only
+some `file_read` paths, a file outside them gets `ask` (`unmatched_ask`),
+exactly as `file_read` would. A `json_transform` call with `input` instead of
+`file` reads no file, so `file_read` rules do not apply to it.
+
+Hooks are not called for that extra check. A `preToolUse` hook receives the
+real call, named `json_transform`, so a hook that polices file reads must
+handle `json_transform` too.
+
+**Before you upgrade:** if a `preToolUse` hook enforces your file-read policy by
+matching `file_read`, it does not see `json_transform {file}` reads. Extend the
+hook to `json_transform` calls that carry a `file` argument, or express the
+policy as `file_read` rules, which cover those reads.
+
 ### How `ask` interacts with approvals
 
 - In an **interactive** run, a guardrail `ask` creates a pending approval

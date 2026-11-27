@@ -16,6 +16,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import type { GateCause } from '../approval/gateCause'
+import { nativeApprovalCause } from '../approval/nativeApprovalCause'
 import { LoopController, Tool, ToolRegistry } from '../interfaces'
 import { DefaultLoopController } from '../orchestration/loopConfig'
 import { ChatMessage, PendingApproval, ToolDefinition } from '../types'
@@ -188,21 +189,20 @@ export class UnifiedApprovalGateController implements LoopController {
       return cronForced
     }
 
-    // 2. Native tools: CRD override > tool's code default.
-    // Use Object.hasOwn to avoid resolving prototype methods (e.g. tool name
-    // "toString" would otherwise hit Object.prototype.toString and produce a
-    // truthy "override").
+    // 2. Native tools: CRD override > tool's code default, plus a `true`
+    // override on any name the tool's `approvalAlso` returns. Overrides are
+    // read with Object.hasOwn, so a tool named "toString" never resolves a
+    // prototype method as an override.
     const tools = this.readApprovalConfig()?.tools
-    const override = tools && Object.hasOwn(tools, toolName) ? tools[toolName] : undefined
-    const needsApproval = override ?? tool?.requiresApproval() ?? false
+    const cause = nativeApprovalCause(tool, toolName, params, tools)
 
-    if (needsApproval) {
+    if (cause !== 'none') {
       return this.createSuspension(
         toolName,
         params,
         `Tool "${toolName}" requires approval before execution`,
         tool,
-        override === true ? 'admin_forced' : 'ordinary'
+        cause
       )
     }
 

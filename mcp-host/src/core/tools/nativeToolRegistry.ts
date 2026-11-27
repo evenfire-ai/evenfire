@@ -334,7 +334,7 @@ export class NativeToolRegistry implements ToolRegistry {
     )
     this.register(new HttpRequestTool(config.httpAllowlist))
     this.register(new SystemInfoTool())
-    this.register(new JsonTransformTool())
+    this.register(new JsonTransformTool(fileToolsRoot))
 
     // Memory tools: persistent (filesystem), requires workspace.
     if (workspace) {

@@ -76,7 +76,7 @@ function normalizePath(p: string): string {
 }
 
 /** Boundary-safe containment: `child` is `base` or strictly within it (no prefix trick). */
-function isUnder(child: string, base: string): boolean {
+export function isUnder(child: string, base: string): boolean {
   const c = normalizePath(child)
   const b = normalizePath(base)
   if (c === b) return true

@@ -64,6 +64,7 @@ const noopSafety: Safety = {
 
 function fixedGuardrail(decision: Decision, reasonCode = 'r'): ToolLaneGuardrail {
   return {
+    derivedFileReadDecision: () => undefined,
     async decide(_id, input) {
       return { decision, reasonCode, effectiveInput: input, source: 'host_rule' }
     },
@@ -246,6 +247,7 @@ describe('guardrail gate in executeToolCalls', () => {
   it('PostToolUse transformResult redacts the executed result content (§6.2)', async () => {
     const tool = new StubTool('do_thing')
     const guardrail: ToolLaneGuardrail = {
+      derivedFileReadDecision: () => undefined,
       async decide(_id, input) {
         return { decision: 'allow', reasonCode: 'r', effectiveInput: input, source: 'host_rule' }
       },
@@ -269,6 +271,7 @@ describe('guardrail gate in executeToolCalls', () => {
       },
     })
     const guardrail: ToolLaneGuardrail = {
+      derivedFileReadDecision: () => undefined,
       async decide(_id, input) {
         return { decision: 'allow', reasonCode: 'r', effectiveInput: input, source: 'host_rule' }
       },
@@ -324,6 +327,7 @@ describe('guardrail gate in executeToolCalls', () => {
   ])('PostToolUse transformResult also sees $path', async ({ tools, raw }) => {
     const seen: Array<{ content: string; isError: boolean }> = []
     const guardrail: ToolLaneGuardrail = {
+      derivedFileReadDecision: () => undefined,
       async decide(_id, input) {
         return { decision: 'allow', reasonCode: 'r', effectiveInput: input, source: 'host_rule' }
       },
@@ -393,6 +397,7 @@ describe('exact guardrail ask one-shot binding', () => {
     const config = makeConfig(
       tool,
       {
+        derivedFileReadDecision: () => undefined,
         async decide() {
           return {
             decision: 'ask',
@@ -429,6 +434,7 @@ describe('exact guardrail ask one-shot binding', () => {
     const tool = new StubTool('do_thing')
     const effectiveInput = { command: 'transformed' }
     const config = makeConfig(tool, {
+      derivedFileReadDecision: () => undefined,
       async decide() {
         return { decision: 'ask', reasonCode: 'updated_input', effectiveInput, source: 'host_rule' }
       },
@@ -504,6 +510,7 @@ describe('mode-set guardrail rewrite and redaction', () => {
 
   function rewritingGuardrail(): ToolLaneGuardrail {
     return {
+      derivedFileReadDecision: () => undefined,
       async decide(_id, input) {
         return {
           decision: 'allow',

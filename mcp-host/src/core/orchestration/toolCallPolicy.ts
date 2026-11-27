@@ -11,13 +11,15 @@ import type { ShellVerdict } from '../approval/shellClassifier'
 import { isDenied } from '../conversation/denialPolicy'
 import { oneShotMatches } from '../extensions/approvalMatch'
 import {
+  type ToolGuardrailDecision,
   type ToolIdentity,
+  atLeastAsStrict,
   recordAndCheck,
   recordDecision,
   resolveToolIdentityFromRegistry,
 } from '../guardrails'
 import type { RequestImageUsage } from '../interfaces'
-import type { PendingApproval, ToolCall, ToolResult } from '../types'
+import type { PendingApproval, ToolCall, ToolResult, ValidationResult } from '../types'
 import type { LoopConfig } from './loopConfig'
 import { executeSingleTool } from './toolUseLoopSingleTool'
 
@@ -70,7 +72,12 @@ export async function admitToolCall(
   iteration: number
 ): Promise<ToolCallAdmission> {
   let call = inputCall
-  let validation = config.toolOutputProcessor.beforeExecution(call.name, call.arguments)
+  // Every tool's parameters are a JSON object. A provider can still deliver
+  // null, an array or a scalar (an OpenAI-family adapter parses the string
+  // "null" to null); validators read fields of it, so refuse it here, once.
+  let validation: ValidationResult = isArgumentObject(call.arguments)
+    ? config.toolOutputProcessor.beforeExecution(call.name, call.arguments)
+    : { is_valid: false, errors: [ARGUMENTS_NOT_AN_OBJECT] }
   if (validation.is_valid) {
     validation =
       (await config.toolRegistry.get(call.name)?.validateParams?.(call.arguments)) ?? validation
@@ -125,7 +132,8 @@ export async function admitToolCall(
       }
     }
 
-    const decision = await config.guardrails.decide(toolIdentity, call.arguments)
+    let decision = await config.guardrails.decide(toolIdentity, call.arguments)
+    decision = withDerivedFileReads(config, call.name, toolIdentity, decision)
     config.events.emit({
       type: 'guardrail:decision',
       data: {
@@ -212,6 +220,36 @@ export async function admitToolCall(
     return { kind: 'execute', call, toolIdentity }
   }
   return applyApprovalMode(call, config, gate, toolIdentity)
+}
+
+/**
+ * Applies the Host's `file_read` rules (rules only; hooks are not called) to
+ * the files a native tool call declares with `Tool.fileReads`. Today only
+ * `json_transform {file}` declares reads; a tool that reads files without
+ * declaring them is not covered. Only a strictly stricter result replaces the
+ * call's own decision; the deny and ask branches then act on it as usual.
+ */
+function withDerivedFileReads(
+  config: LoopConfig,
+  name: string,
+  identity: ToolIdentity,
+  own: ToolGuardrailDecision
+): ToolGuardrailDecision {
+  if (identity.provenance !== 'native') return own
+  const reads = config.toolRegistry.get(name)?.fileReads?.(own.effectiveInput)
+  if (reads === undefined) return own
+  const derived = config.guardrails?.derivedFileReadDecision(reads)
+  if (derived === undefined) return own
+  if (derived.decision === own.decision || !atLeastAsStrict(derived.decision, own.decision)) {
+    return own
+  }
+  return { ...own, decision: derived.decision, reasonCode: derived.reasonCode, source: 'host_rule' }
+}
+
+const ARGUMENTS_NOT_AN_OBJECT = 'the tool arguments must be a JSON object'
+
+function isArgumentObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
 function skipped(call: ToolCall): ToolCallAdmission {

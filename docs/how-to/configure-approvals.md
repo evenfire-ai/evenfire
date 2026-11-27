@@ -12,6 +12,14 @@ Among **native** tools, five require approval by default — `shell_exec`,
 Telegram, Slack or Teams. Every other native tool runs without prompting. Each
 native tool can be flipped with a per-tool override on `Host.spec.approval`.
 
+`json_transform` can read a workspace JSON file (its `file` input). That read
+follows `file_read`: `tools.file_read: true` also makes a `json_transform`
+file read ask, and guardrail `file_read` rules apply to the file (see
+[Configure guardrails](configure-guardrails.md#file_read-rules-cover-json_transform-file-reads)).
+`tools.file_read: false` does not loosen `tools.json_transform: true`. The
+output of `json_transform` reaches the model wrapped as tool output, like
+`file_read`'s.
+
 Pending approvals are kept in mcp-host's conversation store. The default store
 (`CLERUM_SESSION_STORE=memory`) is in memory, so a pod restart loses them.
 Stateless Hosts use the SQLite store on their workspace volume, and the

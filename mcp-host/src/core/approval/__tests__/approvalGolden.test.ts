@@ -127,6 +127,7 @@ function guardrailFor(
       ? { ...submitted, rewritten: true }
       : submitted
   return {
+    derivedFileReadDecision: () => undefined,
     async decide() {
       return { decision, reasonCode: 'golden', effectiveInput, source: 'host_rule' }
     },

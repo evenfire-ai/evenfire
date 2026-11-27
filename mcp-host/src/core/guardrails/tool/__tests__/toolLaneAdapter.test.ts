@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest'
 import type { GuardrailsConfig } from '../../config'
 import type { ToolIdentity } from '../provenance'
-import { buildToolLaneGuardrail } from '../toolLaneAdapter'
+import { type ToolLaneGuardrail, buildToolLaneGuardrail } from '../toolLaneAdapter'
 
 const fileWrite: ToolIdentity = { provenance: 'native', name: 'file_write' }
 
@@ -111,5 +111,107 @@ describe('buildToolLaneGuardrail', () => {
     )!
     const v = await g.transformResult!(fileWrite, {}, { content: 'secret', isError: true })
     expect(v).toEqual({ content: '[redacted]', isError: true })
+  })
+})
+
+describe('derivedFileReadDecision', () => {
+  const rules: GuardrailsConfig = {
+    rules: [
+      { id: 'allow-native', action: 'allow', match: { tool: { provenance: 'native', name: '*' } } },
+      {
+        id: 'ask-secrets',
+        action: 'ask',
+        reasonCode: 'secrets_read',
+        match: {
+          tool: { provenance: 'native', name: 'file_read' },
+          arguments: [{ type: 'path', pointer: '/path', op: 'under', value: 'secrets' }],
+        },
+      },
+    ],
+  }
+
+  it('returns the strictest file_read decision and its reason for the declared reads', () => {
+    const g = buildToolLaneGuardrail(rules)!
+    expect(g.derivedFileReadDecision({ paths: ['pub/a.json', 'secrets/a.json'] })).toEqual({
+      decision: 'ask',
+      reasonCode: 'secrets_read',
+    })
+    expect(g.derivedFileReadDecision({ paths: ['pub/a.json'] })).toEqual({
+      decision: 'allow',
+      reasonCode: 'rule:allow-native',
+    })
+  })
+
+  const denyAllHook = {
+    id: 'th',
+    endpoint: 'http://svc',
+    path: '/',
+    lifecyclePoints: ['pre_tool_use' as const],
+    capabilities: ['may_deny' as const],
+    failMode: 'closed' as const,
+    order: 100,
+  }
+  const countingFetch = () => {
+    const counter = { calls: 0 }
+    const fetchImpl = async () => {
+      counter.calls++
+      return { status: 200, text: async () => '{"decision":"deny","reasonCode":"hook_blocked"}' }
+    }
+    return { counter, fetchImpl }
+  }
+
+  it('uses the rules only: a hook that denies every call is not consulted', async () => {
+    const { counter, fetchImpl } = countingFetch()
+    const g = buildToolLaneGuardrail(
+      { ...rules, hookDescriptors: [denyAllHook] },
+      { getAuthToken: () => '', fetchImpl }
+    )!
+    // The rule's ask, not the hook's deny.
+    expect(g.derivedFileReadDecision({ paths: ['secrets/a.json'] })).toEqual({
+      decision: 'ask',
+      reasonCode: 'secrets_read',
+    })
+    expect(g.derivedFileReadDecision({ paths: ['pub/a.json'] })).toEqual({
+      decision: 'allow',
+      reasonCode: 'rule:allow-native',
+    })
+    expect(counter.calls).toBe(0)
+    // Witness: the same guardrail's decide() does call the hook, and it denies.
+    const own = await g.decide(
+      { provenance: 'native', name: 'file_read' },
+      { path: 'secrets/a.json' }
+    )
+    expect(own.decision).toBe('deny')
+    expect(counter.calls).toBe(1)
+  })
+
+  it('is undefined on a Host with hooks but no rules, while decide() calls the hook', async () => {
+    const { counter, fetchImpl } = countingFetch()
+    const g = buildToolLaneGuardrail(
+      { hookDescriptors: [denyAllHook] },
+      { getAuthToken: () => '', fetchImpl }
+    )!
+    expect(g.derivedFileReadDecision({ paths: ['secrets/a.json'] })).toBeUndefined()
+    expect(counter.calls).toBe(0)
+    const own = await g.decide(
+      { provenance: 'native', name: 'file_read' },
+      { path: 'secrets/a.json' }
+    )
+    expect(own.decision).toBe('deny')
+    expect(counter.calls).toBe(1)
+  })
+})
+
+describe('ToolLaneGuardrail contract', () => {
+  it('a guardrail without derivedFileReadDecision does not type-check', () => {
+    // A guardrail that omitted the member would skip the derived file_read policy
+    // without notice, so the member is required (checked by tsc --noEmit).
+    // @ts-expect-error derivedFileReadDecision is required
+    const partial: ToolLaneGuardrail = {
+      async decide(_identity, input) {
+        return { decision: 'allow', reasonCode: 'r', effectiveInput: input, source: 'current' }
+      },
+    }
+    expect(partial.derivedFileReadDecision).toBeUndefined()
   })
 })

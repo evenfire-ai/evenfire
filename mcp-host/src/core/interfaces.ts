@@ -114,6 +114,18 @@ export interface ExecutionContext {
   onOutput(chunk: string): void
 }
 
+/**
+ * Workspace paths a tool call reads, as the model wrote them (the same form
+ * `file_read {path}` takes).
+ * - `subtrees`: a path may be a directory, and the call reads all of it.
+ * - `wholeWorkspace`: the call's reads are not bounded by `paths`.
+ */
+export interface FileReads {
+  readonly paths: readonly string[]
+  readonly subtrees?: true
+  readonly wholeWorkspace?: true
+}
+
 export interface ToolEmissionContext {
   measureContent(content: string): number
   renderContent(content: string): string
@@ -129,6 +141,18 @@ export interface Tool {
   /** Optional live parameter validation, run before approval and rechecked by
    * the implementation at dispatch when its schema can change while suspended. */
   validateParams?(params: Record<string, unknown>): ValidationResult | Promise<ValidationResult>
+  /**
+   * Optional. Other native tool names whose CRD `tools.<name>: true` override
+   * also forces a card for this call. A `false` on those names never loosens
+   * this tool.
+   */
+  approvalAlso?(params: Record<string, unknown>): readonly string[]
+  /**
+   * Optional. The workspace files this call reads, so guardrail `file_read`
+   * rules apply to them as they would to `file_read` itself. `undefined` means
+   * the call reads no file content.
+   */
+  fileReads?(params: Record<string, unknown>): FileReads | undefined
   /**
    * Safe, producer-owned classification for governed replay. This must never
    * include tool arguments or output. Native tools may omit it and are then
