@@ -173,7 +173,7 @@ type DbMigration = {
   // Equivalent names used before a branch merge renumbered the same migration body.
   legacyVersions?: readonly string[]
   apply: (db: DbClient) => Promise<void>
-  // Extra attempts when the transaction loses a lock wait (runner versions only).
+  // Extra attempts when the schema transaction loses a lock wait (runner versions only).
   lockRetries?: number
 }
 

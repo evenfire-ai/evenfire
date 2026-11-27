@@ -888,10 +888,17 @@ describe('D34 PR1 migration runner', () => {
   // gfsWatch.authzSessionTriggers.realPostgres.integration.test.ts; these cases
   // pin the runner's bounds around it.
   describe('lock retries', () => {
-    const retried = '0147_gfs_watch_session_users_notify'
+    const plainVersion = '0147_gfs_watch_session_users_notify'
+    // Its CHECK is added NOT VALID and validated after the schema transaction.
+    const postSchemaVersion = '0155_workflow_run_failure_reason'
 
-    function lockFailingRun(failures: Array<{ code?: string }>, lockRetries?: number) {
+    function lockFailingRun(
+      failures: Array<{ code?: string }>,
+      lockRetries?: number,
+      retried: string = plainVersion
+    ) {
       const transactions: string[] = []
+      const validations: string[] = []
       const sleeps: number[] = []
       const recorded: string[] = []
       let calls = 0
@@ -909,6 +916,8 @@ describe('D34 PR1 migration runner', () => {
         db: {
           query: vi.fn(async (sql: string) => {
             if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') transactions.push(sql)
+            const validation = VALIDATE_CONSTRAINT.exec(sql)
+            if (validation) validations.push(validation[2])
             return { rows: [], rowCount: 0 }
           }),
         },
@@ -921,14 +930,14 @@ describe('D34 PR1 migration runner', () => {
           sleeps.push(ms)
         },
       })
-      return { run, transactions, sleeps, recorded, attempts: () => calls }
+      return { run, transactions, validations, sleeps, recorded, attempts: () => calls }
     }
 
     it('retries the whole transaction after a lock timeout and then records once', async () => {
       const r = lockFailingRun([{ code: '55P03' }, { code: '55P03' }], 2)
       await r.run
       expect(r.attempts()).toBe(3)
-      expect(r.recorded).toEqual([retried])
+      expect(r.recorded).toEqual([plainVersion])
       expect(r.transactions).toEqual(['BEGIN', 'ROLLBACK', 'BEGIN', 'ROLLBACK', 'BEGIN', 'COMMIT'])
       expect(r.sleeps).toEqual([1_000, 2_000])
     })
@@ -951,6 +960,64 @@ describe('D34 PR1 migration runner', () => {
       await expect(noRetries.run).rejects.toMatchObject({ code: '55P03' })
       expect(noRetries.attempts()).toBe(1)
       expect(noRetries.sleeps).toEqual([])
+    })
+
+    it('retries the schema transaction of a post-schema version, then validates and records once', async () => {
+      expect(hasPostSchemaWork(postSchemaVersion)).toBe(true)
+      const r = lockFailingRun([{ code: '55P03' }, { code: '55P03' }], 2, postSchemaVersion)
+      await r.run
+      expect(r.attempts()).toBe(3)
+      expect(r.transactions).toEqual([
+        // The schema transaction: two lost lock waits, then a commit.
+        'BEGIN',
+        'ROLLBACK',
+        'BEGIN',
+        'ROLLBACK',
+        'BEGIN',
+        'COMMIT',
+        // The constraint validation, once.
+        'BEGIN',
+        'COMMIT',
+        // The receipt, once.
+        'BEGIN',
+        'COMMIT',
+      ])
+      expect(r.validations).toEqual(['workflow_runs_failure_reason_check'])
+      expect(r.sleeps).toEqual([1_000, 2_000])
+      expect(r.recorded).toEqual([postSchemaVersion])
+    })
+
+    it('gives up on the schema transaction of a post-schema version after its retries, before any validation', async () => {
+      const r = lockFailingRun(
+        [{ code: '55P03' }, { code: '55P03' }, { code: '55P03' }],
+        2,
+        postSchemaVersion
+      )
+      await expect(r.run).rejects.toMatchObject({ code: '55P03' })
+      expect(r.attempts()).toBe(3)
+      expect(r.sleeps).toEqual([1_000, 2_000])
+      expect(r.validations).toEqual([])
+      expect(r.recorded).toEqual([])
+    })
+
+    it('does not retry other errors in the schema transaction of a post-schema version', async () => {
+      for (const code of ['57014', '40P01']) {
+        const other = lockFailingRun([{ code }], 2, postSchemaVersion)
+        await expect(other.run).rejects.toMatchObject({ code })
+        expect(other.attempts(), code).toBe(1)
+        expect(other.sleeps, code).toEqual([])
+        expect(other.validations, code).toEqual([])
+        expect(other.recorded, code).toEqual([])
+      }
+    })
+
+    it('a post-schema version without lockRetries gets one attempt', async () => {
+      const r = lockFailingRun([{ code: '55P03' }], undefined, postSchemaVersion)
+      await expect(r.run).rejects.toMatchObject({ code: '55P03' })
+      expect(r.attempts()).toBe(1)
+      expect(r.sleeps).toEqual([])
+      expect(r.validations).toEqual([])
+      expect(r.recorded).toEqual([])
     })
   })
 
