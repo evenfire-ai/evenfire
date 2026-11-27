@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { HostTable, collectProviderIds } from '../HostTable'
 import type { HostItem } from '../HostTable.types'
 
@@ -398,4 +398,81 @@ describe('HostTable — row actions kebab', () => {
     expect(viewItem).not.toBeDisabled()
     expect(deletingItem).toBeDisabled()
   })
+})
+
+describe('HostTable type column (lifecycle)', () => {
+  function hostWithLifecycle(name: string, stateless: boolean): HostItem {
+    return {
+      metadata: { name, namespace: 'mcp-host' },
+      spec: {
+        contextRef: 'context1',
+        model: { provider: 'openai' },
+        lifecycle: { stateless },
+      },
+    }
+  }
+
+  it('renders the Type column with the lifecycle label and a hover explanation', async () => {
+    renderHostTable([hostWithLifecycle('warm-agent', false), hostWithLifecycle('cold-agent', true)])
+
+    expect(screen.getByRole('columnheader', { name: 'Type' })).toBeInTheDocument()
+
+    const stateful = within(screen.getByLabelText('Open agent warm-agent')).getByText('Stateful')
+    fireEvent.mouseEnter(stateful)
+    expect(screen.getByRole('tooltip')).toHaveTextContent(
+      'This agent runs continuously; its process is never scaled to zero.'
+    )
+    fireEvent.mouseLeave(stateful)
+    // The card survives the pointer grace window, then hides.
+    await waitFor(() => expect(screen.queryByRole('tooltip')).toBeNull())
+
+    const stateless = within(screen.getByLabelText('Open agent cold-agent')).getByText('Stateless')
+    fireEvent.mouseEnter(stateless)
+    expect(screen.getByRole('tooltip')).toHaveTextContent(
+      'This agent persists session state to disk and scales to zero while idle. It wakes on demand.'
+    )
+  })
+
+  it('sorts rows by the Type column label when its sort button is clicked', () => {
+    // Insertion order puts the stateless agent first.
+    renderHostTable([hostWithLifecycle('cold-agent', true), hostWithLifecycle('warm-agent', false)])
+
+    const rowOrder = () =>
+      screen
+        .getAllByLabelText(/^Open agent /)
+        .map(row => row.getAttribute('aria-label')?.replace('Open agent ', ''))
+
+    // Ascending: Stateful ("Statef") sorts before Stateless ("Statel").
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Type ascending' }))
+    expect(rowOrder()).toEqual(['warm-agent', 'cold-agent'])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Type descending' }))
+    expect(rowOrder()).toEqual(['cold-agent', 'warm-agent'])
+  })
+})
+
+it('keeps tooltip content clicks separate from row navigation', () => {
+  const onOpen = vi.fn()
+  render(
+    <HostTable
+      items={[hostWithContext('chatllm', 'context1')]}
+      onOpen={onOpen}
+      onOpenConnectors={vi.fn()}
+      onDelete={vi.fn()}
+      deletingKey={null}
+      onRefresh={vi.fn()}
+      onCreateHost={vi.fn()}
+      refreshing={false}
+    />
+  )
+  const row = screen.getByLabelText('Open agent chatllm')
+  fireEvent.mouseEnter(within(row).getByText('Stateful'))
+  const tooltip = screen.getByRole('tooltip')
+  expect(tooltip).toBeVisible()
+  fireEvent.click(tooltip)
+  expect(onOpen).not.toHaveBeenCalled()
+  fireEvent.click(row)
+  expect(onOpen).toHaveBeenCalledTimes(1)
+  fireEvent.keyDown(row, { key: 'Enter' })
+  expect(onOpen).toHaveBeenCalledTimes(2)
 })

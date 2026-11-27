@@ -8,9 +8,15 @@ import {
   TableViewport,
   useTableSort,
 } from '@clerum/frontend-components'
+import {
+  AGENT_TYPE_LABELS,
+  AGENT_TYPE_TOOLTIPS,
+  agentLifecycleTypeFromSpec,
+} from '../lib/agentLifecycle'
 import { getProviderLabel } from '../lib/llm'
 import { ConnectorCountHoverCard } from './ConnectorCountCell'
 import type { HostItem, HostRef } from './HostTable.types'
+import { HoverTooltip } from './HoverTooltip'
 import { LlmProviderIcon } from './LlmProviderIcon'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
@@ -23,6 +29,7 @@ import { IconRefresh } from './icons'
 
 const HOST_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
+  { key: 'type', label: 'Type', width: '10%' },
   { key: 'connectors', label: 'Connectors', width: '14%' },
   { key: 'providers', label: 'Providers', minWidth: '8rem' },
   { key: 'actions', width: '3.5rem', align: 'right', ariaLabel: 'Actions' },
@@ -104,24 +111,26 @@ export function HostTable({
         .includes(normalizedSearch)
     })
   }, [normalizedSearch, rows])
-  const hostSort = useTableSort<(typeof filteredRows)[number], 'name' | 'connectors' | 'providers'>(
-    {
-      rows: filteredRows,
-      defaultKey: 'name',
-      accessors: {
-        name: row => row.displayName,
-        connectors: row => contextsByRef?.[String(row.item.spec?.contextRef || '')]?.length ?? 0,
-        providers: row => collectProviderIds(row.item.spec || {}).join(','),
-      },
-      identity: row => row.key,
-    }
-  )
+  const hostSort = useTableSort<
+    (typeof filteredRows)[number],
+    'name' | 'type' | 'connectors' | 'providers'
+  >({
+    rows: filteredRows,
+    defaultKey: 'name',
+    accessors: {
+      name: row => row.displayName,
+      type: row => agentLifecycleTypeFromSpec(row.item.spec),
+      connectors: row => contextsByRef?.[String(row.item.spec?.contextRef || '')]?.length ?? 0,
+      providers: row => collectProviderIds(row.item.spec || {}).join(','),
+    },
+    identity: row => row.key,
+  })
   const hostColumns = HOST_COLUMNS.map(column => ({
     ...column,
     ...(column.key !== 'actions'
       ? {
           activeDirection: hostSort.key === column.key ? hostSort.direction : null,
-          onSort: () => hostSort.sortBy(column.key as 'name' | 'connectors' | 'providers'),
+          onSort: () => hostSort.sortBy(column.key as 'name' | 'type' | 'connectors' | 'providers'),
         }
       : {}),
   }))
@@ -194,6 +203,7 @@ export function HostTable({
             ) : (
               hostSort.sortedRows.map(({ key, namespace, name, displayName, item }) => {
                 const rawContext = String(item.spec?.contextRef || '')
+                const agentType = agentLifecycleTypeFromSpec(item.spec)
                 const contextServers = rawContext ? contextsByRef?.[rawContext] : undefined
                 const providers = collectProviderIds(item.spec || {})
                 const openAgent = () => onOpen({ namespace, name })
@@ -206,6 +216,13 @@ export function HostTable({
                   >
                     <td>
                       <span className="cu-table__cell-name">{displayName}</span>
+                    </td>
+                    <td className="cu-table__cell-soft">
+                      <HoverTooltip
+                        className="cu-table__cell-type"
+                        label={AGENT_TYPE_LABELS[agentType]}
+                        tooltip={AGENT_TYPE_TOOLTIPS[agentType]}
+                      />
                     </td>
                     <td>
                       {rawContext ? (
