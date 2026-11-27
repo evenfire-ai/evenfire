@@ -21,12 +21,16 @@ import { extractBearerToken } from '../../../utils/extractBearerToken.js'
 // administrative capacity applies only after the existing signature check. The
 // unauthenticated subscription OAuth callback has no credential to verify: it
 // selects its budget by whether a `state` is present (see
-// subscriptionOAuthCallbackRateLimits).
+// subscriptionOAuthCallbackRateLimits). The external (trigger, resume, cancel)
+// and mcp-host (trigger) workflow trigger lanes are not administrative families:
+// every key they derive, including the source-IP fallback and a raw bearer, uses
+// the one configured budget CONTROL_API_WORKFLOW_TRIGGER_PER_MIN (default 10).
+// The administrative trigger's unverified-credential budget stays fixed at 10.
 const UNVERIFIED_WORKFLOW_GRANT_READ_PER_MINUTE = 60
 const UNVERIFIED_WORKFLOW_GRANT_WRITE_PER_MINUTE = 20
 const UNVERIFIED_WORKFLOW_ADMIN_READ_PER_MINUTE = 60
 const UNVERIFIED_ADMIN_OUTPUTS_READ_PER_MINUTE = 30
-const WORKFLOW_TRIGGER_PER_MINUTE = 10
+const UNVERIFIED_ADMIN_WORKFLOW_TRIGGER_PER_MINUTE = 10
 const UNVERIFIED_ADMIN_SUBSCRIPTION_READ_PER_MINUTE = 30
 const UNVERIFIED_ADMIN_SUBSCRIPTION_WRITE_PER_MINUTE = 20
 const SUBSCRIPTION_CALLBACK_IP_PER_MINUTE = 20
@@ -413,7 +417,7 @@ export function adminWorkflowTriggerRateLimit() {
       getBucketKey: adminWorkflowTriggerRateLimitKey,
       onBackendUnavailable: 'process-memory',
     },
-    WORKFLOW_TRIGGER_PER_MINUTE,
+    UNVERIFIED_ADMIN_WORKFLOW_TRIGGER_PER_MINUTE,
     hasVerifiedAdminCredential
   )
 }
@@ -426,7 +430,7 @@ function hashedWorkflowTriggerBucket(credential: string): string {
 function workflowTriggerRateLimitFor(getCredential: (req: Request) => string | null) {
   return rateLimitMiddleware({
     bucketType: 'workflow_trigger',
-    maxPerMinute: WORKFLOW_TRIGGER_PER_MINUTE,
+    maxPerMinute: config.workflowTriggerPerMin,
     getBucketKey: (req: Request) => {
       const credential = getCredential(req)
       if (!credential) return null

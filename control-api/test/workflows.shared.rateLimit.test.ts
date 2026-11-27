@@ -1277,4 +1277,100 @@ describe('routes/workflows/shared/rateLimit', () => {
     expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
     expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toBe(mockCheckAndIncrement.mock.calls[1]?.[0])
   })
+
+  describe('trigger budget follows the configured value', () => {
+    // The factories read the budget when they build the middleware, so each case
+    // sets config before building its app and restores it afterwards.
+    async function withTriggerBudgets(
+      budgets: { trigger: number; admin: number },
+      run: () => Promise<void>
+    ) {
+      const originalTrigger = config.workflowTriggerPerMin
+      const originalAdmin = config.adminWorkflowTriggerPerMin
+      config.workflowTriggerPerMin = budgets.trigger
+      config.adminWorkflowTriggerPerMin = budgets.admin
+      try {
+        await run()
+      } finally {
+        config.workflowTriggerPerMin = originalTrigger
+        config.adminWorkflowTriggerPerMin = originalAdmin
+      }
+    }
+
+    function triggerApp(gate: () => express.RequestHandler) {
+      const app = express()
+      app.post('/trigger', gate(), (_req, res) => {
+        res.status(200).json({ ok: true })
+      })
+      return app
+    }
+
+    // Every key class of workflowTriggerRateLimitCredential, including the
+    // source-IP fallbacks and the raw bearer, follows the configured value.
+    it.each([
+      [
+        'a verified user session',
+        { 'x-user-session-token': 'user-session-a', Authorization: 'Bearer service-token' },
+      ],
+      ['a verified admin cookie', { Cookie: 'control_ui_admin_session=signed-admin-a' }],
+      ['an unverified cookie (source IP)', { Cookie: 'control_ui_admin_session=forged-cookie-a' }],
+      [
+        'an unverified user session (source IP)',
+        { 'x-user-session-token': 'forged-session-a', Authorization: 'Bearer service-token' },
+      ],
+      ['a verified admin bearer', { Authorization: 'Bearer signed-admin-b' }],
+      ['a raw bearer', { Authorization: 'Bearer raw-service-token' }],
+    ] as const)('external lane: %s is refused at the 4th request of 3', async (_label, headers) => {
+      await withTriggerBudgets({ trigger: 3, admin: 50 }, async () => {
+        const counts = countRequests()
+        const app = triggerApp(workflowTriggerRateLimit)
+        for (let i = 0; i < 3; i++) {
+          await request(app).post('/trigger').set(headers).expect(200)
+        }
+        const denied = await request(app).post('/trigger').set(headers).expect(429)
+        expect(denied.headers['ratelimit-policy']).toBe('3;w=60')
+        expect(counts.size).toBe(1)
+        expect(mockCheckAndIncrement).toHaveBeenCalledTimes(4)
+        expect(mockCheckAndIncrement.mock.calls.every(call => call[1] === 3)).toBe(true)
+      })
+    })
+
+    it('mcp-host lane: the bearer is refused at the 4th request of 3', async () => {
+      await withTriggerBudgets({ trigger: 3, admin: 50 }, async () => {
+        const counts = countRequests()
+        const app = triggerApp(mcpHostWorkflowTriggerRateLimit)
+        const bearer = 'Bearer mcp-host-control-token'
+        for (let i = 0; i < 3; i++) {
+          await request(app).post('/trigger').set('Authorization', bearer).expect(200)
+        }
+        const denied = await request(app).post('/trigger').set('Authorization', bearer).expect(429)
+        expect(denied.headers['ratelimit-policy']).toBe('3;w=60')
+        expect(counts.size).toBe(1)
+        expect(mockCheckAndIncrement.mock.calls.every(call => call[1] === 3)).toBe(true)
+      })
+    })
+
+    it('administrative trigger: an unverified credential keeps 10 and a verified one the admin budget', async () => {
+      await withTriggerBudgets({ trigger: 3, admin: 50 }, async () => {
+        countRequests()
+        const app = triggerApp(adminWorkflowTriggerRateLimit)
+        const forged = 'control_ui_admin_session=forged-cookie-a'
+        for (let i = 0; i < 10; i++) {
+          await request(app).post('/trigger').set('Cookie', forged).expect(200)
+        }
+        const denied = await request(app).post('/trigger').set('Cookie', forged).expect(429)
+        expect(denied.headers['ratelimit-policy']).toBe('10;w=60')
+        expect(mockCheckAndIncrement).toHaveBeenCalledTimes(11)
+        expect(mockCheckAndIncrement.mock.calls.every(call => call[1] === 10)).toBe(true)
+
+        mockCheckAndIncrement.mockClear()
+        const signed = 'control_ui_admin_session=signed-admin-a'
+        for (let i = 0; i < 11; i++) {
+          await request(app).post('/trigger').set('Cookie', signed).expect(200)
+        }
+        expect(mockCheckAndIncrement).toHaveBeenCalledTimes(11)
+        expect(mockCheckAndIncrement.mock.calls.every(call => call[1] === 50)).toBe(true)
+      })
+    })
+  })
 })

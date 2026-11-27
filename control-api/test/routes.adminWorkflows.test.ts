@@ -87,11 +87,13 @@ vi.mock('../src/config.js', () => ({
     hostsNamespace: 'mcp-host',
     mcpServersNamespace: 'mcp-server',
     sandboxNamespace: 'sandbox-recipes',
-    // The real limiter requires the administrative budget fields as well.
+    // The real limiter requires the administrative budget fields as well, and
+    // the mcp-host trigger limiter requires the workflow trigger budget.
     adminWorkflowReadPerMin: 300,
     adminWorkflowGrantReadPerMin: 300,
     adminWorkflowGrantWritePerMin: 100,
     adminWorkflowTriggerPerMin: 50,
+    workflowTriggerPerMin: 10,
     adminOutputsReadPerMin: 150,
   },
 }))

@@ -22,6 +22,7 @@ beforeEach(() => {
   process.env = { ...ORIGINAL_ENV }
   delete process.env.WORKFLOW_APPROVAL_MAX_TTL_SEC
   delete process.env.CONTROL_API_ALLOWED_IMAGE_PREFIXES
+  delete process.env.CONTROL_API_WORKFLOW_TRIGGER_PER_MIN
 })
 
 afterEach(() => {
@@ -43,5 +44,15 @@ describe('control-api code defaults against deploy/base', () => {
       ...baseValue('CONTROL_API_ALLOWED_IMAGE_PREFIXES').split(','),
       'registry.evenfire.ai/',
     ])
+  })
+
+  // administrative-rate-limits.md: code defaults and ConfigMap literals must agree,
+  // or an older deployment override defeats the code default.
+  it('the workflow trigger budget equals the deploy/base value', async () => {
+    const { config } = await import('../src/config.js')
+    expect(config.workflowTriggerPerMin).toBe(10)
+    expect(String(config.workflowTriggerPerMin)).toBe(
+      baseValue('CONTROL_API_WORKFLOW_TRIGGER_PER_MIN')
+    )
   })
 })
