@@ -180,6 +180,9 @@ function FileExplorerNode({
     // folder would otherwise serve its first page forever — removed files linger
     // and new files never appear until a hard reload. Revalidate on revisit and
     // window focus, matching the controller's own children query.
+    // The observer stays mounted while collapsed. Re-enabling it must also
+    // refresh cached children, which Infinity staleTime would consider fresh.
+    staleTime: 0,
     refetchOnMount: 'always',
     refetchOnWindowFocus: 'always',
     initialPageParam: undefined as string | undefined,
