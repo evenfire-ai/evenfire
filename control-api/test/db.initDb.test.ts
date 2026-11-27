@@ -70,15 +70,17 @@ describe('db.initDb', () => {
     // The committed password-admission rollout fence, one dev batch through
     // 0136_llm_catalog_dismissed_backfill (as in dev), then one transaction per
     // PR1 version. PR2 uses 18 transactions for schema changes, constraint
-    // validations, and receipts. The two retention versions,
-    // 0159_oidc_member_links and 0160_workflow_run_cancel_request use one each.
+    // validations, and receipts. The two retention versions and
+    // 0159_oidc_member_links use one each; 0160_workflow_run_cancel_request
+    // uses three: its schema, the validation of its pair check, and its receipt.
+    // PR2's eight constraint validations and 0160's one make nine.
     const { PR1_MIGRATION_VERSIONS } = await import('../src/migrations/migrationRunner.js')
-    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(2 + PR1_MIGRATION_VERSIONS.length + 22)
+    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(2 + PR1_MIGRATION_VERSIONS.length + 24)
     expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(
-      2 + PR1_MIGRATION_VERSIONS.length + 22
+      2 + PR1_MIGRATION_VERSIONS.length + 24
     )
     expect(sqls.filter(sql => /^ALTER TABLE \w+ VALIDATE CONSTRAINT \w+$/.test(sql))).toHaveLength(
-      8
+      9
     )
     expect(sqls[sqls.length - 2]).toBe('COMMIT')
     expect(sqls[sqls.length - 1]).toContain('SELECT pg_advisory_unlock')

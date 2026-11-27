@@ -12,6 +12,12 @@ export const WORKFLOW_RUN_CANCEL_REQUEST_PAIR_CHECK = 'workflow_runs_cancel_requ
  * `workflow_runs_audit`. Existing rows get NULL in both columns, which satisfies
  * the pair check, and a second run adds nothing: the columns use
  * `IF NOT EXISTS` and the check is created only when it is missing.
+ *
+ * The pair check is added `NOT VALID`, so this transaction does not scan
+ * `workflow_runs` while it holds ACCESS EXCLUSIVE; PostgreSQL still enforces it
+ * on every write from then on. The migration runner validates it after this
+ * transaction commits (POST_SCHEMA_CONSTRAINT_VALIDATIONS), under SHARE UPDATE
+ * EXCLUSIVE, and records the migration only after that validation.
  */
 export async function applyWorkflowRunCancelRequestSchema(
   db: Pick<DbClient, 'query'>
@@ -31,7 +37,7 @@ export async function applyWorkflowRunCancelRequestSchema(
       ) THEN
         ALTER TABLE workflow_runs
           ADD CONSTRAINT ${WORKFLOW_RUN_CANCEL_REQUEST_PAIR_CHECK}
-          CHECK ((cancel_requested_at IS NULL) = (canceled_by IS NULL));
+          CHECK ((cancel_requested_at IS NULL) = (canceled_by IS NULL)) NOT VALID;
       END IF;
     END $$;
 

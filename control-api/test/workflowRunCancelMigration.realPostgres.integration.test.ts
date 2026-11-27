@@ -84,6 +84,17 @@ describeRealPostgres('migration 0160 workflow run cancel request on PostgreSQL 1
     return result.rows
   }
 
+  async function pairCheckValidated(): Promise<boolean[]> {
+    const result = await databasePool.query<{ convalidated: boolean }>(
+      `SELECT convalidated
+         FROM pg_constraint
+        WHERE conrelid = 'workflow_runs'::regclass
+          AND conname = $1`,
+      [WORKFLOW_RUN_CANCEL_REQUEST_PAIR_CHECK]
+    )
+    return result.rows.map(row => row.convalidated)
+  }
+
   it('0160 is idempotent, enforces the pair check, is classified by the runner and is archived', async () => {
     // Classified by the runner: initDb above would have thrown
     // "Unclassified post-dev migrations" otherwise, and the version is recorded.
@@ -93,6 +104,8 @@ describeRealPostgres('migration 0160 workflow run cancel request on PostgreSQL 1
       [WORKFLOW_RUN_CANCEL_REQUEST_MIGRATION]
     )
     expect(recorded.rowCount).toBe(1)
+    // The runner validated the pair check after the schema commit, before the receipt.
+    expect(await pairCheckValidated()).toEqual([true])
 
     // A database at 0159: drop what 0160 adds, keep a row written before it.
     await databasePool.query(`
@@ -127,6 +140,9 @@ describeRealPostgres('migration 0160 workflow run cancel request on PostgreSQL 1
       [WORKFLOW_RUN_CANCEL_REQUEST_PAIR_CHECK]
     )
     expect(checks.rows).toEqual([{ count: 1 }])
+    // Applied directly, without the runner, the check stays NOT VALID: adding it
+    // did not scan workflow_runs. It still refuses new half-set writes below.
+    expect(await pairCheckValidated()).toEqual([false])
 
     // The pair check refuses one column without the other.
     const halfRunId = await insertRun('Running')
