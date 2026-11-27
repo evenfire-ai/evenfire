@@ -9,6 +9,7 @@ import React, {
   useRef,
   useState,
 } from 'react'
+import { subscribeRootToast } from '../../lib/rootToast'
 import type { ToastContextValue, ToastOptions, ToastRecord } from './types'
 
 const DEFAULT_DURATION_MS = 3500
@@ -48,6 +49,8 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     },
     [dismissToast]
   )
+
+  useEffect(() => subscribeRootToast(showToast), [showToast])
 
   const value = useMemo<ToastContextValue>(
     () => ({

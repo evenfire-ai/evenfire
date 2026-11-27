@@ -7,7 +7,15 @@ interface HostTabPageProps {
 
 export default async function HostTabPage({ params }: HostTabPageProps) {
   const { tab } = await params
-  const tabs = ['overview', 'identity', 'model', 'connectors', 'access', 'advanced']
+  const tabs = [
+    'overview',
+    'identity',
+    'model',
+    'connectors',
+    'access',
+    'approval-settings',
+    'advanced',
+  ]
   if (!tabs.includes(tab)) notFound()
 
   return <HostDetailsPage />

@@ -384,6 +384,13 @@ async function apiPublicPost<T>(path: string, body: unknown): Promise<T> {
   }
 }
 
+/**
+ * What a request ended by its client-side timeout reports: `fetchWithTimeout`'s
+ * own timeout, and callers that time requests out on their own clock
+ * (lib/hostApprovalSave.ts).
+ */
+export const REQUEST_TIMED_OUT_MESSAGE = 'Request timed out. Check that Control API is reachable.'
+
 async function fetchWithTimeout(
   input: RequestInfo | URL,
   init: RequestInit = {},
@@ -405,7 +412,7 @@ async function fetchWithTimeout(
   } catch (error) {
     if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
       if (init.signal?.aborted) throw error
-      throw new Error('Request timed out. Check that Control API is reachable.')
+      throw new Error(REQUEST_TIMED_OUT_MESSAGE)
     }
     throw error
   } finally {
@@ -639,7 +646,7 @@ export async function apiSend(
   body?: unknown,
   query: Record<string, string | undefined> = {},
   extraHeaders: Record<string, string> = {},
-  options: { timeoutMs?: number } = {}
+  options: { timeoutMs?: number; signal?: AbortSignal } = {}
 ) {
   const res = await fetchWithTimeout(
     `${API_BASE}${path}${qs(query)}`,
@@ -651,6 +658,7 @@ export async function apiSend(
         ...extraHeaders,
       },
       body: body ? JSON.stringify(body) : undefined,
+      signal: options.signal,
     },
     options.timeoutMs
   )
@@ -1442,9 +1450,11 @@ export async function getAdminUsers(q = '') {
   return apiGet('/api/v1/admin/users', { q }) as Promise<{ items?: AdminUser[] }>
 }
 
-export async function getHostDetailBundle(name: string) {
+export async function getHostDetailBundle(name: string, options?: ApiRequestOptions) {
   return apiGet(
-    `/api/v1/admin/hosts/${encodeURIComponent(name)}/detail`
+    `/api/v1/admin/hosts/${encodeURIComponent(name)}/detail`,
+    undefined,
+    options
   ) as Promise<HostDetailBundle>
 }
 
@@ -1468,8 +1478,12 @@ export async function getHosts() {
   return apiGet('/api/v1/admin/hosts') as Promise<{ items?: HostResource[] }>
 }
 
-export async function getHost(name: string) {
-  return apiGet(`/api/v1/admin/hosts/${encodeURIComponent(name)}`) as Promise<HostResource>
+export async function getHost(name: string, options?: ApiRequestOptions) {
+  return apiGet(
+    `/api/v1/admin/hosts/${encodeURIComponent(name)}`,
+    undefined,
+    options
+  ) as Promise<HostResource>
 }
 
 export type HostPersonalization = {

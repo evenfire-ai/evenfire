@@ -45,7 +45,7 @@ Routes not in the sidebar: `/users-and-teams/admins/new` (invite a control admin
 - **UsageDashboard** (`components/UsageDashboard`) — recharts stacked-area chart of input/output tokens over time, with breakdowns including team, model, agent (host), and desktop user (8 group-by dimensions in all — also recipe, provider, LLM secret, and source kind).
 - **LlmPriceTable / TokenBudgetTable** — per-1M-token model prices (input, output, cache read/write) and token budgets with scope and progress. Budgets are cost control, not a security boundary.
 - **RegistryCatalog** (`components/RegistryCatalog.tsx`) — marketplace entries with trust levels (high/mid/low), a guided install flow, and org-scoped publish API keys (create/reveal/revoke) under `/registry/keys`.
-- **HostApprovalSection** (`components/HostApprovalSection`) — per-tool approval editor (Default/Required/Skip) for a host's native tools, with risk hints whenever a setting loosens a required-by-default approval.
+- **HostApprovalsTab** (`components/HostApprovalsTab`) — the agent page's Approvals tab: read views of the approval settings, the "Set to Manual now" off switch, and a banner for manifest-managed agents. It embeds **HostApprovalSection** (`components/HostApprovalSection`), the per-tool editor (Default/Required/Skip) for a host's native tools, which confirms every change that loosens approval before it saves.
 - **EgressEditor** (`components/EgressEditor.tsx`) — egress policy editor with closed-by-default, exact-host, exact-CIDR/IP, and public-web modes; private, metadata, link-local, and reserved IPv4 ranges are rejected (`lib/egressModel.ts`).
 
 ## Configuration

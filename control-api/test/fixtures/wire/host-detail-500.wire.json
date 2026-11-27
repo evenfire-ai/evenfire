@@ -1,0 +1,8 @@
+{
+  "_source": "control-api/test/routes.hostPut.fakeContract.test.ts: GET /api/v1/admin/hosts/foo/detail whose Host read throws a plain Error, answered by clerumErrorHandler's production branch (NODE_ENV=production), as deployed control-api answers",
+  "status": 500,
+  "body": {
+    "error": "Internal Server Error",
+    "correlationId": "00000000-0000-4000-9000-000000000001"
+  }
+}

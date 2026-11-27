@@ -1,0 +1,6 @@
+{
+  "status": 502,
+  "body": {
+    "error": "control-api proxy request failed: fetch failed"
+  }
+}

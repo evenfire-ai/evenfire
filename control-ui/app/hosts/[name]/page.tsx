@@ -13,12 +13,18 @@ import { DetailPageShell } from '@components/DetailPageShell'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { SubscriptionCapabilityNotice } from '@components/SubscriptionCapabilityNotice'
 import { useToast } from '@components/Toast'
-import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
+import {
+  HOST_DEFAULT_TAB,
+  HOST_LOAD_ERROR_PREFIX,
+  HOST_RELOAD_TO_SAVE_MESSAGE,
+  HOST_TABS,
+} from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { connectorAuthenticationLabel } from '@lib/connectorAuthentication'
 import { useSubscriptionCapabilities } from '@lib/hooks/useSubscriptionCapabilities'
 import { HostAccessTab } from '../../../components/HostAccessTab'
 import { HostAdvancedTab } from '../../../components/HostAdvancedTab'
+import { HostApprovalsTab } from '../../../components/HostApprovalsTab'
 import type { HostGuardrails } from '../../../components/HostGuardrailsSection/types'
 import { HostIdentityTab } from '../../../components/HostIdentityTab'
 import { HostOverviewTab } from '../../../components/HostOverviewTab'
@@ -85,6 +91,7 @@ import type { HostTab } from './types'
 const TAB_LABELS: Record<HostTab, string> = {
   details: 'Overview',
   model: 'Models & creds',
+  approvals: 'Approvals',
   advanced: 'Advanced',
   connectors: 'Connectors',
   access: 'Access',
@@ -94,6 +101,7 @@ const TAB_LABELS: Record<HostTab, string> = {
 const TAB_SLUGS: Record<HostTab, string> = {
   details: 'overview',
   model: 'model',
+  approvals: 'approval-settings',
   advanced: 'advanced',
   connectors: 'connectors',
   access: 'access',
@@ -135,6 +143,14 @@ function subscriptionInventoryMessage(error: unknown, brand: string): string {
     ? error.message
     : `Could not load ${brand} subscriptions`
 }
+
+// The older saves read the Host with this signal. It is never aborted: its only
+// job is to keep that read out of the shared in-flight GET map in lib/api, so it
+// cannot join a read of the Host whose spec is older than the version the save
+// sends (spec R16). Aborting it, on an agent change or on unmount, would drop a
+// save the admin pressed (the PUT would not be sent) and land an AbortError in
+// the error state of a page that is gone.
+const NEVER_ABORTED_SIGNAL = new AbortController().signal
 
 function AgentActionsMenu({ busy, onDelete }: { busy: boolean; onDelete: () => void }) {
   const [open, setOpen] = useState(false)
@@ -207,8 +223,18 @@ export default function HostDetailsPage() {
   const formResourceVersionRef = useRef('')
 
   const [activeTab, setActiveTab] = useState<HostTab>(() => parseHostTab(params.tab))
-  const [busy, setBusy] = useState(false)
+  // A count, not a flag: a load and a save (or two saves) overlap, and the
+  // first to end must not clear the busy state of the one still running.
+  const [busyCount, setBusyCount] = useState(0)
+  const busy = busyCount > 0
+  const beginBusy = () => setBusyCount(count => count + 1)
+  const endBusy = () => setBusyCount(count => count - 1)
   const [error, setError] = useState('')
+  // The message of the page's own read of the Host when it failed, kept apart
+  // from `error` so the header can show it in place (see `title` below).
+  const [loadError, setLoadError] = useState('')
+  // True until the first load ends; later loads (after a save) never show the
+  // loading placeholders again.
   const [initialLoading, setInitialLoading] = useState(true)
 
   const [editingModel, setEditingModel] = useState(false)
@@ -230,6 +256,8 @@ export default function HostDetailsPage() {
   // before the agent's name (QA). The title shows a skeleton instead.
   // Deliberately one-way: later partial reloads (model/connectors saves call
   // loadData('model'|'none')) keep the loaded title — no re-flash.
+  // A failed page read (`loadError`) also ends the skeleton: the title falls back
+  // to the route name and the header shows the failure in place.
   const [overviewReady, setOverviewReady] = useState(false)
   const [editingDisplayName, setEditingDisplayName] = useState(false)
   const [hostDescription, setHostDescription] = useState('')
@@ -323,9 +351,6 @@ export default function HostDetailsPage() {
   // dropdown can offer extra keys (e.g. `claude-api-key-fb1`) — never free text.
   const [secretKeysByName, setSecretKeysByName] = useState<Record<string, string[]>>({})
   const [channelsDraft, setChannelsDraft] = useState<string[]>([])
-  const [approvalToolsData, setApprovalToolsData] = useState<Record<string, boolean> | undefined>(
-    undefined
-  )
   const [guardrailsData, setGuardrailsData] = useState<HostGuardrails | undefined>(undefined)
   // Overview tab — read-only summary. Kept in sync with the host spec by loadData.
   const [contextMcpServers, setContextMcpServers] = useState<string[]>([])
@@ -561,9 +586,9 @@ export default function HostDetailsPage() {
   }, [])
 
   async function loadData(resetDrafts: 'all' | 'overview' | 'model' | 'none' = 'all') {
-    setBusy(true)
-    setInitialLoading(true)
+    beginBusy()
     setError('')
+    setLoadError('')
     try {
       const detail = await getHostDetailBundle(routeName)
       const { host, contexts: contextsList, secrets: secretsList, agentUsers, agentTeams } = detail
@@ -667,8 +692,6 @@ export default function HostDetailsPage() {
         // → [] = unrestricted (offers the full global allowlist per provider).
         setAllowedModelsDraft(normalizeAllowedModels(spec.allowedModels))
       }
-      const rawTools = (spec.approval as { tools?: Record<string, boolean> } | undefined)?.tools
-      setApprovalToolsData(rawTools && typeof rawTools === 'object' ? rawTools : undefined)
       const rawGuardrails = spec.guardrails as HostGuardrails | undefined
       setGuardrailsData(
         rawGuardrails && typeof rawGuardrails === 'object' ? rawGuardrails : undefined
@@ -690,10 +713,12 @@ export default function HostDetailsPage() {
       setAvailableLlmSecrets(secretOptions)
     } catch (e) {
       if (!mountedRef.current) return
-      setError(e instanceof Error ? e.message : 'Failed to load agent details')
+      const message = e instanceof Error ? e.message : 'Failed to load agent details'
+      setError(message)
+      setLoadError(message)
     } finally {
       if (mountedRef.current) {
-        setBusy(false)
+        endBusy()
         setInitialLoading(false)
       }
     }
@@ -762,7 +787,7 @@ export default function HostDetailsPage() {
         ? currentSpec.contextId
         : contextName
 
-    setBusy(true)
+    beginBusy()
     setError('')
     try {
       const updated = await updateContext(
@@ -792,7 +817,7 @@ export default function HostDetailsPage() {
       setError(agentConnectorMutationError(e))
       return false
     } finally {
-      setBusy(false)
+      endBusy()
     }
   }
 
@@ -945,12 +970,20 @@ export default function HostDetailsPage() {
     const nextHostName = hostNameDraft.trim()
     if (!nextHostName) return false
 
-    setBusy(true)
+    // The version comes first: it is the version the form was built from, taken
+    // before this save's own read of the Host, so the PUT never carries a version
+    // newer than the read its spec came from (spec R16). With none, nothing is sent.
+    const formResourceVersion = formResourceVersionRef.current
+    if (!formResourceVersion) {
+      setError(HOST_RELOAD_TO_SAVE_MESSAGE)
+      return false
+    }
+    beginBusy()
     setError('')
     try {
       // Re-fetch to preserve fields that aren't editable in this form. K8s
       // replaceNamespacedCustomObject is a full replace, not a merge.
-      const currentHost = await getHost(routeName)
+      const currentHost = await getHost(routeName, { signal: NEVER_ABORTED_SIGNAL })
       const currentWorkflowControl = currentHost.spec?.workflowControl
       // Overview owns only identity/shape fields (name, display, context,
       // channels). Model, secret, fallback policy and the per-host
@@ -968,13 +1001,12 @@ export default function HostDetailsPage() {
           : {}),
       }
 
-      const formResourceVersion = formResourceVersionRef.current
       await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
         // AP-6: carry the resourceVersion captured at form load so the API
         // rejects this save with 409 {error:'conflict'} if the Host changed
         // while the operator was editing, instead of silently overwriting the
         // concurrent change with this form's stale echo.
-        ...(formResourceVersion ? { metadata: { resourceVersion: formResourceVersion } } : {}),
+        metadata: { resourceVersion: formResourceVersion },
         spec: nextSpec,
       })
       // Refresh server-backed state and this tab's saved values without
@@ -1001,7 +1033,7 @@ export default function HostDetailsPage() {
       }
       return false
     } finally {
-      setBusy(false)
+      endBusy()
     }
   }
 
@@ -1122,10 +1154,16 @@ export default function HostDetailsPage() {
       return false
     }
 
-    setBusy(true)
+    // Version first, as in saveHost (spec R16).
+    const formResourceVersion = formResourceVersionRef.current
+    if (!formResourceVersion) {
+      setError(HOST_RELOAD_TO_SAVE_MESSAGE)
+      return false
+    }
+    beginBusy()
     setError('')
     try {
-      const currentHost = await getHost(routeName)
+      const currentHost = await getHost(routeName, { signal: NEVER_ABORTED_SIGNAL })
       const nextSpec: Record<string, unknown> = {
         ...currentHost.spec,
         model: {
@@ -1159,9 +1197,8 @@ export default function HostDetailsPage() {
         nextSpec.allowedModels = effectiveAllowedModelsSpec
       }
 
-      const formResourceVersion = formResourceVersionRef.current
       await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
-        ...(formResourceVersion ? { metadata: { resourceVersion: formResourceVersion } } : {}),
+        metadata: { resourceVersion: formResourceVersion },
         spec: nextSpec,
       })
       await loadData('model')
@@ -1180,7 +1217,7 @@ export default function HostDetailsPage() {
       }
       return false
     } finally {
-      setBusy(false)
+      endBusy()
     }
   }
 
@@ -1314,36 +1351,6 @@ export default function HostDetailsPage() {
     )
   }
 
-  const persistApprovalTools = useCallback(
-    async (tools: Record<string, boolean>) => {
-      setBusy(true)
-      setError('')
-      try {
-        const currentHost = await getHost(routeName)
-        const currentApproval = (currentHost.spec?.approval as Record<string, unknown>) ?? {}
-        const nextSpec = {
-          ...currentHost.spec,
-          approval: { ...currentApproval, tools },
-        }
-        await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
-          spec: nextSpec,
-        })
-        // Reload approval/server state while preserving any drafts left open
-        // in the Overview or Model tabs.
-        await loadData('none')
-      } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed to save approval tools')
-        // Re-throw so HostApprovalSection.handleSave does NOT exit edit mode
-        // and the operator's draft is preserved alongside the error banner.
-        throw e
-      } finally {
-        setBusy(false)
-      }
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [routeName]
-  )
-
   // Persist Host.spec.guardrails (hook references + built-ins). Owns only the
   // guardrails object — every other spec field is preserved via the
   // `...currentHost.spec` spread (full-replace semantics). Carries the
@@ -1351,17 +1358,25 @@ export default function HostDetailsPage() {
   // overwritten (AP-6), surfacing the same reload guidance as the other saves.
   const persistGuardrails = useCallback(
     async (next: HostGuardrails) => {
-      setBusy(true)
+      // Version first, as in saveHost (spec R16). The section needs a rejection
+      // to skip its success toast, so the refusal throws.
+      const formResourceVersion = formResourceVersionRef.current
+      if (!formResourceVersion) {
+        setError(HOST_RELOAD_TO_SAVE_MESSAGE)
+        throw new Error(HOST_RELOAD_TO_SAVE_MESSAGE)
+      }
+      beginBusy()
       setError('')
       try {
-        const currentHost = await getHost(routeName)
+        // An agent change does not abort this read: the PUT is still sent with
+        // the version taken above and refused with 409 if the Host moved on.
+        const currentHost = await getHost(routeName, { signal: NEVER_ABORTED_SIGNAL })
         const nextSpec = {
           ...currentHost.spec,
           guardrails: next,
         }
-        const formResourceVersion = formResourceVersionRef.current
         await apiSend('PUT', `/api/v1/admin/hosts/${encodeURIComponent(routeName)}`, {
-          ...(formResourceVersion ? { metadata: { resourceVersion: formResourceVersion } } : {}),
+          metadata: { resourceVersion: formResourceVersion },
           spec: nextSpec,
         })
         // Reload guardrails/server state while preserving any drafts left open
@@ -1384,7 +1399,7 @@ export default function HostDetailsPage() {
         // its success toast, leaving the error/conflict banner to explain.
         throw e
       } finally {
-        setBusy(false)
+        endBusy()
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1407,19 +1422,33 @@ export default function HostDetailsPage() {
     }
   }
 
+  // The page's read failure shows in the header only where the page banner gives
+  // way to the tab's own banner (Approvals), so every failure has one display.
+  const loadErrorInHeader = activeTab === 'approvals' && loadError !== '' && error === loadError
+
   return (
     <DetailPageShell<HostTab>
       activeTab={activeTab}
       backLabel="Back to agents"
-      error={editingModel ? '' : error}
+      error={editingModel || loadErrorInHeader ? '' : error}
       icon={<IconRobot />}
       onBack={() => router.push(CONTROL_ROUTES.agents.root)}
       onTabChange={selectTab}
-      subtitle="Configuration and access for this agent."
+      subtitle={
+        loadErrorInHeader ? (
+          <span role="alert" className="cu-agent-detail-load-error">
+            {`${HOST_LOAD_ERROR_PREFIX} ${loadError}`}
+          </span>
+        ) : (
+          'Configuration and access for this agent.'
+        )
+      }
       tabAriaLabel="Agent sections"
       tabClassName="cu-tabs--compact"
       contentClassName={
-        activeTab === 'advanced' || activeTab === 'identity' ? 'cu-agent-detail-card' : undefined
+        activeTab === 'advanced' || activeTab === 'approvals' || activeTab === 'identity'
+          ? 'cu-agent-detail-card'
+          : undefined
       }
       tabs={HOST_TABS.map(tab => ({
         value: tab,
@@ -1430,7 +1459,7 @@ export default function HostDetailsPage() {
       // (spec.host, editable on Overview). While the first Overview read is
       // in flight the title is a skeleton — never the raw slug (QA).
       title={
-        overviewReady ? (
+        overviewReady || loadError ? (
           `Agent: ${hostDisplaySaved || routeName}`
         ) : (
           <span
@@ -1629,14 +1658,24 @@ export default function HostDetailsPage() {
           </>
         )}
 
+        {/* The Approvals tab owns its loads, states and saves (spec §6.5); it
+            reads nothing of the page's. */}
+        {activeTab === 'approvals' && (
+          <HostApprovalsTab
+            host={routeName}
+            // The tab's Retry also retries the page's own read, only when that read failed.
+            onRetry={() => {
+              if (loadError) void loadData()
+            }}
+          />
+        )}
+
         {activeTab === 'advanced' && (
           <HostAdvancedTab
             busy={busy}
             hostName={routeName}
             initialGuardrails={guardrailsData}
             initialLoading={initialLoading}
-            initialTools={approvalToolsData}
-            onSaveApprovalTools={persistApprovalTools}
             onSaveGuardrails={persistGuardrails}
             onActionsChange={handleSectionActionsChange}
           />

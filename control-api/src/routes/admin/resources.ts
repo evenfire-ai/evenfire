@@ -20,6 +20,8 @@ import { uninstallMcpServer } from '../../oauth/mcpServerUninstall.js'
 import { deleteSharedGrantsForContextExcept } from '../../oauth/store.js'
 import { rootLogger } from '../../observability/logger.js'
 import { contextAllowlist } from '../../services/access/mcpInvocable.js'
+import { buildApprovalChangeSummary } from '../../services/hostApprovalAudit.js'
+import { ApprovalRequiresVersionError } from '../../services/hostApprovalRules.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
 import {
   K8sConflictError,
@@ -71,6 +73,17 @@ function recordValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null
+}
+
+const HOST_SPEC_REQUIRED_ISSUES = [{ field: 'spec', message: 'spec is required' }]
+
+/**
+ * A Host write must carry a `spec` object. Every Host guard below is gated on
+ * `body.spec`, so a spec-less body would otherwise skip all of them (field
+ * validation, model allowlist, secretRef, approval rules).
+ */
+function hostBodyLacksSpec(plural: string, body: { spec?: unknown } | undefined): boolean {
+  return plural === 'hosts' && recordValue(body?.spec) === null
 }
 
 function resourcePreconditionsFromResource(resource: unknown): ResourcePreconditions | undefined {
@@ -630,6 +643,11 @@ export function createAdminResourcesRouter(
         return
       }
 
+      if (hostBodyLacksSpec(plural, body)) {
+        res.status(422).json({ errors: HOST_SPEC_REQUIRED_ISSUES })
+        return
+      }
+
       // F0.3: identifier/display field validation for hosts + contexts (create =
       // no ratchet; every present field is validated).
       if ((plural === 'hosts' || plural === 'contexts') && body.spec) {
@@ -792,7 +810,13 @@ export function createAdminResourcesRouter(
             if (secretRefIssue) throw new HostSpecInvalidError(secretRefIssue)
             // K8s write INSIDE the held lock: the COMMIT that releases the lock
             // happens only after the CR is durable.
-            return gateway.createResource(plural, body, ns)
+            return gateway.createResource(plural, body, ns, {
+              approvalChangeSummary: buildApprovalChangeSummary({
+                before: undefined,
+                after: hostSpec.approval,
+                host: body.metadata?.name,
+              }),
+            })
           })
         } catch (err) {
           if (err instanceof HostSpecInvalidError) {
@@ -902,6 +926,11 @@ export function createAdminResourcesRouter(
         }
         spec: Record<string, unknown>
       }
+      if (hostBodyLacksSpec(plural, body)) {
+        res.status(422).json({ errors: HOST_SPEC_REQUIRED_ISSUES })
+        return
+      }
+
       // Pieza D tolerations granted during Host validation, emitted only after
       // the CR persists (below). Empty for every non-host / non-tolerated write.
       const hostTolerations: HostSpecIncoherenceToleratedEvent[] = []
@@ -1014,7 +1043,21 @@ export function createAdminResourcesRouter(
             if (issue) throw new HostSpecInvalidError(issue)
             const secretRefIssue = await validateHostSecretRef(gateway, hostSpec)
             if (secretRefIssue) throw new HostSpecInvalidError(secretRefIssue)
-            return gateway.updateResource(plural, req.params.name, body, ns)
+            return gateway.updateResource(plural, req.params.name, body, ns, {
+              // Spec §6.8: the summary is computed from the read the write is
+              // based on. Only a versioned PUT can change spec.approval (the
+              // version rule), and for it the pre-lock read above and the locked
+              // read agree, or the write conflicts. A version-less PUT leaves
+              // approval as stored, so it records no summary: one built from the
+              // pre-lock read could show another writer's change as this one's.
+              approvalChangeSummary: body.metadata?.resourceVersion
+                ? buildApprovalChangeSummary({
+                    before: recordValue(ratchetCurrent?.spec)?.approval,
+                    after: hostSpec.approval,
+                    host: req.params.name,
+                  })
+                : undefined,
+            })
           })
         } catch (err) {
           if (err instanceof HostSpecInvalidError) {
@@ -1026,6 +1069,11 @@ export function createAdminResourcesRouter(
           // to reload — never retried server-side with the stale body.
           if (err instanceof K8sConflictError) {
             res.status(409).json({ error: 'conflict', reason: 'resource_changed' })
+            return
+          }
+          // Version rule (spec §6.8): a version-less PUT may not change spec.approval.
+          if (err instanceof ApprovalRequiresVersionError) {
+            res.status(409).json({ error: 'conflict', reason: 'approval_requires_version' })
             return
           }
           throw err

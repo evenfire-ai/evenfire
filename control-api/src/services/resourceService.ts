@@ -9,6 +9,8 @@ import {
   ResourceListResponse,
   ResourcePreconditions,
 } from '../types.js'
+import { buildHostApprovalChange, logHostApprovalChange } from './hostApprovalAudit.js'
+import { ApprovalRequiresVersionError, approvalBlocksEqual } from './hostApprovalRules.js'
 import {
   addNonEmpty,
   extractK8sStatus,
@@ -125,6 +127,7 @@ async function persistHostIntent(input: {
   action: HostAdministrativeAction
   namespace: string
   name: string
+  summary?: string
 }): Promise<HostAdministrativeIntent | null> {
   if (!isHostResource(input.plural) || !administrativeOperationService) return null
   const requestContext = currentAdministrativeRequestContext()
@@ -135,7 +138,59 @@ async function persistHostIntent(input: {
     name: input.name,
     operatorSub: requestContext.operatorSub,
     requestId: requestContext.requestId,
+    ...(input.summary === undefined ? {} : { summary: input.summary }),
   })
+}
+
+/**
+ * Audit line for a stored Host write (spec §6.8). Called only after the write
+ * succeeded, so it never throws: the replace or create is already stored, and
+ * failing the request over a log line would tell the client the write failed
+ * when it did not.
+ */
+function auditHostApprovalChange(input: {
+  plural: ClerumResourceType
+  name: string
+  namespace: string
+  intent: HostAdministrativeIntent | null
+  before: unknown
+  after: unknown
+  via: 'host_put' | 'host_create'
+}): void {
+  if (!isHostResource(input.plural)) return
+  try {
+    const approvalOf = (host: unknown): Record<string, unknown> | undefined => {
+      const spec = (host as { spec?: { approval?: unknown } } | undefined)?.spec
+      const approval = spec?.approval
+      return typeof approval === 'object' && approval !== null
+        ? (approval as Record<string, unknown>)
+        : undefined
+    }
+    const change = buildHostApprovalChange({
+      before: approvalOf(input.before),
+      after: approvalOf(input.after),
+    })
+    if (!change) return
+    logHostApprovalChange({
+      change,
+      host: input.name,
+      namespace: input.namespace,
+      operatorSub:
+        input.intent?.operatorSub ?? currentAdministrativeRequestContext()?.operatorSub ?? null,
+      operationId: input.intent?.operationId ?? null,
+      via: input.via,
+    })
+  } catch (err) {
+    // Dropping the error is correct here: the write already stored, and
+    // rethrowing would answer the client that it failed when it did not. The
+    // lost audit line is reported below instead.
+    try {
+      rootLogger.warn({ err, host: input.name, via: input.via }, 'Host approval audit line failed')
+    } catch {
+      // The logger itself is down; there is no channel left to report on, and
+      // the request must still succeed.
+    }
+  }
 }
 
 async function persistHostFailure(intent: HostAdministrativeIntent | null): Promise<void> {
@@ -411,7 +466,11 @@ export class ResourceService {
       }
       spec: Record<string, unknown>
     },
-    namespace?: string
+    namespace?: string,
+    options?: {
+      /** The intended `spec.approval` change, kept on the intent event (spec §6.8). */
+      approvalChangeSummary?: string
+    }
   ): Promise<unknown> {
     // Namespaces are determined by the HTTP layer from server-side config; the
     // service intentionally ignores any namespace the body might carry.
@@ -421,6 +480,7 @@ export class ResourceService {
       action: 'create',
       namespace: ns,
       name: body.metadata.name,
+      summary: options?.approvalChangeSummary,
     })
     const sanitizedMetadata = stripAdministrativeIntentAnnotation(body.metadata) ?? body.metadata
     // A create is the one prediction that cannot be wrong: the apiserver's
@@ -462,6 +522,15 @@ export class ResourceService {
       await persistHostFailure(intent)
       throw err
     }
+    auditHostApprovalChange({
+      plural,
+      name: body.metadata.name,
+      namespace: ns,
+      intent,
+      before: undefined,
+      after: created,
+      via: 'host_create',
+    })
     // Outside the try on purpose: the create already succeeded, and a failure
     // to correct the annotation must not reach `persistHostFailure`, which
     // would record a completed operation as failed.
@@ -499,7 +568,9 @@ export class ResourceService {
          * same stale payload is the lost-update bug optimistic concurrency
          * exists to prevent. When absent, legacy last-write-wins behavior is
          * preserved (server-version precondition + bounded retry) for
-         * API-only callers that intentionally replace whatever is current.
+         * API-only callers that intentionally replace whatever is current,
+         * except that a Host write may not change `spec.approval` without it
+         * (`ApprovalRequiresVersionError`).
          */
         resourceVersion?: string
       }
@@ -517,10 +588,18 @@ export class ResourceService {
        * attempt 1.
        */
       preReadCurrent?: MutableResourceSnapshot
+      /** The intended `spec.approval` change, kept on the intent event (spec §6.8). */
+      approvalChangeSummary?: string
     }
   ): Promise<unknown> {
     const ns = this.resolveNamespace(plural, namespace)
-    const intent = await persistHostIntent({ plural, action: 'update', namespace: ns, name })
+    const intent = await persistHostIntent({
+      plural,
+      action: 'update',
+      namespace: ns,
+      name,
+      summary: options?.approvalChangeSummary,
+    })
     const readerUid = body.metadata?.uid || undefined
     const readerResourceVersion = body.metadata?.resourceVersion || undefined
     // A reader resourceVersion freezes the caller's edit and must not be retried:
@@ -554,6 +633,21 @@ export class ResourceService {
         throw new K8sConflictError(
           `${plural}/${name} changed identity since it was read (stale uid ${readerUid})`
         )
+      }
+
+      // Version rule (spec §6.8): without a reader resourceVersion nothing
+      // fences this write against a stale client, so it may not change
+      // `spec.approval`. Checked on every attempt, against that attempt's read.
+      if (
+        isHostResource(plural) &&
+        !readerResourceVersion &&
+        !approvalBlocksEqual(
+          body.spec.approval,
+          (current as { spec?: { approval?: unknown } }).spec?.approval
+        )
+      ) {
+        await persistHostFailure(intent)
+        throw new ApprovalRequiresVersionError(name)
       }
 
       const sanitizedMetadata = stripAdministrativeIntentAnnotation(body.metadata)
@@ -620,6 +714,15 @@ export class ResourceService {
         await persistHostFailure(intent)
         throw err
       }
+      auditHostApprovalChange({
+        plural,
+        name,
+        namespace: ns,
+        intent,
+        before: current,
+        after: replaced,
+        via: 'host_put',
+      })
       // After the catch, not inside the try: the replace already succeeded, so
       // a failure here must not reach `persistHostFailure` and record a
       // completed operation as failed.

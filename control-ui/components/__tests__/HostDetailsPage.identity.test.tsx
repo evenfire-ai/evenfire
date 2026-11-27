@@ -100,8 +100,14 @@ vi.mock('../../lib/api', () => ({
   isSilentApiError: vi.fn().mockReturnValue(false),
 }))
 
+// A Host read from the API always carries a resourceVersion; the page's saves
+// refuse to send without the one its form was built from (spec R16).
 const host = {
-  metadata: { name: 'foo', creationTimestamp: '2026-08-25T12:34:56Z' },
+  metadata: {
+    name: 'foo',
+    creationTimestamp: '2026-08-25T12:34:56Z',
+    resourceVersion: 'rv-form-load',
+  },
   spec: {
     approval: { tools: { shell_exec: true } },
     channels: ['telegram'],
@@ -313,11 +319,16 @@ describe('HostDetailsPage identity integration', () => {
       'Models & creds',
       'Connectors',
       'Access',
+      'Approvals',
       'Advanced',
     ])
     expect(tabs.find(tab => tab.textContent === 'Connectors')).toHaveAttribute(
       'href',
       '/agents/foo/connectors'
+    )
+    expect(tabs.find(tab => tab.textContent === 'Approvals')).toHaveAttribute(
+      'href',
+      '/agents/foo/approval-settings'
     )
   })
 
@@ -479,26 +490,29 @@ describe('HostDetailsPage identity integration', () => {
 
     const hooksTab = await screen.findByRole('tab', { name: 'Hooks' })
     expect(hooksTab).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getByRole('tab', { name: 'Per-tool approval' })).toHaveAttribute(
-      'aria-selected',
-      'false'
-    )
+    expect(screen.queryByRole('tab', { name: 'Per-tool approval' })).toBeNull()
     expect(await screen.findByText('No guardrail hooks on this agent yet.')).toBeInTheDocument()
-    // The approval editor stays unmounted until its sub-tab is selected.
+    // The approval editor lives on the Approvals tab, not in Advanced.
     expect(screen.queryByLabelText('http_request')).toBeNull()
   })
 
-  it('keeps Per-tool approval actions in the top toolbar without a duplicate title', async () => {
-    mockParams = { name: 'foo', tab: 'advanced' }
-    const { container } = render(<HostDetailsPage />)
+  it("keeps the per-tool section's actions in the section, under one title", async () => {
+    mockParams = { name: 'foo', tab: 'approval-settings' }
+    render(<HostDetailsPage />)
 
-    fireEvent.click(await screen.findByRole('tab', { name: 'Per-tool approval' }))
-
+    // The section opens in its read view; Edit opens the editor.
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
     expect(await screen.findByLabelText('http_request')).toBeInTheDocument()
     expect(
       screen.getByRole('button', { name: 'Save' }).closest('.cu-host-approval-section__actions')
     ).not.toBeNull()
-    expect(container.querySelector('.cu-host-approval-section .cu-section-title')).toBeNull()
+    // Ruling 41, item 8: one title for the per-tool section on the page, its own heading.
+    const titles = screen.getAllByRole('heading', { name: /per-tool/i })
+    expect(
+      titles.map(title => title.textContent),
+      'one per-tool title'
+    ).toEqual(['Per-tool overrides'])
+    expect(titles[0].closest('.cu-host-approval-section'), "the section's own").not.toBeNull()
   })
 
   it('shows the agent description in place of the identifier and truncates long copy', async () => {

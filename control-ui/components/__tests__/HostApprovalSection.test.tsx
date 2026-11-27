@@ -1,31 +1,121 @@
+/**
+ * The per-tool approval section (spec §6.4, §6.11, §6.12): its read and edit
+ * views, the `{ stored, base, draft, editing }` hook with its edit-session
+ * token, single-flight while saving, and a visible state for every outcome of
+ * the versioned save.
+ *
+ * Section tests render the section alone over the fake control-api, with only
+ * `fetch` replaced (spec A6). T32 needs a page instance kept across agents, so
+ * it runs on the page harness, whose kept instance keeps the section mounted.
+ */
+import { Suspense, startTransition, useMemo, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, renderHook } from '@testing-library/react'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { type HostResource, formatApiError } from '../../lib/api'
+import { CRON_MANAGE_CONDITIONS } from '../../lib/approvalToolCatalog'
+import {
+  APPROVAL_CREATED_ELSEWHERE_MESSAGE,
+  TOOLS_CHANGED_MESSAGE,
+  notStoredMessage,
+} from '../../lib/hostApprovalSave'
+import {
+  openApprovalSettings,
+  pageMountDefaults,
+  perToolSection,
+  renderHostPage,
+  resetApprovalTestState,
+} from '../../test/fixtures/approvalPageHarness'
+import {
+  FOO_PATH,
+  clickEdit,
+  clickSave,
+  createSectionFake,
+  propsFromStore,
+  reads,
+  renderSection,
+  resetSectionTestState,
+  rowSelect,
+  section,
+  sectionButton,
+  sectionMessage,
+  seedHost,
+  setRow,
+  settle,
+  shownOverrides,
+  shownRows,
+  writes,
+} from '../../test/fixtures/approvalSection'
+import { createFakeControlApi } from '../../test/fixtures/fakeControlApi'
 import { HostApprovalSection } from '../HostApprovalSection'
-import { NATIVE_TOOLS } from '../HostApprovalSection/constants'
-import { useApprovalToolsDraft } from '../HostApprovalSection/hooks'
+import {
+  CLUSTER_DEFAULT_TEXT,
+  CUSTOM_TOOL_HINT,
+  NATIVE_TOOLS,
+  NO_OVERRIDES_TEXT,
+  TOOL_PARITY_EXCLUSIONS,
+} from '../HostApprovalSection/constants'
+import { useApprovalToolsSection } from '../HostApprovalSection/hooks'
+import type { HostApprovalSectionProps } from '../HostApprovalSection/types'
 
 const controlUiCss = readFileSync(resolve(__dirname, '../../app/globals.css'), 'utf8')
 
+type WireAnswer = { status: number; body: unknown }
+
+function readWire(path: string): WireAnswer {
+  return JSON.parse(readFileSync(resolve(__dirname, path), 'utf8')) as WireAnswer
+}
+
+// control-api's answers, recorded by control-api/test/routes.hostPut.fakeContract.test.ts.
+const HOST_PUT_403 = readWire('../../../control-api/test/fixtures/wire/host-put-403.wire.json')
+const CONTROL_API_500 = readWire(
+  '../../../control-api/test/fixtures/wire/host-detail-500.wire.json'
+)
+
+// Spec §6.4 steps 8 and 13, verbatim.
+const GAVE_UP = 'The agent kept changing while saving. Try again.'
+const MAYBE = 'The save may not have applied. Reload to check.'
+
+function host(name: string, approval?: Record<string, unknown>): HostResource {
+  return seedHost(name, approval === undefined ? {} : { approval }) as HostResource
+}
+
+function rowNode(name: string): HTMLElement {
+  const node = section().querySelector<HTMLElement>(`[data-tool-row="${name}"]`)
+  if (!node) throw new Error(`No row for ${name}`)
+  return node
+}
+
 describe('HostApprovalSection — constants', () => {
-  it('contains exactly the 12 always-on native tools verified during the back-end smoke', () => {
-    const expected = [
-      'clerum__generate_docx',
-      'clerum__generate_markdown',
-      'clerum__generate_pdf',
-      'clerum__generate_xlsx',
-      'clerum__list_workflows',
-      'clerum__trigger_workflow',
-      'file_read',
-      'file_write',
-      'http_request',
-      'json_transform',
-      'shell_exec',
-      'system_info',
-    ]
-    expect(NATIVE_TOOLS.map(t => t.name)).toEqual(expected)
+  it('lists every tool chat registers except the bridge, and not the retired workflow names', () => {
+    const names = NATIVE_TOOLS.map(t => t.name)
+    const wire = JSON.parse(
+      readFileSync(
+        resolve(__dirname, '../../../mcp-host/test/fixtures/wire/mcp-host-tool-approval.json'),
+        'utf8'
+      )
+    ) as { tools: Record<string, unknown> }
+    const excluded = new Set(TOOL_PARITY_EXCLUSIONS.map(entry => entry.name))
+    const expected = Object.keys(wire.tools)
+      .filter(name => !excluded.has(name))
+      .sort()
+    expect(names).toEqual(expected)
+    expect(names).toContain('shell_exec')
+    expect(names).toContain('cron_manage')
+    expect(names).toContain('workflow_trigger')
+    expect(names).not.toContain('clerum__tool_call')
+    expect(names).not.toContain('clerum__list_workflows')
+    expect(names).not.toContain('clerum__trigger_workflow')
   })
 
   it('is sorted alphabetically', () => {
@@ -42,11 +132,11 @@ describe('HostApprovalSection — constants', () => {
     }
   })
 
-  it('attaches a riskHint only to tools whose codeDefault is "required" (loosenable)', () => {
-    // Only http_request and shell_exec actually return true from
-    // requiresApproval() in mcp-host (verified against the live source).
-    // Tools whose code default is already 'skip' have no "loosening"
-    // direction, so a riskHint on them would be misleading.
+  it('attaches a riskHint only to tools whose codeDefault is "required"', () => {
+    // A hint explains a Skip override of a tool that asks by default. Whether
+    // an override loosens is decided by lib/approvalLoosening, not by the hint:
+    // browser_open, cron_manage and the other Required-default tools without
+    // one are still marked and still confirmed in the dialog.
     const expectedRisky = ['http_request', 'shell_exec']
     for (const name of expectedRisky) {
       const tool = NATIVE_TOOLS.find(t => t.name === name)
@@ -55,9 +145,6 @@ describe('HostApprovalSection — constants', () => {
       expect(tool!.riskHint, `${name} needs a riskHint`).toBeTruthy()
     }
 
-    // Conversely, every tool whose codeDefault is 'skip' must NOT carry a
-    // riskHint — the `isRisky` predicate would never fire for them anyway,
-    // and a stray hint would be dead documentation that decays.
     const skipDefaultTools = NATIVE_TOOLS.filter(t => t.codeDefault === 'skip')
     for (const tool of skipDefaultTools) {
       expect(
@@ -68,105 +155,137 @@ describe('HostApprovalSection — constants', () => {
   })
 })
 
-describe('HostApprovalSection — useApprovalToolsDraft', () => {
-  it('initializes empty when initialTools is undefined', () => {
-    const { result } = renderHook(() => useApprovalToolsDraft(undefined))
-    expect(result.current.draft.rows).toEqual({})
-    expect(result.current.draft.customRows).toEqual([])
-    expect(result.current.isDirty).toBe(false)
-  })
-
-  it('translates initial tools map into row states', () => {
-    const { result } = renderHook(() =>
-      useApprovalToolsDraft({ http_request: false, shell_exec: true })
+describe('HostApprovalSection — useApprovalToolsSection', () => {
+  function renderSectionHook(stored: HostResource | null, inherited: boolean) {
+    return renderHook(
+      (props: { stored: HostResource | null; inherited: boolean }) =>
+        useApprovalToolsSection(props.stored, props.inherited),
+      { initialProps: { stored, inherited } }
     )
-    expect(result.current.draft.rows).toEqual({
-      http_request: 'skip',
-      shell_exec: 'required',
+  }
+
+  it('starts in the read view with the stored tools as base and draft', () => {
+    const stored = host('foo', { tools: { http_request: false, shell_exec: true } })
+    const { result } = renderSectionHook(stored, false)
+
+    expect(result.current.state).toEqual({
+      stored: { host: stored, inherited: false },
+      base: { tools: { http_request: false, shell_exec: true }, inherited: false },
+      draft: { http_request: false, shell_exec: true },
+      editing: false,
+      editSession: 0,
     })
-    expect(result.current.draft.customRows).toEqual([])
     expect(result.current.isDirty).toBe(false)
   })
 
-  it('separates known tools from custom rows on load', () => {
-    const { result } = renderHook(() =>
-      useApprovalToolsDraft({
-        http_request: false,
-        memory_search: true,
-        desktop_screenshot: false,
-      })
+  it('an inheriting Host has no base tools, and its base marks the save as a first save', () => {
+    const stored = host('foo')
+    const { result } = renderSectionHook(stored, true)
+
+    expect(result.current.state.base).toEqual({ tools: undefined, inherited: true })
+    expect(result.current.state.draft).toEqual({})
+    expect(result.current.isDirty).toBe(false)
+  })
+
+  it('each Edit starts a new edit session', () => {
+    const { result } = renderSectionHook(host('foo', { tools: {} }), false)
+    act(() => result.current.edit())
+    expect(result.current.state).toMatchObject({ editing: true, editSession: 1 })
+    act(() => result.current.cancel())
+    expect(result.current.state).toMatchObject({ editing: false, editSession: 1 })
+    act(() => result.current.edit())
+    expect(result.current.state).toMatchObject({ editing: true, editSession: 2 })
+  })
+
+  it('setRow, addCustom and removeCustom edit the draft, and isDirty compares it with the base on effective values', () => {
+    const { result } = renderSectionHook(
+      host('foo', { tools: { http_request: false, custom_lookup: true } }),
+      false
     )
-    expect(result.current.draft.rows).toEqual({ http_request: 'skip' })
-    expect(result.current.draft.customRows).toEqual([
-      { name: 'desktop_screenshot', state: 'skip' },
-      { name: 'memory_search', state: 'required' },
-    ])
-  })
+    act(() => result.current.edit())
 
-  it('flips isDirty when a row state changes', () => {
-    const { result } = renderHook(() => useApprovalToolsDraft({ http_request: false }))
+    act(() => result.current.setRow('http_request', 'required'))
+    expect(result.current.state.draft).toEqual({ http_request: true, custom_lookup: true })
+    expect(result.current.isDirty).toBe(true)
+    // A→B→A is unchanged.
+    act(() => result.current.setRow('http_request', 'skip'))
     expect(result.current.isDirty).toBe(false)
-    act(() => result.current.setRowState('http_request', 'required'))
-    expect(result.current.isDirty).toBe(true)
-    expect(result.current.draft.rows.http_request).toBe('required')
-  })
 
-  it('flips isDirty when a custom row is added', () => {
-    const { result } = renderHook(() => useApprovalToolsDraft(undefined))
-    expect(result.current.isDirty).toBe(false)
-    act(() => result.current.addCustomRow('memory_search', 'skip'))
-    expect(result.current.isDirty).toBe(true)
-    expect(result.current.draft.customRows).toEqual([{ name: 'memory_search', state: 'skip' }])
-  })
-
-  it('removes custom rows by index and updates dirty', () => {
-    const { result } = renderHook(() =>
-      useApprovalToolsDraft({ memory_search: true, cron_list: false })
-    )
-    expect(result.current.draft.customRows).toHaveLength(2)
-    act(() => result.current.removeCustomRow(0))
-    expect(result.current.draft.customRows).toHaveLength(1)
-    expect(result.current.isDirty).toBe(true)
-  })
-
-  it('reset returns to initial state', () => {
-    const { result } = renderHook(() => useApprovalToolsDraft({ http_request: false }))
-    act(() => result.current.setRowState('http_request', 'required'))
-    expect(result.current.isDirty).toBe(true)
-    act(() => result.current.reset())
-    expect(result.current.isDirty).toBe(false)
-    expect(result.current.draft.rows.http_request).toBe('skip')
-  })
-
-  it('toToolsMap omits default rows and includes custom rows', () => {
-    const { result } = renderHook(() => useApprovalToolsDraft(undefined))
-    act(() => {
-      result.current.setRowState('http_request', 'skip')
-      result.current.setRowState('shell_exec', 'required')
-      result.current.addCustomRow('memory_search', 'skip')
-    })
-    expect(result.current.toToolsMap()).toEqual({
+    act(() => result.current.addCustom('added_tool', 'skip'))
+    expect(result.current.state.draft).toEqual({
       http_request: false,
-      shell_exec: true,
-      memory_search: false,
+      custom_lookup: true,
+      added_tool: false,
     })
+    expect(result.current.isDirty).toBe(true)
+    act(() => result.current.removeCustom('added_tool'))
+    expect(result.current.isDirty).toBe(false)
+
+    act(() => result.current.removeCustom('custom_lookup'))
+    act(() => result.current.setRow('http_request', 'default'))
+    expect(result.current.state.draft).toEqual({})
+    expect(result.current.isDirty).toBe(true)
+    // The base the save compares against is still the stored tools.
+    expect(result.current.state.base.tools).toEqual({ http_request: false, custom_lookup: true })
   })
 
-  it('toToolsMap returns empty object when nothing is overridden', () => {
-    const { result } = renderHook(() => useApprovalToolsDraft({ http_request: false }))
-    act(() => result.current.setRowState('http_request', 'default'))
-    expect(result.current.toToolsMap()).toEqual({})
+  it('cancel discards the draft and leaves the edit view', () => {
+    const { result } = renderSectionHook(host('foo', { tools: { http_request: false } }), false)
+    act(() => result.current.edit())
+    act(() => result.current.setRow('http_request', 'required'))
+    act(() => result.current.cancel())
+
+    expect(result.current.state).toMatchObject({
+      editing: false,
+      draft: { http_request: false },
+    })
+    expect(result.current.isDirty).toBe(false)
+  })
+
+  it('close ends only the edit session it names', () => {
+    const { result } = renderSectionHook(host('foo', { tools: {} }), false)
+    act(() => result.current.edit())
+    act(() => result.current.setRow('system_info', 'required'))
+
+    act(() => result.current.close(0))
+    expect(result.current.state, 'an older session').toMatchObject({ editing: true })
+    expect(result.current.state.draft).toEqual({ system_info: true })
+
+    act(() => result.current.close(1))
+    expect(result.current.state).toMatchObject({ editing: false, draft: {} })
+  })
+
+  it('another Host, or no data, leaves the edit view with that data', () => {
+    const { result, rerender } = renderSectionHook(host('foo', { tools: {} }), false)
+    act(() => result.current.edit())
+    act(() => result.current.setRow('system_info', 'required'))
+
+    const other = host('b', { tools: { file_write: true } })
+    rerender({ stored: other, inherited: false })
+    expect(result.current.state).toMatchObject({
+      stored: { host: other, inherited: false },
+      base: { tools: { file_write: true }, inherited: false },
+      draft: { file_write: true },
+      editing: false,
+    })
+
+    act(() => result.current.edit())
+    rerender({ stored: null, inherited: false })
+    expect(result.current.state).toMatchObject({
+      stored: { host: null },
+      draft: {},
+      editing: false,
+    })
   })
 })
 
-describe('HostApprovalSection — component', () => {
-  let onSave: ReturnType<typeof vi.fn> & ((tools: Record<string, boolean>) => Promise<void>)
-
-  beforeEach(() => {
-    onSave = vi.fn().mockResolvedValue(undefined) as typeof onSave
+describe('HostApprovalSection — read view', () => {
+  beforeEach(() => resetSectionTestState())
+  afterEach(() => {
+    cleanup()
+    resetSectionTestState()
+    vi.unstubAllGlobals()
   })
-
-  afterEach(() => cleanup())
 
   it('keeps approval rows in a horizontal shared layout', () => {
     const rowRule = controlUiCss.match(/(?:^|\n)\.cu-access-row\s*\{([^}]*)\}/)?.[1] ?? ''
@@ -176,332 +295,760 @@ describe('HostApprovalSection — component', () => {
     expect(rowRule).toMatch(/justify-content:\s*space-between/)
   })
 
-  describe('read-only — no overrides', () => {
-    it('renders the empty state and an Edit button when canWrite=true', () => {
-      render(
-        <HostApprovalSection
-          initialTools={undefined}
-          onSave={onSave}
-          busy={false}
-          canWrite={true}
-        />
-      )
-      expect(screen.getByText(/no per-tool overrides configured/i)).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: /edit/i })).toBeInTheDocument()
-      expect(screen.queryByText('Per-tool approval')).not.toBeInTheDocument()
-    })
+  it('lists only the overrides, with Edit', () => {
+    renderSection(createSectionFake({ tools: { http_request: false, file_write: false } }))
 
-    it('hides the Edit button when canWrite=false', () => {
-      render(
-        <HostApprovalSection
-          initialTools={undefined}
-          onSave={onSave}
-          busy={false}
-          canWrite={false}
-        />
-      )
-      expect(screen.getByText(/no per-tool overrides configured/i)).toBeInTheDocument()
-      expect(screen.queryByRole('button', { name: /edit/i })).not.toBeInTheDocument()
+    expect(shownRows()).toEqual({ file_write: 'Skip', http_request: 'Skip' })
+    expect(within(section()).queryByRole('combobox')).toBeNull()
+    expect(sectionButton('Edit')).toBeEnabled()
+  })
+
+  it('shows the empty state when there are no overrides', () => {
+    renderSection(createSectionFake({ modeCeiling: 'auto' }))
+
+    expect(within(section()).getByText(NO_OVERRIDES_TEXT)).toBeInTheDocument()
+    expect(shownRows()).toEqual({})
+    expect(within(section()).queryByText(CLUSTER_DEFAULT_TEXT)).toBeNull()
+  })
+
+  it('shows the cluster default on an inheriting Host', () => {
+    renderSection(createSectionFake(undefined))
+
+    expect(within(section()).getByText(CLUSTER_DEFAULT_TEXT)).toBeInTheDocument()
+    expect(within(section()).queryByText(NO_OVERRIDES_TEXT)).toBeNull()
+    expect(sectionButton('Edit')).toBeEnabled()
+  })
+
+  it('explicit Required on shell_exec reads "Required (explicit): Auto asks on every shell command"', () => {
+    renderSection(
+      createSectionFake({ tools: { file_write: true, http_request: true, shell_exec: true } })
+    )
+
+    expect(rowNode('shell_exec')).toHaveTextContent(
+      'Required (explicit): Auto asks on every shell command'
+    )
+    expect(rowNode('http_request')).toHaveTextContent(
+      'Required (explicit): Auto asks on every HTTP request'
+    )
+    // Elsewhere an explicit Required asks the same as the default does.
+    expect(rowNode('file_write')).toHaveTextContent(/Required$/)
+    expect(rowNode('file_write')).not.toHaveTextContent('explicit')
+    expect(shownRows()).toEqual({
+      file_write: 'Required',
+      http_request: 'Required',
+      shell_exec: 'Required',
     })
   })
 
-  describe('read-only — overrides exist', () => {
-    it('renders one row per overridden tool, not all 12', () => {
-      render(
-        <HostApprovalSection
-          initialTools={{ http_request: false, file_write: false }}
-          onSave={onSave}
-          busy={false}
-          canWrite={true}
-        />
-      )
-      // Both overrides shown
-      expect(screen.getByText('http_request')).toBeInTheDocument()
-      expect(screen.getByText('http_request').closest('.cu-access-row')).not.toBeNull()
-      expect(screen.getByText('file_write')).toBeInTheDocument()
-      // Tools with no override are NOT rendered
-      expect(screen.queryByText('shell_exec')).not.toBeInTheDocument()
-      expect(screen.queryByText('clerum__generate_pdf')).not.toBeInTheDocument()
+  it('marks an override that lets calls run without a card where the tool asks by default', () => {
+    renderSection(
+      createSectionFake({
+        tools: {
+          browser_open: false,
+          custom_lookup: false,
+          file_write: false,
+          http_request: false,
+          shell_exec: true,
+        },
+      })
+    )
+    const mark = (name: string) =>
+      within(rowNode(name)).queryByRole('img', { name: /./ })?.getAttribute('aria-label') ?? null
+
+    expect(mark('http_request')).toMatch(/CLERUM_HTTP_ALLOWLIST/)
+    // No riskHint: the loosening function still marks it.
+    expect(mark('browser_open')).toBe('Set to Skip: calls can run without an approval card.')
+    expect(mark('custom_lookup')).toMatch(/its default is not known here/)
+    expect(mark('file_write'), 'a tool that never asks by default').toBeNull()
+    expect(mark('shell_exec'), 'Required never loosens').toBeNull()
+  })
+})
+
+describe('HostApprovalSection — edit view', () => {
+  beforeEach(() => resetSectionTestState())
+  afterEach(() => {
+    cleanup()
+    resetSectionTestState()
+    vi.unstubAllGlobals()
+  })
+
+  it('Edit shows every native row with its default, and the desktop-only and conditional notes', () => {
+    renderSection(createSectionFake({ tools: {} }))
+    clickEdit()
+
+    for (const tool of NATIVE_TOOLS) expect(rowSelect(tool.name).value).toBe('default')
+    const defaultOption = (name: string) =>
+      Array.from(rowSelect(name).options).find(option => option.value === 'default')?.textContent
+    expect(defaultOption('http_request')).toBe('Default (Required)')
+    expect(defaultOption('file_write')).toBe('Default (Skip)')
+    expect(defaultOption('cron_manage')).toBe('Default (varies)')
+    expect(defaultOption('workflow_trigger')).toBe('Default (varies)')
+    expect(within(rowNode('cron_manage')).getByText(CRON_MANAGE_CONDITIONS)).toBeInTheDocument()
+    expect(within(rowNode('browser_open')).getByText('Desktop only')).toBeInTheDocument()
+    expect(within(rowNode('http_request')).queryByText('Desktop only')).toBeNull()
+  })
+
+  it('marks a row live while its draft lets calls run without a card where the tool asks by default (ruling 41, item 7)', () => {
+    renderSection(createSectionFake({ tools: { custom_lookup: true } }))
+    clickEdit()
+    const mark = (name: string) =>
+      within(rowNode(name)).queryByRole('img', { name: /./ })?.getAttribute('aria-label') ?? null
+    expect(mark('http_request'), 'at Default').toBeNull()
+
+    setRow('http_request', 'skip')
+    expect(mark('http_request'), 'set to Skip').toEqual(
+      expect.stringMatching(/CLERUM_HTTP_ALLOWLIST/)
+    )
+    setRow('http_request', 'default')
+    expect(mark('http_request'), 'back to Default').toBeNull()
+
+    // No riskHint: the loosening function still marks it.
+    setRow('browser_open', 'skip')
+    expect(mark('browser_open')).toBe('Set to Skip: calls can run without an approval card.')
+    setRow('file_write', 'skip')
+    expect(mark('file_write'), 'a tool that never asks by default').toBeNull()
+    setRow('shell_exec', 'required')
+    expect(mark('shell_exec'), 'Required never loosens').toBeNull()
+
+    fireEvent.click(sectionButton('Add a tool by name'))
+    fireEvent.change(within(section()).getByLabelText('Tool name'), {
+      target: { value: 'added_tool' },
+    })
+    fireEvent.change(within(section()).getByLabelText('Approval state for the new custom tool'), {
+      target: { value: 'skip' },
+    })
+    fireEvent.click(sectionButton('Add'))
+    expect(mark('added_tool'), 'a Skip custom row').toEqual(
+      expect.stringMatching(/its default is not known here/)
+    )
+    expect(mark('custom_lookup'), 'a Required custom row').toBeNull()
+  })
+
+  it('shows Unsaved changes only while the draft differs from the base', () => {
+    renderSection(createSectionFake({ tools: { json_transform: true } }))
+    clickEdit()
+    expect(within(section()).queryByText('Unsaved changes')).toBeNull()
+    expect(sectionButton('Save')).toBeDisabled()
+
+    setRow('system_info', 'required')
+    expect(within(section()).getByText('Unsaved changes')).toBeInTheDocument()
+    expect(sectionButton('Save')).toBeEnabled()
+
+    setRow('system_info', 'default')
+    expect(within(section()).queryByText('Unsaved changes')).toBeNull()
+    expect(sectionButton('Save')).toBeDisabled()
+  })
+
+  it('Cancel discards the draft and returns to the read view', () => {
+    renderSection(createSectionFake({ tools: { json_transform: true } }))
+    clickEdit()
+    setRow('http_request', 'skip')
+    fireEvent.click(sectionButton('Cancel'))
+
+    expect(within(section()).queryByRole('combobox')).toBeNull()
+    expect(shownRows()).toEqual({ json_transform: 'Required' })
+  })
+
+  it('rejects invalid custom names with an inline error', () => {
+    renderSection(createSectionFake({ tools: { custom_lookup: false } }))
+    clickEdit()
+    fireEvent.click(sectionButton('Add a tool by name'))
+    const input = within(section()).getByLabelText('Tool name')
+    const add = sectionButton('Add')
+
+    fireEvent.change(input, { target: { value: 'BadName' } })
+    expect(within(section()).getByText(/lower snake_case/i)).toBeInTheDocument()
+    expect(add).toBeDisabled()
+
+    fireEvent.change(input, { target: { value: 'http_request' } })
+    expect(within(section()).getByText(/already in the tool list above/i)).toBeInTheDocument()
+    expect(add).toBeDisabled()
+
+    fireEvent.change(input, { target: { value: 'custom_lookup' } })
+    expect(within(section()).getByText(/already in your custom rows/i)).toBeInTheDocument()
+    expect(add).toBeDisabled()
+
+    fireEvent.change(input, { target: { value: 'custom_memory_lookup' } })
+    expect(add).toBeEnabled()
+    fireEvent.click(add)
+    expect(shownOverrides()).toEqual({ custom_lookup: 'Skip', custom_memory_lookup: 'Required' })
+  })
+
+  it('describes the custom tool name with its hint, and with its error while one shows (ruling 41, item 3)', () => {
+    renderSection(createSectionFake({ tools: {} }))
+    clickEdit()
+    fireEvent.click(sectionButton('Add a tool by name'))
+    const input = within(section()).getByLabelText('Tool name')
+
+    expect(input, 'no error yet').toHaveAccessibleDescription(CUSTOM_TOOL_HINT)
+
+    fireEvent.change(input, { target: { value: 'BadName' } })
+    expect(input, 'with an error').toHaveAccessibleDescription(
+      `${CUSTOM_TOOL_HINT} Use lower snake_case (start with a letter; letters, digits, underscore).`
+    )
+
+    fireEvent.change(input, { target: { value: 'custom_memory_lookup' } })
+    expect(input, 'the error is gone').toHaveAccessibleDescription(CUSTOM_TOOL_HINT)
+  })
+
+  it('"Add a tool by name" controls only an element that exists (ruling 41, item 5)', () => {
+    renderSection(createSectionFake({ tools: {} }))
+    clickEdit()
+    const toggle = sectionButton('Add a tool by name')
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(toggle, 'collapsed: no form to control').not.toHaveAttribute('aria-controls')
+
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    const controlled = document.getElementById(toggle.getAttribute('aria-controls') ?? '')
+    expect(controlled, 'expanded: the form it shows').not.toBeNull()
+    expect(within(controlled!).getByLabelText('Tool name')).toBeInTheDocument()
+
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(toggle, 'collapsed again').not.toHaveAttribute('aria-controls')
+  })
+
+  it('Review Focus 3: renders and removes a stored off-pattern tool key', async () => {
+    // Keys the editor would refuse, written with kubectl.
+    const fake = createSectionFake({
+      tools: { Bash: false, 'my-server__tool': true, json_transform: true },
+    })
+    const { onSettled } = renderSection(fake)
+    expect(shownRows()).toEqual({
+      Bash: 'Skip',
+      json_transform: 'Required',
+      'my-server__tool': 'Required',
     })
 
-    it('shows the warning icon next to risky overrides only', () => {
-      render(
-        <HostApprovalSection
-          initialTools={{ http_request: false }}
-          onSave={onSave}
-          busy={false}
-          canWrite={true}
-        />
-      )
-      // http_request: code default is 'required' + state is 'skip' → risky
-      expect(screen.getByTitle(/CLERUM_HTTP_ALLOWLIST/i)).toBeInTheDocument()
+    clickEdit()
+    expect(shownOverrides()).toEqual({
+      Bash: 'Skip',
+      json_transform: 'Required',
+      'my-server__tool': 'Required',
     })
+    fireEvent.click(sectionButton('Remove Bash'))
+    expect(within(section()).queryByRole('button', { name: 'Remove Bash' })).toBeNull()
+    expect(sectionButton('Remove my-server__tool')).toBeInTheDocument()
+    // Removing a Skip row loosens nothing: no dialog.
+    await clickSave()
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
 
-    it('does NOT show the warning icon when overriding a Skip-default tool to Skip', () => {
-      // file_write defaults to Skip in the code (verified). Setting Skip here
-      // is a no-op confirmation — no security loosening — so no warning.
-      render(
-        <HostApprovalSection
-          initialTools={{ file_write: false }}
-          onSave={onSave}
-          busy={false}
-          canWrite={true}
-        />
-      )
-      // No CLERUM_HTTP_ALLOWLIST tooltip; no other risk-related title.
-      expect(screen.queryByTitle(/Skipping approval/i)).not.toBeInTheDocument()
-      // The override row is still rendered.
-      expect(screen.getByText('file_write')).toBeInTheDocument()
+    expect(onSettled.mock.calls[0][0]).toMatchObject({ kind: 'saved' })
+    expect(fake.stored('foo').spec.approval).toEqual({
+      tools: { 'my-server__tool': true, json_transform: true },
     })
   })
 
-  describe('edit mode', () => {
-    it('clicking Edit reveals all 12 always-on rows alphabetically', () => {
-      render(
-        <HostApprovalSection
-          initialTools={undefined}
-          onSave={onSave}
-          busy={false}
-          canWrite={true}
-        />
-      )
-      fireEvent.click(screen.getByRole('button', { name: /edit/i }))
-
-      // First always-on tool alphabetically is clerum__generate_docx
-      expect(screen.getByText('clerum__generate_docx')).toBeInTheDocument()
-      // Last is system_info
-      expect(screen.getByText('system_info')).toBeInTheDocument()
-      // shell_exec is in there too
-      expect(screen.getByText('shell_exec')).toBeInTheDocument()
-    })
-
-    it("annotates each row's Default option with the resolved code default", () => {
-      render(
-        <HostApprovalSection
-          initialTools={undefined}
-          onSave={onSave}
-          busy={false}
-          canWrite={true}
-        />
-      )
-      fireEvent.click(screen.getByRole('button', { name: /edit/i }))
-
-      // http_request defaults to Required in mcp-host (verified)
-      const httpSelect = screen.getByLabelText(/http_request/i) as HTMLSelectElement
-      const httpDefaultOpt = Array.from(httpSelect.options).find(o => o.value === 'default')
-      expect(httpDefaultOpt?.textContent).toMatch(/Default\s*\(\s*Required\s*\)/)
-
-      // file_write defaults to Skip
-      const fwSelect = screen.getByLabelText(/file_write/i) as HTMLSelectElement
-      const fwDefaultOpt = Array.from(fwSelect.options).find(o => o.value === 'default')
-      expect(fwDefaultOpt?.textContent).toMatch(/Default\s*\(\s*Skip\s*\)/)
-
-      // shell_exec defaults to Required
-      const shellSelect = screen.getByLabelText(/shell_exec/i) as HTMLSelectElement
-      const shellDefaultOpt = Array.from(shellSelect.options).find(o => o.value === 'default')
-      expect(shellDefaultOpt?.textContent).toMatch(/Default\s*\(\s*Required\s*\)/)
-    })
-
-    it('Save button disabled until a row state changes', () => {
-      render(
-        <HostApprovalSection
-          initialTools={undefined}
-          onSave={onSave}
-          busy={false}
-          canWrite={true}
-        />
-      )
-      fireEvent.click(screen.getByRole('button', { name: /edit/i }))
-      const saveBtn = screen.getByRole('button', { name: /^save/i })
-      expect(saveBtn).toBeDisabled()
-      const actions = saveBtn.closest('.cu-host-approval-section__actions')
-      expect(actions).not.toBeNull()
-      expect(actions?.previousElementSibling).toHaveClass('cu-host-approval-section__content')
-
-      // Change http_request to Skip
-      const httpSelect = screen.getByLabelText(/http_request/i) as HTMLSelectElement
-      fireEvent.change(httpSelect, { target: { value: 'skip' } })
-      expect(saveBtn).not.toBeDisabled()
-    })
-
-    it('warning icon appears on a Skip override of a Required-default tool', () => {
-      render(
-        <HostApprovalSection
-          initialTools={undefined}
-          onSave={onSave}
-          busy={false}
-          canWrite={true}
-        />
-      )
-      fireEvent.click(screen.getByRole('button', { name: /edit/i }))
-
-      // Initially no warning icons
-      expect(screen.queryAllByTitle(/CLERUM_HTTP_ALLOWLIST/i)).toHaveLength(0)
-
-      const httpSelect = screen.getByLabelText(/http_request/i) as HTMLSelectElement
-      fireEvent.change(httpSelect, { target: { value: 'skip' } })
-      expect(screen.getAllByTitle(/CLERUM_HTTP_ALLOWLIST/i)).toHaveLength(1)
-    })
-
-    it('Cancel exits edit mode and discards changes without confirmation', () => {
-      render(
-        <HostApprovalSection
-          initialTools={undefined}
-          onSave={onSave}
-          busy={false}
-          canWrite={true}
-        />
-      )
-      fireEvent.click(screen.getByRole('button', { name: /edit/i }))
-      const httpSelect = screen.getByLabelText(/http_request/i) as HTMLSelectElement
-      fireEvent.change(httpSelect, { target: { value: 'skip' } })
-
-      fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
-      // Back to read-only empty state
-      expect(screen.getByText(/no per-tool overrides configured/i)).toBeInTheDocument()
-    })
-
-    it('Save calls onSave with the correct map (default rows omitted)', async () => {
-      render(
-        <HostApprovalSection
-          initialTools={undefined}
-          onSave={onSave}
-          busy={false}
-          canWrite={true}
-        />
-      )
-      fireEvent.click(screen.getByRole('button', { name: /edit/i }))
-      fireEvent.change(screen.getByLabelText(/http_request/i), {
-        target: { value: 'skip' },
+  it('a clean section takes new stored data; a dirty one keeps its draft', () => {
+    const fake = createSectionFake({ tools: { json_transform: true } })
+    const { rerenderSection } = renderSection(fake)
+    const write = (tools: Record<string, boolean>) => {
+      fake.writeExternal('foo', spec => {
+        ;(spec.approval as Record<string, unknown>).tools = tools
       })
-      fireEvent.change(screen.getByLabelText(/shell_exec/i), {
-        target: { value: 'required' },
-      })
+      rerenderSection(propsFromStore(fake))
+    }
 
-      // handleSave is async (await onSave; setEditing(false)), so wrap the
-      // click in act(async) so the post-await state update settles inside React's act window.
+    write({ json_transform: true, file_write: true })
+    expect(shownRows(), 'the read view').toEqual({
+      file_write: 'Required',
+      json_transform: 'Required',
+    })
+
+    clickEdit()
+    write({ json_transform: false, file_write: true })
+    expect(rowSelect('json_transform').value, 'a clean edit view').toBe('skip')
+    expect(within(section()).queryByText('Unsaved changes')).toBeNull()
+
+    setRow('system_info', 'required')
+    write({ memory_write: true })
+    expect(shownOverrides(), 'the dirty draft').toEqual({
+      file_write: 'Required',
+      json_transform: 'Skip',
+      system_info: 'Required',
+    })
+    expect(within(section()).getByText('Unsaved changes')).toBeInTheDocument()
+
+    // The stored data moved on underneath; Cancel shows it.
+    fireEvent.click(sectionButton('Cancel'))
+    expect(shownRows()).toEqual({ memory_write: 'Required' })
+  })
+})
+
+describe('HostApprovalSection — saving', () => {
+  beforeEach(() => resetSectionTestState())
+  afterEach(() => {
+    cleanup()
+    resetSectionTestState()
+    vi.unstubAllGlobals()
+  })
+
+  it('T6 Save, Cancel and edits are disabled while saving; a raced second click sends one PUT', async () => {
+    const fake = createSectionFake({ tools: { json_transform: true, custom_lookup: true } })
+    const { onSettled } = renderSection(fake)
+    clickEdit()
+    setRow('system_info', 'required')
+    const save = sectionButton('Save')
+    expect(save).toBeEnabled()
+    expect(sectionButton('Cancel')).toBeEnabled()
+    expect(rowSelect('http_request')).toBeEnabled()
+
+    const put = fake.hold({ method: 'PUT', path: FOO_PATH })
+    // Both activations in one tick, before React renders Save as disabled.
+    await act(async () => {
+      save.click()
+      save.click()
+    })
+    await act(async () => {
+      await put.arrived
+    })
+
+    expect(sectionButton('Save'), 'Save while saving').toBeDisabled()
+    expect(sectionButton('Cancel'), 'Cancel while saving').toBeDisabled()
+    expect(rowSelect('http_request'), 'a row while saving').toBeDisabled()
+    expect(rowSelect('system_info'), 'the edited row while saving').toBeDisabled()
+    expect(sectionButton('Remove custom_lookup'), 'a custom row while saving').toBeDisabled()
+    expect(sectionButton('Add a tool by name'), 'adding a row while saving').toBeDisabled()
+
+    await act(async () => {
+      put.deliverNow()
+    })
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+    await settle()
+
+    expect(
+      writes(fake).map(entry => entry.applied),
+      'PUTs'
+    ).toEqual([true])
+    expect(reads(fake), "the save's own read, once").toHaveLength(1)
+    expect(onSettled.mock.calls[0][0]).toMatchObject({ kind: 'saved' })
+  })
+
+  it('a saved outcome closes the edit view of the session that started it, with no message', async () => {
+    const fake = createSectionFake({ tools: { json_transform: true } })
+    const { onSettled } = renderSection(fake)
+    clickEdit()
+    setRow('system_info', 'required')
+    await clickSave()
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+
+    expect(onSettled.mock.calls[0][0]).toEqual({
+      kind: 'saved',
+      stored: fake.stored('foo'),
+      via: 'response',
+    })
+    expect(within(section()).queryByRole('button', { name: 'Save' })).toBeNull()
+    expect(sectionButton('Edit')).toBeEnabled()
+    expect(sectionMessage()).toBeNull()
+  })
+
+  it('Save stays disabled while the newest load is pending; Cancel and edits do not wait for it', () => {
+    const fake = createSectionFake({ tools: { json_transform: true } })
+    const { rerenderSection } = renderSection(fake, { loadPending: true })
+    clickEdit()
+    setRow('system_info', 'required')
+
+    expect(sectionButton('Save'), 'Save while a load is pending').toBeDisabled()
+    expect(sectionButton('Cancel')).toBeEnabled()
+    expect(rowSelect('http_request')).toBeEnabled()
+
+    rerenderSection({ loadPending: false })
+    expect(sectionButton('Save'), 'Save once the load has settled').toBeEnabled()
+  })
+
+  it('a conflict keeps the draft and shows the message, with focus on it', async () => {
+    const fake = createSectionFake({ tools: { json_transform: true } })
+    const { onSettled } = renderSection(fake)
+    clickEdit()
+    setRow('system_info', 'required')
+    fake.writeExternal('foo', spec => {
+      ;(spec.approval as Record<string, unknown>).tools = {
+        json_transform: true,
+        shell_exec: false,
+      }
+    })
+    await clickSave()
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+
+    expect(onSettled.mock.calls[0][0]).toEqual({ kind: 'conflict' })
+    expect(sectionMessage()?.textContent).toBe(TOOLS_CHANGED_MESSAGE)
+    expect(document.activeElement, 'focus moves to the message').toBe(sectionMessage())
+    expect(writes(fake)).toEqual([])
+    expect(rowSelect('system_info').value, 'the draft').toBe('required')
+    expect(sectionButton('Save')).toBeEnabled()
+  })
+
+  it('a block created or removed elsewhere stops the save with its message and keeps the draft', async () => {
+    const fake = createSectionFake({})
+    const { onSettled } = renderSection(fake)
+    clickEdit()
+    setRow('system_info', 'required')
+    fake.writeExternal('foo', spec => {
+      delete spec.approval
+    })
+    await clickSave()
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+
+    expect(onSettled.mock.calls[0][0]).toEqual({ kind: 'created_elsewhere' })
+    expect(sectionMessage()?.textContent).toBe(APPROVAL_CREATED_ELSEWHERE_MESSAGE)
+    expect(writes(fake)).toEqual([])
+    expect(rowSelect('system_info').value, 'the draft').toBe('required')
+  })
+
+  it("a refused save shows each field's message and keeps the draft", async () => {
+    // A model with no provider: the general Host PUT validates the whole spec.
+    const fake = createSectionFake(
+      { tools: { json_transform: true } },
+      { spec: { model: { name: 'claude-sonnet-4-6' } } }
+    )
+    const { onSettled } = renderSection(fake)
+    clickEdit()
+    setRow('system_info', 'required')
+    await clickSave()
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+
+    const { errors } = writes(fake)[0].response?.body as {
+      errors: Array<{ field: string; message: string }>
+    }
+    expect(errors.length).toBeGreaterThan(0)
+    expect(onSettled.mock.calls[0][0]).toEqual({ kind: 'refused', errors })
+    for (const { field, message } of errors) {
+      expect(sectionMessage()).toHaveTextContent(`${field}: ${message}`)
+    }
+    expect(rowSelect('system_info').value, 'the draft').toBe('required')
+  })
+
+  it('an error keeps the draft and shows the message with Retry, which saves again', async () => {
+    const fake = createSectionFake({ tools: { json_transform: true } })
+    const { onSettled } = renderSection(fake)
+    clickEdit()
+    setRow('system_info', 'required')
+    const put = fake.hold({ method: 'PUT', path: FOO_PATH })
+    await clickSave()
+    await act(async () => {
+      await put.arrived
+    })
+    await act(async () => {
+      put.respondWith(HOST_PUT_403.status, HOST_PUT_403.body)
+    })
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+
+    const text = JSON.stringify(HOST_PUT_403.body)
+    const formatted = formatApiError(
+      new Response(text, { status: 403, statusText: 'Forbidden' }),
+      text
+    ).message
+    expect(onSettled.mock.calls[0][0]).toEqual({ kind: 'error', message: formatted })
+    expect(sectionMessage()).toHaveTextContent(formatted)
+    expect(rowSelect('system_info').value, 'the draft').toBe('required')
+
+    await act(async () => {
+      fireEvent.click(within(sectionMessage()!).getByRole('button', { name: 'Retry' }))
+    })
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(2))
+    expect(onSettled.mock.calls[1][0]).toMatchObject({ kind: 'saved' })
+    expect(writes(fake).map(entry => entry.response?.status)).toEqual([403, 200])
+    expect(sectionMessage()).toBeNull()
+  })
+
+  it('Retry saves the draft as it is now, as Save does, and waits for the Save release', async () => {
+    const fake = createSectionFake({ tools: { json_transform: true } })
+    const { onSettled, rerenderSection } = renderSection(fake)
+    clickEdit()
+    setRow('system_info', 'required')
+    const put = fake.hold({ method: 'PUT', path: FOO_PATH })
+    await clickSave()
+    await act(async () => {
+      await put.arrived
+    })
+    await act(async () => {
+      put.respondWith(HOST_PUT_403.status, HOST_PUT_403.body)
+    })
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+    const retry = () =>
+      within(sectionMessage()!).getByRole('button', { name: 'Retry' }) as HTMLButtonElement
+
+    // The rows are usable again after the error; the admin changes another one.
+    setRow('memory_write', 'required')
+    rerenderSection({ loadPending: true })
+    expect(retry(), 'Retry while the newest load is pending').toBeDisabled()
+    expect(sectionButton('Save'), 'Save while the newest load is pending').toBeDisabled()
+    rerenderSection({ loadPending: false })
+    expect(retry(), 'Retry once the load has settled').toBeEnabled()
+
+    await act(async () => {
+      fireEvent.click(retry())
+    })
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(2))
+    expect(onSettled.mock.calls[1][0]).toMatchObject({ kind: 'saved' })
+    expect(fake.stored('foo').spec.approval, 'both rows, not the draft of the first Save').toEqual({
+      tools: { json_transform: true, memory_write: true, system_info: true },
+    })
+  })
+
+  it('a save that may not have applied closes its edit session and keeps the message', async () => {
+    const fake = createSectionFake({ tools: { json_transform: true } })
+    const { onSettled } = renderSection(fake)
+    clickEdit()
+    setRow('system_info', 'required')
+    const put = fake.hold({ method: 'PUT', path: FOO_PATH })
+    const reread = fake.hold({ method: 'GET', path: FOO_PATH, nth: 2 })
+    await clickSave()
+    await act(async () => {
+      await put.arrived
+    })
+    await act(async () => {
+      put.dropResponse()
+    })
+    await act(async () => {
+      await reread.arrived
+    })
+    await act(async () => {
+      reread.respondWith(CONTROL_API_500.status, CONTROL_API_500.body)
+    })
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+
+    expect(onSettled.mock.calls[0][0]).toEqual({ kind: 'maybe', message: MAYBE })
+    expect(sectionMessage()?.textContent).toBe(MAYBE)
+    // No retry from the old base: the next Edit starts from what the tab loads.
+    expect(within(section()).queryByRole('button', { name: 'Save' })).toBeNull()
+    expect(sectionButton('Edit')).toBeEnabled()
+  })
+
+  it('a field the cluster did not store is named with what is stored now, in the edit view', async () => {
+    // As in the protocol's T5: the seed holds modeCeiling, which the v0.12.1
+    // CRD lacks. The apiserver prunes on read too, so this needs the CRD to
+    // change between the save's read and its write.
+    const fake = createSectionFake(
+      { modeCeiling: 'auto', tools: { json_transform: true } },
+      { crd: 'v0.12.1' }
+    )
+    const { onSettled } = renderSection(fake)
+    clickEdit()
+    setRow('system_info', 'required')
+    await clickSave()
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+
+    expect(onSettled.mock.calls[0][0]).toEqual({
+      kind: 'not_stored',
+      fields: ['modeCeiling'],
+      live: { modeCeiling: 'manual' },
+    })
+    expect(sectionMessage()).toHaveTextContent(notStoredMessage(['modeCeiling']))
+    expect(sectionMessage()).toHaveTextContent('Stored now: modeCeiling: manual')
+    expect(rowSelect('system_info').value, 'still in the edit view').toBe('required')
+  })
+
+  it('a save that kept meeting changes gives up with its message and keeps the draft', async () => {
+    const fake = createSectionFake({ tools: { json_transform: true } })
+    const { onSettled } = renderSection(fake)
+    clickEdit()
+    setRow('system_info', 'required')
+    const puts = [1, 2, 3].map(nth => fake.hold({ method: 'PUT', path: FOO_PATH, nth }))
+    await clickSave()
+    for (const put of puts) {
       await act(async () => {
-        fireEvent.click(screen.getByRole('button', { name: /^save/i }))
+        await put.arrived
       })
-
-      expect(onSave).toHaveBeenCalledWith({
-        http_request: false,
-        shell_exec: true,
-      })
-    })
-
-    it('keeps the operator in edit mode when onSave throws (draft preserved)', async () => {
-      const failingSave: typeof onSave = vi
-        .fn()
-        .mockRejectedValue(new Error('422 Unprocessable Entity')) as typeof onSave
-      render(
-        <HostApprovalSection
-          initialTools={undefined}
-          onSave={failingSave}
-          busy={false}
-          canWrite={true}
-        />
-      )
-      fireEvent.click(screen.getByRole('button', { name: /edit/i }))
-      fireEvent.change(screen.getByLabelText(/http_request/i), {
-        target: { value: 'skip' },
-      })
-
+      fake.bumpVersion('foo', 'status')
       await act(async () => {
-        fireEvent.click(screen.getByRole('button', { name: /^save/i }))
+        put.deliverNow()
       })
+    }
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
 
-      // onSave was called, but because it threw, the section stays in edit
-      // mode so the operator can correct and retry. The dropdown still shows
-      // their selection.
-      expect(failingSave).toHaveBeenCalled()
-      const httpSelect = screen.getByLabelText(/http_request/i) as HTMLSelectElement
-      expect(httpSelect.value).toBe('skip')
-      // Sticky Save / Cancel toolbar remains present (still in edit mode).
-      expect(screen.getByRole('button', { name: /^save/i })).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: /cancel/i })).toBeInTheDocument()
-    })
+    expect(onSettled.mock.calls[0][0]).toEqual({ kind: 'gave_up', message: GAVE_UP })
+    expect(sectionMessage()?.textContent).toBe(GAVE_UP)
+    expect(writes(fake).map(entry => entry.response?.status)).toEqual([409, 409, 409])
+    expect(rowSelect('system_info').value, 'the draft').toBe('required')
+  })
+})
+
+describe('HostApprovalSection — another agent', () => {
+  beforeEach(() => resetSectionTestState())
+  afterEach(() => {
+    cleanup()
+    resetSectionTestState()
+    vi.unstubAllGlobals()
   })
 
-  describe('advanced disclosure — custom tools', () => {
-    it('the disclosure starts collapsed in edit mode', () => {
-      render(
-        <HostApprovalSection
-          initialTools={undefined}
-          onSave={onSave}
-          busy={false}
-          canWrite={true}
-        />
+  const others = () => ({ b: seedHost('b', { approval: { tools: { file_write: true } } }) })
+
+  it('a message belongs to the agent it was raised for', async () => {
+    const fake = createSectionFake({ tools: { json_transform: true } }, { others: others() })
+    const { onSettled, rerenderSection } = renderSection(fake)
+    clickEdit()
+    setRow('system_info', 'required')
+    fake.writeExternal('foo', spec => {
+      ;(spec.approval as Record<string, unknown>).tools = { shell_exec: false }
+    })
+    await clickSave()
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+    expect(sectionMessage()?.textContent, "foo's message").toBe(TOOLS_CHANGED_MESSAGE)
+
+    rerenderSection(propsFromStore(fake, 'b'))
+    expect(sectionMessage(), "on b's page").toBeNull()
+    expect(shownRows(), "b's read view").toEqual({ file_write: 'Required' })
+  })
+
+  it('a save that settles after the section moved to another agent is reported and shown nowhere', async () => {
+    const fake = createSectionFake({ tools: { json_transform: true } }, { others: others() })
+    const { onSettled, rerenderSection } = renderSection(fake)
+    clickEdit()
+    setRow('system_info', 'required')
+    const put = fake.hold({ method: 'PUT', path: FOO_PATH })
+    await clickSave()
+    await act(async () => {
+      await put.arrived
+    })
+    rerenderSection(propsFromStore(fake, 'b'))
+    await act(async () => {
+      put.respondWith(HOST_PUT_403.status, HOST_PUT_403.body)
+    })
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+
+    expect(onSettled.mock.calls[0][0], 'reported to the tab').toMatchObject({ kind: 'error' })
+    expect(sectionMessage(), "on b's page").toBeNull()
+    expect(shownRows(), "b's read view").toEqual({ file_write: 'Required' })
+    expect(sectionButton('Edit')).toBeEnabled()
+  })
+})
+
+describe('HostApprovalSection — a render React does not commit (review R41(1))', () => {
+  beforeEach(() => resetSectionTestState())
+  afterEach(() => {
+    cleanup()
+    resetSectionTestState()
+    vi.unstubAllGlobals()
+  })
+
+  // Never settles: a component that throws it stays suspended.
+  const NEVER = new Promise<never>(() => {})
+
+  function SuspendedUnlessFoo({ name }: { name: string }): null {
+    if (name !== 'foo') throw NEVER
+    return null
+  }
+
+  it('a save shows its outcome on the agent still on screen when a render for another agent is not committed', async () => {
+    const fake = createSectionFake(
+      { tools: { json_transform: true } },
+      { others: { b: seedHost('b', { approval: { tools: { file_write: true } } }) } }
+    )
+    const onSettled = vi.fn<HostApprovalSectionProps['onSettled']>()
+    let showAgent: (name: string) => void = () => {}
+    // A page whose move to another agent is a transition that suspends, as an
+    // App Router navigation can: React renders the section for b, keeps foo on
+    // screen, and never commits that render.
+    function Page() {
+      const [name, setName] = useState('foo')
+      showAgent = next => startTransition(() => setName(next))
+      const props = useMemo(() => propsFromStore(fake, name), [name])
+      return (
+        <Suspense fallback={null}>
+          <HostApprovalSection {...props} onSettled={onSettled} />
+          <SuspendedUnlessFoo name={name} />
+        </Suspense>
       )
-      fireEvent.click(screen.getByRole('button', { name: /edit/i }))
-      expect(screen.queryByLabelText(/^tool name$/i)).not.toBeInTheDocument()
-      expect(screen.getByText(/advanced.*conditional tools/i)).toBeInTheDocument()
+    }
+    render(<Page />)
+    clickEdit()
+    setRow('system_info', 'required')
+    const put = fake.hold({ method: 'PUT', path: FOO_PATH })
+    await clickSave()
+    await act(async () => {
+      await put.arrived
     })
 
-    it('expanding the disclosure reveals the custom-tool input', () => {
-      render(
-        <HostApprovalSection
-          initialTools={undefined}
-          onSave={onSave}
-          busy={false}
-          canWrite={true}
-        />
-      )
-      fireEvent.click(screen.getByRole('button', { name: /edit/i }))
-      fireEvent.click(screen.getByText(/advanced.*conditional tools/i))
-      expect(screen.getByLabelText(/^tool name$/i)).toBeInTheDocument()
+    await act(async () => {
+      showAgent('b')
+    })
+    expect(rowSelect('system_info').value, "foo's edit view is still on screen").toBe('required')
+
+    await act(async () => {
+      put.respondWith(HOST_PUT_403.status, HOST_PUT_403.body)
+    })
+    await waitFor(() => expect(onSettled).toHaveBeenCalledTimes(1))
+
+    expect(onSettled.mock.calls[0][0], 'reported to the tab').toMatchObject({ kind: 'error' })
+    expect(sectionMessage(), "foo's outcome, on foo's section").not.toBeNull()
+    expect(rowSelect('system_info').value, 'the draft').toBe('required')
+  })
+})
+
+describe('HostApprovalSection — edit session on a kept page (harness)', () => {
+  beforeEach(() => resetApprovalTestState())
+  afterEach(() => {
+    resetApprovalTestState()
+    vi.unstubAllGlobals()
+  })
+
+  it('T32 a save that settles after a new edit session started does not close it', async () => {
+    const fake = createFakeControlApi({
+      hosts: {
+        foo: seedHost('foo', { approval: { tools: { json_transform: true } } }),
+        b: seedHost('b', { approval: { tools: { clerum__generate_pdf: true } } }),
+      },
+      crd: 'current',
+      versionRule: false,
+      defaults: pageMountDefaults(),
+    })
+    const page = renderHostPage({ fake, name: 'foo' })
+    const driver = await openApprovalSettings(page)
+    const sectionAtStart = perToolSection()
+    await driver.edit()
+    await driver.editTool('system_info', 'required')
+    const put = fake.hold({ method: 'PUT', path: FOO_PATH })
+    await driver.save()
+    await act(async () => {
+      await put.arrived
     })
 
-    it('rejects invalid custom tool names with an inline error', () => {
-      render(
-        <HostApprovalSection
-          initialTools={undefined}
-          onSave={onSave}
-          busy={false}
-          canWrite={true}
-        />
-      )
-      fireEvent.click(screen.getByRole('button', { name: /edit/i }))
-      fireEvent.click(screen.getByText(/advanced.*conditional tools/i))
+    // To another agent and back, in the kept instance, while foo's PUT is out.
+    page.rerenderKept({ name: 'b' })
+    await waitFor(() => expect(driver.readView()).toEqual({ clerum__generate_pdf: 'Required' }))
+    page.rerenderKept({ name: 'foo' })
+    await waitFor(() => expect(driver.readView()).toEqual({ json_transform: 'Required' }))
+    // A new edit session, started while the save is still out.
+    await driver.edit()
+    expect(within(perToolSection()!).getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
 
-      const input = screen.getByLabelText(/^tool name$/i) as HTMLInputElement
-      const addBtn = screen.getByRole('button', { name: /^add$/i })
-
-      // Uppercase rejected
-      fireEvent.change(input, { target: { value: 'BadName' } })
-      expect(screen.getByText(/lower snake_case/i)).toBeInTheDocument()
-      expect(addBtn).toBeDisabled()
-
-      // Collision with known tool rejected
-      fireEvent.change(input, { target: { value: 'http_request' } })
-      expect(screen.getByText(/collide/i)).toBeInTheDocument()
-      expect(addBtn).toBeDisabled()
-
-      // Valid name accepted
-      fireEvent.change(input, { target: { value: 'memory_search' } })
-      expect(addBtn).not.toBeDisabled()
+    await act(async () => {
+      put.deliverNow()
     })
+    await waitFor(() => expect(writes(fake)[0]?.delivered).toBe(true))
+    await settle()
 
-    it('rejects a custom name that collides with an existing custom row', () => {
-      // initialTools contains a custom row "memory_search" already.
-      render(
-        <HostApprovalSection
-          initialTools={{ memory_search: false }}
-          onSave={onSave}
-          busy={false}
-          canWrite={true}
-        />
-      )
-      fireEvent.click(screen.getByRole('button', { name: /edit/i }))
-      fireEvent.click(screen.getByText(/advanced.*conditional tools/i))
-
-      const input = screen.getByLabelText(/^tool name$/i) as HTMLInputElement
-      const addBtn = screen.getByRole('button', { name: /^add$/i })
-
-      // Re-typing the same name as the existing custom row → rejected
-      fireEvent.change(input, { target: { value: 'memory_search' } })
-      expect(screen.getByText(/already in your custom rows/i)).toBeInTheDocument()
-      expect(addBtn).toBeDisabled()
+    expect(perToolSection(), 'the same section instance throughout').toBe(sectionAtStart)
+    expect(writes(fake)[0].applied, 'the save landed').toBe(true)
+    expect(fake.stored('foo').spec.approval).toEqual({
+      tools: { json_transform: true, system_info: true },
     })
+    expect(
+      within(perToolSection()!).getByRole('button', { name: 'Cancel' }),
+      'the newer edit session is still open'
+    ).toBeEnabled()
+    expect(within(perToolSection()!).queryByRole('button', { name: 'Edit' })).toBeNull()
+    page.unmount()
+  })
+})
+
+describe('HostApprovalSection — no data', () => {
+  afterEach(() => cleanup())
+
+  it('shows a loading state and no Edit while it has no Host to show', () => {
+    render(
+      <HostApprovalSection
+        host="foo"
+        stored={null}
+        inherited={false}
+        ceiling="manual"
+        onSettled={vi.fn()}
+      />
+    )
+
+    expect(screen.getByRole('status', { name: 'Loading approval tools' })).toBeInTheDocument()
+    expect(within(section()).queryByRole('button', { name: 'Edit' })).toBeNull()
   })
 })

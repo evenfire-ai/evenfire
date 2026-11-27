@@ -4,7 +4,6 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { HostAdvancedTab } from '../HostAdvancedTab'
 
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }))
-vi.mock('../HostApprovalSection', () => ({ HostApprovalSection: () => <div>Approvals</div> }))
 vi.mock('../HostEnvTable', () => ({ HostEnvTable: () => <div>Environment variables</div> }))
 vi.mock('../HostGuardrailsSection', () => ({ HostGuardrailsSection: () => <div>Hooks</div> }))
 
@@ -19,9 +18,7 @@ function renderHeaderMode(initialLoading = false) {
           hostName="foo"
           initialGuardrails={undefined}
           initialLoading={initialLoading}
-          initialTools={{}}
           onActionsChange={setActions}
-          onSaveApprovalTools={vi.fn()}
           onSaveGuardrails={vi.fn()}
         />
       </>
@@ -36,7 +33,7 @@ describe('HostAdvancedTab title actions', () => {
     renderHeaderMode()
 
     expect(screen.getByRole('button', { name: 'Add hook' })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('tab', { name: 'Per-tool approval' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Env vars' }))
     expect(screen.queryByRole('button', { name: 'Add hook' })).toBeNull()
     fireEvent.click(screen.getByRole('tab', { name: 'Hooks' }))
     expect(screen.getByRole('button', { name: 'Add hook' })).toBeInTheDocument()
@@ -47,5 +44,26 @@ describe('HostAdvancedTab title actions', () => {
 
     expect(screen.queryByRole('button', { name: 'Add hook' })).toBeNull()
     expect(screen.getByRole('status', { name: 'Loading guardrail hooks' })).toBeInTheDocument()
+  })
+})
+
+describe('HostAdvancedTab sub-tabs', () => {
+  it('Advanced shows Hooks, Env vars and the pointer link', () => {
+    renderHeaderMode()
+
+    expect(screen.getByRole('tab', { name: 'Hooks' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Env vars' })).toBeInTheDocument()
+    expect(screen.getByText(/Per-tool approval moved to the/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Approvals tab' })).toHaveAttribute(
+      'href',
+      '/agents/foo/approval-settings'
+    )
+  })
+
+  it('Advanced renders no Per-tool approval sub-tab', () => {
+    renderHeaderMode()
+
+    expect(screen.queryByRole('tab', { name: 'Per-tool approval' })).toBeNull()
+    expect(screen.getAllByRole('tab')).toHaveLength(2)
   })
 })

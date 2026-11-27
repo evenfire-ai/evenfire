@@ -5546,31 +5546,328 @@ td.cu-registry-description {
   margin-top: var(--cu-space-4);
 }
 
-.cu-agent-detail-scroll:has(> .cu-host-approval-section) {
-  overflow: hidden;
+/* The Approvals tab (HostApprovalsTab): the read views of the approval
+   settings above the per-tool section. The whole tab scrolls in the agent
+   page's scroll area. */
+.cu-host-approvals-tab {
+  display: grid;
+  gap: var(--cu-space-5);
+}
+
+.cu-host-approvals-tab > .cu-banner {
+  margin-bottom: 0;
+}
+
+.cu-host-approvals-tab__error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--cu-space-2) var(--cu-space-3);
+}
+
+/* Retry while a load runs: disabled with aria-disabled, so it keeps the focus. */
+.cu-host-approvals-tab__error .cu-btn[aria-disabled='true'] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.cu-host-approvals-tab__banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--cu-space-2);
+}
+
+.cu-host-approvals-tab__banner > svg {
+  flex: none;
+  margin-top: var(--cu-space-0);
+}
+
+.cu-host-approvals-tab__skeleton {
+  display: grid;
+  gap: var(--cu-space-3);
+}
+
+.cu-host-approvals-tab__group {
+  display: grid;
+  gap: var(--cu-space-2);
+}
+
+.cu-host-approvals-tab__title {
+  margin: 0;
+  font-size: var(--cu-font-size-xl);
+  font-weight: var(--cu-font-weight-semibold);
+  line-height: var(--cu-line-height-tight);
+}
+
+/* The Approval modes heading takes the focus after a Retry that loads (Ruling 46). */
+.cu-host-approvals-tab__title:focus-visible {
+  outline: 2px solid var(--cu-focus);
+  outline-offset: 2px;
+}
+
+.cu-host-approvals-tab__rows {
+  display: grid;
+  margin: 0;
+}
+
+.cu-host-approvals-tab__row {
+  display: grid;
+  grid-template-columns: minmax(11rem, 16rem) minmax(0, 1fr);
+  gap: var(--cu-space-3);
+  padding: var(--cu-space-2) 0;
+  border-bottom: 1px solid var(--cu-border-subtle);
+}
+
+.cu-host-approvals-tab__row:last-child {
+  border-bottom: none;
+}
+
+.cu-host-approvals-tab__label {
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-sm);
+}
+
+.cu-host-approvals-tab__detail {
+  display: grid;
+  gap: var(--cu-space-1);
+  min-width: 0;
+  margin: 0;
+}
+
+.cu-host-approvals-tab__value {
+  font-weight: var(--cu-font-weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.cu-host-approvals-tab__note {
+  margin: 0;
+  color: var(--cu-text-soft);
+  font-size: var(--cu-font-size-sm);
+  line-height: var(--cu-line-height-normal);
+  overflow-wrap: anywhere;
+}
+
+.cu-host-approvals-tab__never-ask summary:focus-visible {
+  outline: 2px solid var(--cu-focus);
+  outline-offset: 2px;
+}
+
+.cu-host-approvals-tab__tools {
+  display: grid;
+  gap: var(--cu-space-1);
+  margin: var(--cu-space-2) 0 0;
+  padding-left: var(--cu-space-5);
+}
+
+.cu-host-approvals-tab__tool {
+  margin-right: var(--cu-space-2);
+  font-family: var(--cu-font-mono);
+}
+
+.cu-host-approvals-tab__tool-conditions {
+  color: var(--cu-text-soft);
+}
+
+/* "Set to Manual now" (spec §6.3): the button with PR A's static line beside
+   it, and the outcome of the last run the tab showed below them. No gap: the
+   box of the message's live region is in the page before any result, and
+   takes no space until it shows one; each result brings its own margin. */
+.cu-host-approvals-tab__switch {
+  display: grid;
+}
+
+.cu-host-approvals-tab__switch-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--cu-space-2) var(--cu-space-3);
+}
+
+/* While a run goes on: disabled with aria-disabled, so it keeps the focus. */
+.cu-host-approvals-tab__switch-bar .cu-btn[aria-disabled='true'] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.cu-host-approvals-tab__switch-note {
+  margin: 0;
+  color: var(--cu-text-soft);
+  font-size: var(--cu-font-size-sm);
+  line-height: var(--cu-line-height-normal);
+}
+
+.cu-host-approvals-tab__switch-result {
+  display: grid;
+  gap: var(--cu-space-2);
+  margin: var(--cu-space-2) 0 0;
+}
+
+.cu-host-approvals-tab__switch-result p {
+  margin: 0;
+  line-height: var(--cu-line-height-normal);
+  overflow-wrap: anywhere;
+}
+
+.cu-host-approvals-tab__switch-manifest {
+  color: var(--cu-warning);
+}
+
+@media (max-width: 640px) {
+  .cu-host-approvals-tab__row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--cu-space-1);
+  }
 }
 
 .cu-host-approval-section {
   display: flex;
   flex-direction: column;
-  height: 100%;
-  min-height: 0;
+}
+
+.cu-host-approval-section__header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--cu-space-3);
+  padding-bottom: var(--cu-space-2);
+}
+
+.cu-host-approval-section__title {
+  margin: 0;
+  font-size: var(--cu-font-size-xl);
+  font-weight: var(--cu-font-weight-semibold);
+  line-height: var(--cu-line-height-tight);
 }
 
 .cu-host-approval-section__description {
   flex: 0 0 auto;
   margin: 0;
   padding-bottom: var(--cu-space-3);
-  font-size: 0.8125rem;
+  font-size: var(--cu-font-size-sm);
 }
 
-.cu-host-approval-section__content {
+.cu-host-approval-section__message {
+  flex: 0 0 auto;
+  display: grid;
+  gap: var(--cu-space-2);
+  justify-items: start;
+}
+
+.cu-host-approval-section__message:focus-visible {
+  outline: 2px solid var(--cu-focus);
+  outline-offset: 2px;
+}
+
+.cu-host-approval-section__message-text {
+  margin: 0;
+}
+
+.cu-host-approval-section__message-list {
+  margin: 0;
+  padding-left: var(--cu-space-5);
+}
+
+.cu-host-approval-section__dirty {
+  margin-right: auto;
+  color: var(--cu-warning);
+  font-size: var(--cu-font-size-sm);
+}
+
+.cu-host-approval-section__custom {
+  margin-top: var(--cu-space-3);
+}
+
+.cu-host-approval-section__add {
+  display: grid;
+  gap: var(--cu-space-2);
+  justify-items: start;
+  margin-top: var(--cu-space-4);
+}
+
+.cu-host-approval-section__add-form {
+  display: grid;
+  gap: var(--cu-space-2);
+  width: 100%;
+}
+
+.cu-host-approval-section__add-row {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+}
+
+.cu-host-approval-row__copy {
+  display: grid;
   flex: 1;
-  min-height: 0;
-  overflow-y: auto;
+  gap: var(--cu-space-05);
+  min-width: 0;
 }
 
+.cu-host-approval-row__heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--cu-space-2);
+}
+
+.cu-host-approval-row__name {
+  font-weight: var(--cu-font-weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.cu-host-approval-row__description {
+  color: var(--cu-text-soft);
+  font-size: var(--cu-font-size-sm);
+  line-height: var(--cu-line-height-normal);
+}
+
+.cu-host-approval-row__state {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--cu-space-2);
+}
+
+.cu-host-approval-row__mark {
+  display: inline-flex;
+  color: var(--cu-warning);
+}
+
+.cu-host-approval-row__select {
+  flex: none;
+}
+
+/* A warning in the first-save dialog's description, in body text rather than the description's muted tone. */
+.cu-host-approval-dialog__note {
+  margin: var(--cu-space-2) 0 0;
+  color: var(--cu-text);
+  line-height: var(--cu-line-height-normal);
+}
+
+.cu-host-approval-dialog__items {
+  display: grid;
+  gap: var(--cu-space-2);
+  margin: 0;
+  padding-left: var(--cu-space-5);
+}
+
+.cu-host-approval-dialog__item {
+  line-height: var(--cu-line-height-normal);
+}
+
+.cu-host-approval-dialog__item-name {
+  margin-right: var(--cu-space-2);
+  font-family: var(--cu-font-mono);
+  font-weight: var(--cu-font-weight-medium);
+}
+
+/* Save and Cancel stay in view at the bottom of the scroll area while a long
+   tool list is edited. */
 .cu-host-approval-section__actions {
+  position: sticky;
+  bottom: 0;
   display: flex;
   flex: 0 0 auto;
   align-items: center;
@@ -10818,6 +11115,13 @@ td.cu-registry-description {
   background-size: 200% 100%;
   animation: cu-shimmer 1.8s ease-in-out infinite;
   border-radius: 6px;
+}
+
+/* The page's own load failure, shown in the header where the page banner gives
+ * way to the tab's own banner (Approvals). */
+.cu-agent-detail-load-error {
+  color: var(--cu-danger);
+  font-weight: var(--cu-font-weight-medium);
 }
 
 /* Detail-page header title skeleton: bounded inline block so it reads as a

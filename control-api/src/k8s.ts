@@ -276,9 +276,10 @@ export class K8sGateway {
       }
       spec: Record<string, unknown>
     },
-    namespace?: string
+    namespace?: string,
+    options?: Parameters<ResourceService['createResource']>[3]
   ): Promise<unknown> {
-    return this.resources.createResource(plural, body, namespace)
+    return this.resources.createResource(plural, body, namespace, options)
   }
 
   async updateResource(

@@ -1,121 +1,113 @@
 /**
- * E2E -- HostApprovalSection editor flow
+ * E2E -- Approvals tab: per-tool overrides, the off switch and the version rule
  *
- * Validates the per-tool approval override UI on the host detail page:
- *   Scenario 1: Toggle http_request → Skip → Save → override persists.
- *   Scenario 2: Toggle http_request back to Default → Save → override clears.
- *   Scenario 3: Cancel discards the in-flight shell_exec change.
+ * Drives the Approvals tab of the agent page (`/hosts/<name>/approval-settings`):
+ *   HAT0. Sign in through the UI (session cookie); the old `/approvals` link redirects.
+ *   HAT1. http_request -> Skip loosens approval: the confirmation dialog shows, and the
+ *         confirmed save stores `tools.http_request: false`.
+ *   HAT2. http_request back to Default clears the override.
+ *   HAT3. Cancel discards an in-flight shell_exec change.
+ *   HAT4. "Set to Manual now" stores `modeCeiling: manual` (or reports "Already Manual").
+ *   HAT5. The version rule: a Host PUT without `resourceVersion` that changes
+ *         `spec.approval` is refused with 409 `approval_requires_version`; the same body
+ *         with the stored version is accepted.
+ *
+ * Auth: the admin session cookie set by the UI sign-in. API calls go through
+ * `page.request` and the Control UI proxy (`/control-api`), so they reuse that cookie.
  *
  * Prerequisites:
- *   1. Port-forwards running (control-ui :3000, control-api :8090)
- *   2. Admin credentials: ADMIN_USER, ADMIN_PASS
+ *   1. A reachable Control UI (CONTROL_UI_URL, default http://localhost:3000)
+ *   2. Admin credentials: ADMIN_USER and ADMIN_PASSWORD (or the E2E_ variants)
  *   3. A host named E2E_HOST_NAME (default "chatllm") exists in the cluster
+ *
+ * Lane: the `chromium` project of `control-ui/playwright.config.ts` (testDir
+ * `./e2e`), run with `npx playwright test e2e/host-approval-tools-e2e.spec.ts`
+ * from `control-ui` against a running cluster. This test changes the named host's
+ * `spec.approval`.
  */
 import { type Page, expect, test } from '@playwright/test'
+import {
+  type ApiResult,
+  CONTROL_UI_URL,
+  adminCredentials,
+  api,
+  loginThroughUi,
+} from './qa-recorder-helpers'
 
-const BASE_API = process.env.CONTROL_API_URL || 'http://localhost:8090'
-const BASE_UI = process.env.CONTROL_UI_URL || 'http://localhost:3000'
-const ADMIN_USER = process.env.ADMIN_USER || 'admin'
-const ADMIN_PASS = process.env.ADMIN_PASS || 'changeme123!'
 const HOST_NAME = process.env.E2E_HOST_NAME || 'chatllm'
+const HOST_PATH = `/api/v1/admin/hosts/${encodeURIComponent(HOST_NAME)}`
 
-async function getToken(page: Page): Promise<string> {
-  return page.evaluate(() => localStorage.getItem('controlUiAdminToken') ?? '')
+type ApprovalBlock = Record<string, unknown> & { tools?: Record<string, boolean> }
+type HostBody = {
+  metadata?: { resourceVersion?: string }
+  spec?: Record<string, unknown> & { approval?: ApprovalBlock }
 }
 
-async function api(
-  token: string,
-  method: string,
-  path: string,
-  body?: Record<string, unknown>
-): Promise<{ status: number; data: Record<string, unknown> }> {
-  const opts: RequestInit = {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-  }
-  if (body) opts.body = JSON.stringify(body)
-  const resp = await fetch(`${BASE_API}${path}`, opts)
-  const text = await resp.text()
-  let data: Record<string, unknown> = {}
-  try {
-    data = JSON.parse(text)
-  } catch {
-    data = { raw: text }
-  }
-  return { status: resp.status, data }
-}
-
-async function login(page: Page) {
-  await page.goto(BASE_UI)
-  await page.waitForSelector('text=Sign in', { timeout: 15_000 })
-  const inputs = page.locator('input')
-  await inputs.nth(0).fill(ADMIN_USER)
-  await inputs.nth(1).fill(ADMIN_PASS)
-  await page.locator('button:has-text("Sign in")').last().click()
-  await page.waitForSelector('text=Marketplace', { timeout: 20_000 })
+async function readHost(page: Page): Promise<HostBody> {
+  const { status, data } = await api<HostBody>(page.request, 'GET', HOST_PATH)
+  expect(status, `GET ${HOST_PATH}`).toBe(200)
+  return data
 }
 
 /**
- * Enter edit mode when the embedding surface did not open it by default.
+ * A versioned Host PUT. The version comes from a fresh read, and a 409
+ * `resource_changed` (the host's status moved between the read and the write)
+ * is retried once from a new read: the status churns while the agent rolls.
  */
-async function clickSectionEdit(page: Page) {
-  if ((await page.locator('#approval-http_request').count()) > 0) return
-  await page
-    .locator('.cu-host-approval-section__actions')
-    .locator('button:has-text("Edit")')
-    .click()
-}
-
-/** Navigate to the host detail page and wait for the Per-tool approval section to load. */
-async function gotoHostDetails(page: Page) {
-  // The Per-tool approval editor now lives under the consolidated Advanced
-  // tab. The old `/approvals` slug is still served via a 308 redirect, but
-  // navigating to the canonical URL directly keeps this E2E independent of
-  // that compatibility shim. Advanced opens on the Hooks sub-tab, so select
-  // Per-tool approval explicitly — the guardrails panel reuses the
-  // `.cu-host-approval-section` class, and waiting on it before switching
-  // sub-tabs would match the wrong section.
-  await page.goto(`${BASE_UI}/hosts/${encodeURIComponent(HOST_NAME)}/advanced`)
-  await page.locator('.cu-advanced-tabs button:has-text("Per-tool approval")').click()
-  await page.waitForSelector('.cu-host-approval-section', { timeout: 20_000 })
+async function putWithVersion(
+  page: Page,
+  buildSpec: (host: HostBody) => Record<string, unknown>
+): Promise<ApiResult> {
+  let result: ApiResult | undefined
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const host = await readHost(page)
+    const version = host.metadata?.resourceVersion
+    expect(version, 'the host read carries a resourceVersion').toBeTruthy()
+    result = await api(page.request, 'PUT', HOST_PATH, {
+      metadata: { resourceVersion: version },
+      spec: buildSpec(host),
+    })
+    const reason = (result.data as { reason?: string }).reason
+    if (!(result.status === 409 && reason === 'resource_changed')) break
+  }
+  return result as ApiResult
 }
 
 /**
- * Reset approval tools for the test host via the API so each scenario starts
- * from a known state (no overrides).  Tolerates 404 when the host has no
- * approval subtree yet.
+ * Start a scenario from a known state: the host has its own approval block (so the
+ * tab never opens the first-save dialog) with no per-tool overrides. The write
+ * carries a version, as the version rule requires.
  */
-async function clearApprovalTools(token: string) {
-  // Fetch current host spec
-  const { status, data } = await api(token, 'GET', `/api/v1/admin/hosts/${HOST_NAME}`)
-  if (status !== 200) return // host not found — skip cleanup
-
-  const spec = (data as { spec?: Record<string, unknown> }).spec ?? {}
-  const approval = (spec.approval as Record<string, unknown> | undefined) ?? {}
-
-  // Write back without the tools sub-key
-  const { tools: _removed, ...approvalWithoutTools } = approval
-  const nextApproval =
-    Object.keys(approvalWithoutTools).length > 0 ? approvalWithoutTools : undefined
-
-  const nextSpec = nextApproval !== undefined ? { ...spec, approval: nextApproval } : { ...spec }
-
-  // Remove approval key entirely when empty
-  if (nextApproval === undefined) {
-    delete nextSpec.approval
-  }
-
-  await api(token, 'PUT', `/api/v1/admin/hosts/${HOST_NAME}`, { spec: nextSpec })
+async function resetApprovalTools(page: Page): Promise<void> {
+  const { status } = await putWithVersion(page, host => {
+    const spec = host.spec ?? {}
+    const { tools: _removed, ...approval } = spec.approval ?? {}
+    return { ...spec, approval: { defaultPolicy: 'channel_users', ...approval } }
+  })
+  expect(status).toBe(200)
 }
 
-test.describe('HostApprovalSection E2E -- per-tool override editor flow', () => {
+async function openApprovalsTab(page: Page): Promise<void> {
+  await page.goto(`${CONTROL_UI_URL}/hosts/${encodeURIComponent(HOST_NAME)}/approval-settings`)
+  await expect(page.getByRole('tab', { name: 'Approvals', exact: true })).toBeVisible({
+    timeout: 30_000,
+  })
+  await expect(page.getByRole('heading', { name: 'Per-tool overrides' })).toBeVisible({
+    timeout: 30_000,
+  })
+}
+
+async function editTools(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Edit', exact: true }).click()
+  await expect(page.locator('#approval-http_request')).toBeVisible({ timeout: 10_000 })
+}
+
+const sectionActions = (page: Page) => page.locator('.cu-host-approval-section__actions')
+
+test.describe('Approvals tab E2E -- per-tool overrides, off switch, version rule', () => {
   test.describe.configure({ mode: 'serial' })
 
   let page: Page
-  let token: string
 
   test.beforeAll(async ({ browser }) => {
     page = await browser.newPage()
@@ -125,135 +117,108 @@ test.describe('HostApprovalSection E2E -- per-tool override editor flow', () => 
     await page?.close()
   })
 
-  // ── HAT0. Login ──────────────────────────────────────────────────────────
+  test('HAT0. Admin signs in through the UI; the old approvals link redirects', async () => {
+    await loginThroughUi(page, adminCredentials())
+    const session = (await page.context().cookies()).find(
+      cookie => cookie.name === 'control_ui_admin_session'
+    )
+    expect(session, 'the session cookie is set').toBeDefined()
 
-  test('HAT0. Admin login', async () => {
-    await login(page)
-    token = await getToken(page)
-    expect(token).toBeTruthy()
+    await page.goto(`${CONTROL_UI_URL}/agents/${encodeURIComponent(HOST_NAME)}/approvals`)
+    await expect(page).toHaveURL(/\/approval-settings$/, { timeout: 30_000 })
   })
 
-  // ── HAT1. Toggle http_request → Skip → Save ─────────────────────────────
+  test('HAT1. http_request to Skip asks for confirmation, then the override is stored', async () => {
+    await resetApprovalTools(page)
+    await openApprovalsTab(page)
+    await editTools(page)
 
-  test('HAT1. Toggle http_request to Skip, Save — override persists with warning icon', async () => {
-    test.skip(!token, 'Login failed — skipping')
-
-    // Start from clean slate
-    await clearApprovalTools(token)
-
-    await gotoHostDetails(page)
-
-    await clickSectionEdit(page)
-
-    // Wait for the edit-mode selects to appear
-    await page.waitForSelector('#approval-http_request', { timeout: 10_000 })
-
-    // Verify warning icon is NOT yet visible (we haven't changed to Skip)
-    // The warning <span> appears when state === 'skip' && codeDefault === 'required'
-    // Its title contains CLERUM_HTTP_ALLOWLIST
-    const warningBeforeChange = page.locator('[title*="CLERUM_HTTP_ALLOWLIST"]')
-    expect(await warningBeforeChange.count()).toBe(0)
-
-    // Change http_request from "Default" to "Skip"
     await page.selectOption('#approval-http_request', 'skip')
+    await sectionActions(page).getByRole('button', { name: 'Save', exact: true }).click()
 
-    // Warning icon should now appear (title="Skipping approval relies on CLERUM_HTTP_ALLOWLIST…")
-    await page.waitForSelector('[title*="CLERUM_HTTP_ALLOWLIST"]', { timeout: 5_000 })
-    const warningIcon = page.locator('[title*="CLERUM_HTTP_ALLOWLIST"]')
-    expect(await warningIcon.count()).toBeGreaterThan(0)
+    // Skip on a tool that asks by default loosens approval: the save waits for a confirmation.
+    const dialog = page.getByRole('alertdialog', { name: 'Confirm looser approval' })
+    await expect(dialog).toBeVisible({ timeout: 10_000 })
+    await dialog.getByRole('button', { name: 'Save these changes' }).click()
 
-    // Click Save (enabled because isDirty)
-    const saveBtn = page
-      .locator('button.cu-btn--primary:has-text("Save"), button:has-text("Save")')
-      .filter({ hasNot: page.locator(':disabled') })
-      .last()
-    await saveBtn.click()
+    await expect(page.getByText('Per-tool overrides saved.')).toBeVisible({ timeout: 20_000 })
 
+    const stored = await readHost(page)
+    expect(stored.spec?.approval?.tools?.http_request).toBe(false)
+  })
+
+  test('HAT2. http_request back to Default clears the override', async () => {
+    await openApprovalsTab(page)
+    await editTools(page)
     await expect(page.locator('#approval-http_request')).toHaveValue('skip')
-    await expect(
-      page.locator('.cu-host-approval-section__actions button:has-text("Save")')
-    ).toBeDisabled()
 
-    // Bonus: verify via API that the CRD was patched
-    const { status, data } = await api(token, 'GET', `/api/v1/admin/hosts/${HOST_NAME}`)
-    if (status === 200) {
-      const tools = (data as { spec?: { approval?: { tools?: Record<string, boolean> } } }).spec
-        ?.approval?.tools
-      // http_request = false means Skip in the CRD
-      if (tools !== undefined) {
-        expect(tools['http_request']).toBe(false)
-      }
-    }
-  })
-
-  // ── HAT2. Toggle back to Default → Save → empty state ───────────────────
-
-  test('HAT2. Toggle http_request back to Default, Save — override clears', async () => {
-    test.skip(!token, 'Login failed — skipping')
-
-    await gotoHostDetails(page)
-
-    // Click Edit
-    await clickSectionEdit(page)
-
-    // Wait for the select to appear
-    await page.waitForSelector('#approval-http_request', { timeout: 10_000 })
-
-    // The http_request row should currently be "skip" (set by HAT1)
-    const currentValue = await page.locator('#approval-http_request').inputValue()
-    // If the cluster already has the value, proceed; otherwise the test is still valid
-    // — we change it to Default either way.
-    expect(['skip', 'default', 'required']).toContain(currentValue)
-
-    // Change back to Default
     await page.selectOption('#approval-http_request', 'default')
+    await sectionActions(page).getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(page.getByText('Per-tool overrides saved.')).toBeVisible({ timeout: 20_000 })
 
-    // Save button: only enabled when dirty
-    const saveBtn = page
-      .locator('button.cu-btn--primary:has-text("Save"), button:has-text("Save")')
-      .filter({ hasNot: page.locator(':disabled') })
-      .last()
-    await saveBtn.click()
-
-    // Wait for re-render
-    await page.waitForTimeout(2_000)
-
-    await expect(page.locator('#approval-http_request')).toHaveValue('default')
-
-    // API verification
-    const { status, data } = await api(token, 'GET', `/api/v1/admin/hosts/${HOST_NAME}`)
-    if (status === 200) {
-      const tools = (data as { spec?: { approval?: { tools?: Record<string, boolean> } } }).spec
-        ?.approval?.tools
-      if (tools !== undefined) {
-        // http_request key should be absent (Default means no override)
-        expect(Object.prototype.hasOwnProperty.call(tools, 'http_request')).toBe(false)
-      }
-    }
+    const stored = await readHost(page)
+    expect(Object.hasOwn(stored.spec?.approval?.tools ?? {}, 'http_request')).toBe(false)
   })
 
-  // ── HAT3. Cancel discards in-flight changes ───────────────────────────────
+  test('HAT3. Cancel discards a shell_exec change without saving', async () => {
+    await resetApprovalTools(page)
+    await openApprovalsTab(page)
+    await editTools(page)
+    const before = await page.locator('#approval-shell_exec').inputValue()
 
-  test('HAT3. Cancel discards shell_exec change without saving', async () => {
-    test.skip(!token, 'Login failed — skipping')
-
-    // Ensure clean state before this scenario
-    await clearApprovalTools(token)
-    await gotoHostDetails(page)
-
-    await clickSectionEdit(page)
-    await page.waitForSelector('#approval-shell_exec', { timeout: 10_000 })
-    const valueBefore = await page.locator('#approval-shell_exec').inputValue()
-
-    // Change shell_exec to Skip (a dirty change)
     await page.selectOption('#approval-shell_exec', 'skip')
-
-    // Click Cancel
-    await page.locator('button:has-text("Cancel")').last().click()
-
-    await expect(page.locator('#approval-shell_exec')).toHaveValue(valueBefore)
     await expect(
-      page.locator('.cu-host-approval-section__actions button:has-text("Save")')
-    ).toBeDisabled()
+      sectionActions(page).getByRole('button', { name: 'Save', exact: true })
+    ).toBeEnabled()
+    await sectionActions(page).getByRole('button', { name: 'Cancel', exact: true }).click()
+
+    // Back in the read view; editing again shows the stored value, not the draft.
+    await editTools(page)
+    await expect(page.locator('#approval-shell_exec')).toHaveValue(before)
+    const stored = await readHost(page)
+    expect(Object.hasOwn(stored.spec?.approval?.tools ?? {}, 'shell_exec')).toBe(false)
+  })
+
+  test('HAT4. "Set to Manual now" stores Manual', async () => {
+    await openApprovalsTab(page)
+    await page.getByRole('button', { name: 'Set to Manual now', exact: true }).click()
+    await expect(page.getByText(/Manual is saved\./)).toBeVisible({ timeout: 30_000 })
+
+    // An absent ceiling is Manual.
+    const stored = await readHost(page)
+    expect(stored.spec?.approval?.modeCeiling ?? 'manual').toBe('manual')
+  })
+
+  test('HAT5. A version-less PUT that changes spec.approval is refused with 409', async () => {
+    const host = await readHost(page)
+    const spec = host.spec ?? {}
+    const changed = {
+      ...spec,
+      approval: {
+        ...(spec.approval ?? {}),
+        tools: { ...spec.approval?.tools, http_request: true },
+      },
+    }
+
+    const refused = await api<{ error?: string; reason?: string }>(page.request, 'PUT', HOST_PATH, {
+      spec: changed,
+    })
+    expect(refused.status).toBe(409)
+    expect(refused.data).toMatchObject({ error: 'conflict', reason: 'approval_requires_version' })
+
+    // Positive partner: the same change with a stored version is accepted.
+    const accepted = await putWithVersion(page, fresh => {
+      const freshSpec = fresh.spec ?? {}
+      return {
+        ...freshSpec,
+        approval: {
+          ...(freshSpec.approval ?? {}),
+          tools: { ...freshSpec.approval?.tools, http_request: true },
+        },
+      }
+    })
+    expect(accepted.status).toBe(200)
+
+    await resetApprovalTools(page)
   })
 })
