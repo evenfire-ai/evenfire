@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { produceCatalogAnnotations } from '@/test/fixtures/connectorCatalogProducer'
 import { McpServerTable } from '../McpServerTable'
 
 afterEach(() => {
@@ -266,7 +267,16 @@ describe('McpServerTable — connector list', () => {
   })
 
   it('renders ordinary rows without inline detail expansion', () => {
-    const items = [makeItem({ name: 'airtable-server' })]
+    const item = makeItem({ name: 'airtable-server' })
+    const items = [
+      {
+        ...item,
+        metadata: {
+          ...item.metadata,
+          annotations: { 'clerum.io/catalog-id': '@evenfire/mcp-airtable' },
+        },
+      },
+    ]
     render(<McpServerTable items={items} />)
 
     expect(screen.getByText('airtable-server').closest('tr')).not.toHaveAttribute('aria-expanded')
@@ -521,4 +531,198 @@ describe('McpServerTable — header actions', () => {
     expect(screen.getByRole('menuitem', { name: 'Add remote server' })).toBeInTheDocument()
     expect(screen.queryByRole('menuitem', { name: 'Create connector' })).not.toBeInTheDocument()
   })
+})
+
+describe('McpServerTable — saved marketplace identity', () => {
+  function linkedItem(
+    name: string,
+    annotations: Record<string, string>,
+    labels?: Record<string, string>
+  ) {
+    const item = makeItem({ name })
+    for (const value of Object.values(labels ?? {})) {
+      expect(value.length).toBeLessThanOrEqual(63)
+      expect(value).toMatch(/^([A-Za-z0-9]([A-Za-z0-9_.-]*[A-Za-z0-9])?)?$/)
+    }
+    const catalogId = annotations['clerum.io/catalog-id']
+    return {
+      ...item,
+      metadata: {
+        ...item.metadata,
+        annotations: catalogId
+          ? { ...produceCatalogAnnotations(catalogId, '1.0.0'), ...annotations }
+          : annotations,
+        labels,
+      },
+    }
+  }
+
+  it('shows catalog branding while keeping two installed instances distinct and actions unchanged', () => {
+    const onOpen = vi.fn()
+    const onDelete = vi.fn()
+    render(
+      <McpServerTable
+        items={[
+          linkedItem('airtable-sales', { 'clerum.io/catalog-id': '@evenfire/mcp-airtable' }),
+          linkedItem('airtable-research', { 'clerum.io/catalog-id': '@evenfire/mcp-airtable' }),
+        ]}
+        onOpen={onOpen}
+        onDelete={onDelete}
+      />
+    )
+    expect(screen.queryByRole('columnheader', { name: 'Instance' })).not.toBeInTheDocument()
+    expect(screen.getAllByText('Airtable')).toHaveLength(2)
+    const row = screen.getByTitle('airtable-sales').closest('tr')!
+    expect(row.querySelector('img')).toHaveAttribute('src', '/connector-icons/airtable.svg')
+    fireEvent.click(within(row).getByText('Airtable'))
+    expect(onOpen).toHaveBeenCalledWith({ namespace: 'mcp-server', name: 'airtable-sales' })
+    fireEvent.click(
+      within(row).getByRole('button', { name: 'Actions for connector airtable-sales' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    expect(onDelete).toHaveBeenCalledWith({ namespace: 'mcp-server', name: 'airtable-sales' })
+  })
+
+  it('renders each instance identity in the row and preserves keyboard navigation', () => {
+    const onOpen = vi.fn()
+    render(
+      <McpServerTable
+        items={['airtable-sales', 'airtable-research'].map(name =>
+          linkedItem(name, { 'clerum.io/catalog-id': '@evenfire/mcp-airtable' })
+        )}
+        onOpen={onOpen}
+      />
+    )
+    for (const name of ['airtable-sales', 'airtable-research']) {
+      const identity = screen.getByText(name)
+      expect(identity).toHaveClass('cu-connector-identity__instance')
+      const row = identity.closest('tr')!
+      expect(row).toHaveAttribute('tabindex', '0')
+      row.focus()
+      expect(row).toHaveFocus()
+      fireEvent.keyDown(row, { key: 'Enter' })
+      expect(onOpen).toHaveBeenLastCalledWith({ namespace: 'mcp-server', name })
+    }
+    expect(onOpen).toHaveBeenCalledTimes(2)
+  })
+
+  it('prefers annotations, reads legacy labels, and resolves only explicit first-party aliases', () => {
+    render(
+      <McpServerTable
+        items={[
+          linkedItem(
+            'annotation-wins',
+            produceCatalogAnnotations('@evenfire/mcp-airtable', '1.0.0'),
+            { 'clerum.io/catalog-id': 'mcp-stripe-remote' }
+          ),
+          // Historical ID explicitly supported by INSTALLED_CONNECTOR_CATALOG_ALIASES.
+          linkedItem('label-only', {}, { 'clerum.io/catalog-id': 'mcp-stripe-remote' }),
+          linkedItem('unknown-label', {}, { 'clerum.io/catalog-id': 'unknown-legacy-id' }),
+          linkedItem('dovetail', { 'clerum.io/catalog-id': '@evenfire-dev/mcp-dovetail-remote' }),
+          linkedItem('third-party', { 'clerum.io/catalog-id': '@someone-else/mcp-airtable' }),
+          makeItem({ name: 'evenfire-mcp-airtable' }),
+        ]}
+      />
+    )
+    expect(screen.getByTitle('annotation-wins').closest('tr')).toHaveTextContent('Airtable')
+    const legacyRow = screen.getByTitle('label-only').closest('tr')!
+    expect(legacyRow).toHaveTextContent('Stripe')
+    expect(legacyRow.querySelector('img')).toHaveAttribute('src', '/connector-icons/stripe.svg')
+    expect(screen.getByTitle('unknown-label').closest('tr')?.querySelector('img')).toHaveAttribute(
+      'src',
+      '/connector-icons/modelcontextprotocol.svg'
+    )
+    expect(screen.getByTitle('dovetail').closest('tr')?.querySelector('img')).toHaveAttribute(
+      'src',
+      '/connector-icons/dovetail.svg'
+    )
+    expect(screen.getByTitle('third-party').closest('tr')).toHaveTextContent(
+      '@someone-else/mcp-airtable'
+    )
+    expect(
+      screen.getAllByText('evenfire-mcp-airtable')[0].closest('tr')?.querySelector('img')
+    ).toHaveAttribute('src', '/connector-icons/modelcontextprotocol.svg')
+  })
+
+  it('searches display names, instance names and original legacy IDs, and sorts the friendly-name column', () => {
+    render(
+      <McpServerTable
+        items={[
+          linkedItem('aaa-instance', { 'clerum.io/catalog-id': '@evenfire/mcp-stripe' }),
+          linkedItem('zzz-instance', { 'clerum.io/catalog-id': '@evenfire/mcp-google-sheets' }),
+          linkedItem('middle-instance', {
+            'clerum.io/catalog-id': '@evenfire-dev/mcp-dovetail-remote',
+          }),
+        ]}
+      />
+    )
+    const names = () =>
+      Array.from(document.querySelectorAll('tbody tr td:first-child .cu-registry-name')).map(
+        x => x.textContent
+      )
+    expect(names()).toEqual(['Dovetail', 'Google Sheets', 'Stripe'])
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Name descending' }))
+    expect(names()).toEqual(['Stripe', 'Google Sheets', 'Dovetail'])
+    const search = screen.getByLabelText('Search connectors')
+    for (const query of ['Google Sheets', 'zzz-instance', '@evenfire/mcp-google-sheets']) {
+      fireEvent.change(search, { target: { value: query } })
+      expect(names()).toEqual(['Google Sheets'])
+    }
+    fireEvent.change(search, { target: { value: '@evenfire-dev/mcp-dovetail-remote' } })
+    expect(names()).toEqual(['Dovetail'])
+  })
+})
+
+describe('McpServerTable — legacy catalog icon mappings', () => {
+  it('uses branded icons for known saved legacy IDs while retaining the fallback for unknown IDs', () => {
+    const sources = [
+      ['mcp-etherscan', 'Etherscan', 'etherscan'],
+      ['mcp-stripe-remote', 'Stripe', 'stripe'],
+      ['github-mcp', 'GitHub (Remote)', 'github'],
+      ['@evenfire-dev/github-reviewer-ro', 'GitHub Reviewer (Read-only)', 'github'],
+    ]
+    render(
+      <McpServerTable
+        items={sources
+          .map(([source], i) => ({
+            ...makeItem({ name: `installed-${i}` }),
+            metadata: {
+              name: `installed-${i}`,
+              namespace: 'mcp-server',
+              annotations: { 'clerum.io/catalog-id': source },
+            },
+          }))
+          .concat([
+            {
+              ...makeItem({ name: 'custom-scanner' }),
+              metadata: {
+                name: 'custom-scanner',
+                namespace: 'mcp-server',
+                annotations: { 'clerum.io/catalog-id': 'evm-safe-scanner' },
+              },
+            },
+          ])}
+      />
+    )
+    for (const [i, [, label, icon]] of sources.entries()) {
+      const identity = screen.getByTitle(`installed-${i}`)
+      expect(identity).toHaveTextContent(label)
+      expect(identity.querySelector('img')).toHaveAttribute('src', `/connector-icons/${icon}.svg`)
+    }
+    expect(screen.getByTitle('custom-scanner').querySelector('img')).toHaveAttribute(
+      'src',
+      '/connector-icons/modelcontextprotocol.svg'
+    )
+  })
+})
+
+it('shows the generic MCP icon for an unlinked connector without guessing a marketplace identity', () => {
+  render(<McpServerTable items={[makeItem({ name: 'duckduckgo' })]} />)
+  const identity = screen.getByTitle('duckduckgo')
+  expect(identity).toHaveTextContent('duckduckgo')
+  expect(identity.querySelector('img')).toHaveAttribute(
+    'src',
+    '/connector-icons/modelcontextprotocol.svg'
+  )
+  expect(screen.queryByText('DuckDuckGo')).not.toBeInTheDocument()
 })

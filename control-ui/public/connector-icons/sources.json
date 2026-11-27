@@ -1,0 +1,523 @@
+[
+  {
+    "service": "Airtable",
+    "file": "airtable.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/airtable.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "arXiv",
+    "file": "arxiv-on-dark.svg",
+    "url": "https://cdn.simpleicons.org/arxiv/FFFFFF",
+    "source": "simpleicons",
+    "license": {
+      "name": "CC0-1.0",
+      "url": null,
+      "attribution": "arXiv icon via Simple Icons. Brand marks remain subject to their owners' terms.",
+      "source_url": "https://arxiv.org",
+      "guidelines_url": "https://arxiv.org/about/brand",
+      "provider": "Simple Icons",
+      "provider_url": "https://simpleicons.org/"
+    }
+  },
+  {
+    "service": "arXiv",
+    "file": "arxiv.svg",
+    "url": "https://cdn.simpleicons.org/arxiv/B31B1B",
+    "source": "simpleicons",
+    "license": {
+      "name": "CC0-1.0",
+      "url": null,
+      "attribution": "arXiv icon via Simple Icons. Brand marks remain subject to their owners' terms.",
+      "source_url": "https://arxiv.org",
+      "guidelines_url": "https://arxiv.org/about/brand",
+      "provider": "Simple Icons",
+      "provider_url": "https://simpleicons.org/"
+    }
+  },
+  {
+    "service": "Brave",
+    "file": "brave.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/brave.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "ClickHouse",
+    "file": "clickhouse.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/clickhouse.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Cloudflare",
+    "file": "cloudflare.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/cloudflare.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Dovetail",
+    "file": "dovetail-on-dark.svg",
+    "url": "https://cdn.simpleicons.org/dovetail/FFFFFF",
+    "source": "simpleicons",
+    "license": {
+      "name": "CC0-1.0",
+      "url": null,
+      "attribution": "Dovetail icon via Simple Icons. Brand marks remain subject to their owners' terms.",
+      "source_url": "https://dovetail.com/help/press-kit",
+      "guidelines_url": "https://dovetail.com/help/press-kit",
+      "provider": "Simple Icons",
+      "provider_url": "https://simpleicons.org/"
+    }
+  },
+  {
+    "service": "Dovetail",
+    "file": "dovetail.svg",
+    "url": "https://cdn.simpleicons.org/dovetail/190041",
+    "source": "simpleicons",
+    "license": {
+      "name": "CC0-1.0",
+      "url": null,
+      "attribution": "Dovetail icon via Simple Icons. Brand marks remain subject to their owners' terms.",
+      "source_url": "https://dovetail.com/help/press-kit",
+      "guidelines_url": "https://dovetail.com/help/press-kit",
+      "provider": "Simple Icons",
+      "provider_url": "https://simpleicons.org/"
+    }
+  },
+  {
+    "service": "DuckDuckGo",
+    "file": "duckduckgo.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/duckduckgo.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Exa",
+    "file": "exa.svg",
+    "url": "https://cdn.jsdelivr.net/npm/@lobehub/icons-static-svg@latest/icons/exa-color.svg",
+    "source": "lobehub",
+    "license": {
+      "name": "MIT",
+      "url": "https://github.com/lobehub/lobe-icons/blob/master/LICENSE",
+      "attribution": "Icons by LobeHub (MIT)",
+      "source_url": "https://lobehub.com/icons/exa",
+      "guidelines_url": null,
+      "provider": "LobeHub",
+      "provider_url": "https://icons.lobehub.com/"
+    }
+  },
+  {
+    "service": "Figma",
+    "file": "figma.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/figma.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Firecrawl",
+    "file": "firecrawl.svg",
+    "url": "https://cdn.jsdelivr.net/gh/selfhst/icons/svg/firecrawl.svg",
+    "source": "selfhst",
+    "license": {
+      "name": "CC BY 4.0",
+      "url": "https://creativecommons.org/licenses/by/4.0/",
+      "attribution": "Icons by selfh.st/icons (CC BY 4.0)",
+      "source_url": "https://selfh.st/icons/",
+      "guidelines_url": null,
+      "provider": "selfh.st",
+      "provider_url": "https://selfh.st/icons/"
+    }
+  },
+  {
+    "service": "Git",
+    "file": "git.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/git.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "GitHub",
+    "file": "github-on-dark.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/github-light.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "GitHub",
+    "file": "github.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/github.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "GitLab",
+    "file": "gitlab.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/gitlab.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Google Sheets",
+    "file": "google-sheets.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/google-sheets.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Hacker News",
+    "file": "hacker-news.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/hacker-news.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "HubSpot",
+    "file": "hubspot-on-dark.svg",
+    "url": "https://cdn.simpleicons.org/hubspot/FFFFFF",
+    "source": "simpleicons",
+    "license": {
+      "name": "CC0-1.0",
+      "url": null,
+      "attribution": "HubSpot icon via Simple Icons. Brand marks remain subject to their owners' terms.",
+      "source_url": "https://www.hubspot.com/style-guide",
+      "guidelines_url": "https://www.hubspot.com/style-guide",
+      "provider": "Simple Icons",
+      "provider_url": "https://simpleicons.org/"
+    }
+  },
+  {
+    "service": "HubSpot",
+    "file": "hubspot.svg",
+    "url": "https://cdn.simpleicons.org/hubspot/FF7A59",
+    "source": "simpleicons",
+    "license": {
+      "name": "CC0-1.0",
+      "url": null,
+      "attribution": "HubSpot icon via Simple Icons. Brand marks remain subject to their owners' terms.",
+      "source_url": "https://www.hubspot.com/style-guide",
+      "guidelines_url": "https://www.hubspot.com/style-guide",
+      "provider": "Simple Icons",
+      "provider_url": "https://simpleicons.org/"
+    }
+  },
+  {
+    "service": "Linear",
+    "file": "linear-on-dark.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/linear.svg",
+    "source": "native",
+    "license": null,
+    "modifications": "Monochrome black for light mode; white for dark mode. Geometry retained."
+  },
+  {
+    "service": "Linear",
+    "file": "linear.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/linear.svg",
+    "source": "native",
+    "license": null,
+    "modifications": "Monochrome black for light mode; white for dark mode. Geometry retained."
+  },
+  {
+    "service": "Mailpit",
+    "file": "mailpit.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/mailpit.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Microsoft Learn",
+    "file": "microsoft.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/microsoft.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "MCP",
+    "file": "modelcontextprotocol-on-dark.svg",
+    "url": "https://cdn.simpleicons.org/modelcontextprotocol/FFFFFF",
+    "source": "simpleicons",
+    "license": {
+      "name": "CC0-1.0",
+      "url": null,
+      "attribution": "Model Context Protocol icon via Simple Icons. Brand marks remain subject to their owners' terms.",
+      "source_url": "https://github.com/modelcontextprotocol/docs/blob/573dc60c2e7aab2605b29d0bf27194aa7b02e4fb/logo/light.svg",
+      "guidelines_url": null,
+      "provider": "Simple Icons",
+      "provider_url": "https://simpleicons.org/"
+    }
+  },
+  {
+    "service": "MCP",
+    "file": "modelcontextprotocol.svg",
+    "url": "https://cdn.simpleicons.org/modelcontextprotocol/000000",
+    "source": "simpleicons",
+    "license": {
+      "name": "CC0-1.0",
+      "url": null,
+      "attribution": "Model Context Protocol icon via Simple Icons. Brand marks remain subject to their owners' terms.",
+      "source_url": "https://github.com/modelcontextprotocol/docs/blob/573dc60c2e7aab2605b29d0bf27194aa7b02e4fb/logo/light.svg",
+      "guidelines_url": null,
+      "provider": "Simple Icons",
+      "provider_url": "https://simpleicons.org/"
+    }
+  },
+  {
+    "service": "MongoDB",
+    "file": "mongodb.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/mongodb.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "MySQL",
+    "file": "mysql.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/mysql.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Neo4j",
+    "file": "neo4j.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/neo4j.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Notion",
+    "file": "notion-on-dark.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/notion-light.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Notion",
+    "file": "notion.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/notion.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Paddle",
+    "file": "paddle-on-dark.svg",
+    "url": "https://cdn.simpleicons.org/paddle/FFFFFF",
+    "source": "simpleicons",
+    "license": {
+      "name": "CC0-1.0",
+      "url": null,
+      "attribution": "Paddle icon via Simple Icons. Brand marks remain subject to their owners' terms.",
+      "source_url": "https://www.paddle.com",
+      "guidelines_url": null,
+      "provider": "Simple Icons",
+      "provider_url": "https://simpleicons.org/"
+    }
+  },
+  {
+    "service": "Paddle",
+    "file": "paddle.svg",
+    "url": "https://cdn.simpleicons.org/paddle/FDDD35",
+    "source": "simpleicons",
+    "license": {
+      "name": "CC0-1.0",
+      "url": null,
+      "attribution": "Paddle icon via Simple Icons. Brand marks remain subject to their owners' terms.",
+      "source_url": "https://www.paddle.com",
+      "guidelines_url": null,
+      "provider": "Simple Icons",
+      "provider_url": "https://simpleicons.org/"
+    }
+  },
+  {
+    "service": "PayPal",
+    "file": "paypal.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/paypal.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Perplexity",
+    "file": "perplexity-on-dark.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/perplexity-light.svg",
+    "source": "native",
+    "license": null,
+    "modifications": "Monochrome black for light mode; white for dark mode. Geometry retained."
+  },
+  {
+    "service": "Perplexity",
+    "file": "perplexity.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/perplexity.svg",
+    "source": "native",
+    "license": null,
+    "modifications": "Monochrome black for light mode; white for dark mode. Geometry retained."
+  },
+  {
+    "service": "PostgreSQL",
+    "file": "postgresql.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/postgresql.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Redis",
+    "file": "redis.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/redis.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Sentry",
+    "file": "sentry-on-dark.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/sentry-light.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Sentry",
+    "file": "sentry.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/sentry.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Snowflake",
+    "file": "snowflake.svg",
+    "url": "https://cdn.jsdelivr.net/npm/@lobehub/icons-static-svg@latest/icons/snowflake-color.svg",
+    "source": "lobehub",
+    "license": {
+      "name": "MIT",
+      "url": "https://github.com/lobehub/lobe-icons/blob/master/LICENSE",
+      "attribution": "Icons by LobeHub (MIT)",
+      "source_url": "https://lobehub.com/icons/snowflake",
+      "guidelines_url": null,
+      "provider": "LobeHub",
+      "provider_url": "https://icons.lobehub.com/"
+    }
+  },
+  {
+    "service": "SQLite",
+    "file": "sqlite.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/sqlite.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Square",
+    "file": "square-on-dark.svg",
+    "url": "https://cdn.simpleicons.org/square/FFFFFF",
+    "source": "simpleicons",
+    "license": {
+      "name": "CC0-1.0",
+      "url": null,
+      "attribution": "Square icon via Simple Icons. Brand marks remain subject to their owners' terms.",
+      "source_url": "https://squareup.com",
+      "guidelines_url": null,
+      "provider": "Simple Icons",
+      "provider_url": "https://simpleicons.org/"
+    }
+  },
+  {
+    "service": "Square",
+    "file": "square.svg",
+    "url": "https://cdn.simpleicons.org/square/3E4348",
+    "source": "simpleicons",
+    "license": {
+      "name": "CC0-1.0",
+      "url": null,
+      "attribution": "Square icon via Simple Icons. Brand marks remain subject to their owners' terms.",
+      "source_url": "https://squareup.com",
+      "guidelines_url": null,
+      "provider": "Simple Icons",
+      "provider_url": "https://simpleicons.org/"
+    }
+  },
+  {
+    "service": "Stripe",
+    "file": "stripe-on-dark.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/stripe-light.svg",
+    "source": "native",
+    "license": null,
+    "modifications": "Monochrome black for light mode; white for dark mode. Geometry retained."
+  },
+  {
+    "service": "Stripe",
+    "file": "stripe.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/stripe.svg",
+    "source": "native",
+    "license": null,
+    "modifications": "Monochrome black for light mode; white for dark mode. Geometry retained."
+  },
+  {
+    "service": "Supabase",
+    "file": "supabase.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/supabase.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Tavily",
+    "file": "tavily.svg",
+    "url": "https://cdn.jsdelivr.net/npm/@lobehub/icons-static-svg@latest/icons/tavily-color.svg",
+    "source": "lobehub",
+    "license": {
+      "name": "MIT",
+      "url": "https://github.com/lobehub/lobe-icons/blob/master/LICENSE",
+      "attribution": "Icons by LobeHub (MIT)",
+      "source_url": "https://lobehub.com/icons/tavily",
+      "guidelines_url": null,
+      "provider": "LobeHub",
+      "provider_url": "https://icons.lobehub.com/"
+    }
+  },
+  {
+    "service": "Terraform",
+    "file": "terraform.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/terraform.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Wikipedia",
+    "file": "wikipedia-on-dark.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/wikipedia-light.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "Wikipedia",
+    "file": "wikipedia.svg",
+    "url": "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/wikipedia.svg",
+    "source": "native",
+    "license": null
+  },
+  {
+    "service": "coingecko",
+    "file": "coingecko.svg",
+    "source": "User-provided SVG, 2026-11-26",
+    "license": null
+  },
+  {
+    "service": "etherscan",
+    "file": "etherscan.svg",
+    "source": "User-provided SVG, 2026-11-26",
+    "license": null
+  },
+  {
+    "service": "defillama",
+    "file": "defillama.svg",
+    "source": "User-provided SVG, 2026-11-26",
+    "license": null
+  },
+  {
+    "service": "HeyReach",
+    "file": "heyreach.svg",
+    "source": "User-provided HeyReach_Icon-Primary-Dark.svg, 2026-11-26",
+    "license": null
+  },
+  {
+    "service": "Playwright",
+    "file": "playwright.svg",
+    "source": "User-provided playwright-logo.svg, 2026-11-26",
+    "license": null
+  }
+]

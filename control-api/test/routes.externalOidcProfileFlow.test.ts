@@ -725,6 +725,39 @@ describe('Control API OIDC member sign-in completion', () => {
         expect(flowLog.error).not.toHaveBeenCalled()
       }
     )
+
+    it.each([
+      ['CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS', 'retired-domain-list.example.test'],
+      ['CONTROL_API_OIDC_REQUIRED_ROLE', 'Retired.Role.Assignment'],
+    ])('answers 503 for a leftover %s when no registration is set', async (setting, value) => {
+      for (const key of Object.keys(process.env)) {
+        if (key.startsWith('CONTROL_API_OIDC_')) vi.stubEnv(key, undefined)
+      }
+      vi.stubEnv(setting, value)
+      const app = express()
+      app.use(express.json())
+      app.use(createExternalOidcProfileFlowRouter())
+
+      const configuration = await request(app).get('/external/oidc/profile-flow/configuration')
+
+      expect(configuration.status).toBe(503)
+      expect(configuration.body).toEqual({ error: 'oidc_configuration_unavailable' })
+      expect(flowLog.error).toHaveBeenCalledTimes(1)
+      expect(flowLog.error.mock.calls[0]?.[0]).toEqual({
+        event: 'oidc_configuration_unavailable',
+        errorClass: 'Error',
+        fields: [setting],
+      })
+      expect(loggedText()).not.toContain(value)
+
+      // With the leftover removed, the same empty registration is not configured.
+      flowLog.error.mockReset()
+      vi.stubEnv(setting, undefined)
+      const absent = await request(app).get('/external/oidc/profile-flow/configuration')
+      expect(absent.status).toBe(404)
+      expect(absent.body).toEqual({ error: 'oidc_not_configured' })
+      expect(flowLog.error).not.toHaveBeenCalled()
+    })
   })
 })
 

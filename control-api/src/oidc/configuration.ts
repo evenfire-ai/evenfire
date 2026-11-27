@@ -2,7 +2,11 @@ import { createHash, createHmac } from 'node:crypto'
 import { isIP } from 'node:net'
 import { z } from 'zod'
 import { deriveOAuthEncryptionKey } from '../oauth/encryption.js'
-import { OIDC_ELIGIBILITY_RESERVED_CLAIMS, isAcceptableEvidenceClaimName } from './claimNames.js'
+import {
+  OIDC_ELIGIBILITY_RESERVED_CLAIMS,
+  hasDisallowedClaimCharacters,
+  isAcceptableEvidenceClaimName,
+} from './claimNames.js'
 
 const ENV = {
   registrationId: 'CONTROL_API_OIDC_REGISTRATION_ID',
@@ -288,7 +292,7 @@ function parseMemberEligibility(
     (claimValueRaw.length === 0 ||
       claimValueRaw.length > MAX_REQUIRED_CLAIM_VALUE_LENGTH ||
       claimValueRaw !== claimValueRaw.trim() ||
-      /[\u0000-\u001f\u007f]/.test(claimValueRaw))
+      hasDisallowedClaimCharacters(claimValueRaw))
   ) {
     bad.add(OPTIONAL_ENV.requiredClaimValue)
   }
