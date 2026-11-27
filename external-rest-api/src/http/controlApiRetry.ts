@@ -44,5 +44,8 @@ export function sendControlApiRateLimited(
 ): void {
   const retryAfterSeconds = controlApiRetryAfterSeconds(error) ?? fallbackSeconds
   res.setHeader('Retry-After', String(retryAfterSeconds))
+  // The edge limiter stamped this request with what its own budget had left. A refused request
+  // has nothing left, so Remaining reads 0, as the edge limiter's own 429 sends it.
+  if (res.hasHeader('X-RateLimit-Remaining')) res.setHeader('X-RateLimit-Remaining', '0')
   res.status(429).json({ error: 'rate_limited', retryAfterSeconds })
 }

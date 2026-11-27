@@ -420,6 +420,18 @@ describe('edge POST /oidc/desktop-sign-in/redeem: request and answers', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it("reports no budget left on a relayed 429, as the edge limiter's own 429 does", async () => {
+    const fetchMock = controlApiRateLimits('17')
+    const res = await (await edge()).post(REDEEM).send(redeemBody)
+
+    expect(res.status).toBe(429)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // The request passed the edge limiter, which stamped its own budget before control-api
+    // refused it.
+    expect(res.headers['x-ratelimit-limit']).toBe('60')
+    expect(res.headers['x-ratelimit-remaining']).toBe('0')
+  })
+
   it('answers 429 rate_limited after 60 redeems a minute from one client', async () => {
     const fetchMock = controlApiAnswers(signedIn)
     const app = await edge()

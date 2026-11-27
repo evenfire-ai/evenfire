@@ -390,6 +390,18 @@ describe('edge GET /auth/methods: cache and limit', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it("reports no budget left on a relayed 429, as the edge limiter's own 429 does", async () => {
+    const limited = controlApiRateLimits('17')
+    const res = await (await edge()).get(METHODS)
+
+    expect(res.status).toBe(429)
+    expect(limited).toHaveBeenCalledTimes(1)
+    // The request passed the edge limiter, which stamped its own budget before control-api
+    // refused it.
+    expect(res.headers['x-ratelimit-limit']).toBe('60')
+    expect(res.headers['x-ratelimit-remaining']).toBe('0')
+  })
+
   it('answers 429 rate_limited after 60 reads a minute from one client', async () => {
     const fetchMock = controlApiAnswers(password)
     const app = await edge()
