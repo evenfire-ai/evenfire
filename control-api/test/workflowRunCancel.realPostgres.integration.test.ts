@@ -522,6 +522,15 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
       .set('x-user-session-token', token)
   }
 
+  /** The external trigger with an idempotency key (V1 session: no delegation is read). */
+  function externalTrigger(token: string, recipe: string, idempotencyKey: string) {
+    return request(app)
+      .post(`/external/workflows/${ns}/${recipe}/trigger`)
+      .set('x-user-session-token', token)
+      .set('idempotency-key', idempotencyKey)
+      .send({})
+  }
+
   // ── notifications ───────────────────────────────────────────────────────
 
   async function barrier(): Promise<void> {
@@ -871,6 +880,70 @@ describeRealPostgres('workflow run cancel on real PostgreSQL', () => {
       const row = await readRun(runId)
       expect(row).toMatchObject({ phase: 'Canceled', canceled_by: L.id })
       expect(row.cancel_requested_at).toBeInstanceOf(Date)
+    }
+  }, 60_000)
+
+  it('an approval trigger replay returns the run with its cancel request', async () => {
+    const token = await v1Token(L, null, 'member')
+
+    for (const canceller of ['launcher', 'operator'] as const) {
+      const key = `replay-${canceller}-${randomUUID()}`
+      const requested = await externalTrigger(token, approvalRecipe, key)
+      expect(requested.status).toBe(202)
+      const approvalRequestId = requested.body.approvalRequestId as string
+
+      // Replay before the decision: the approval answer, no run yet.
+      const pending = await externalTrigger(token, approvalRecipe, key)
+      expect({ status: pending.status, body: pending.body }).toEqual({
+        status: 200,
+        body: {
+          approvalRequired: true,
+          approvalRequestId,
+          status: 'pending',
+          expiresAt: expect.any(String),
+        },
+      })
+
+      const decided = await recordDecision(approvalRequestId, 'approve', { userId: L.id })
+      if (!decided.ok || !decided.workflowRun) {
+        throw new Error(`approve decision did not create a run: ${JSON.stringify(decided)}`)
+      }
+      const runId = decided.workflowRun.row.run_id as string
+
+      // Replay of a run without a cancel request: both fields are null.
+      const notRequested = await externalTrigger(token, approvalRecipe, key)
+      expect(notRequested.status).toBe(200)
+      expect(notRequested.body).toMatchObject({
+        id: runId,
+        approvalRequestId,
+        phase: 'Pending',
+        cancelRequestedAt: null,
+        canceledBy: null,
+      })
+
+      const canceled =
+        canceller === 'launcher'
+          ? await cancel(token, runId, approvalRecipe)
+          : await operatorCancel(runId, approvalRecipe)
+      expect(canceled.status).toBe(200)
+      const stored = await readRun(runId)
+      expect(stored).toMatchObject({
+        phase: 'Canceled',
+        canceled_by: canceller === 'launcher' ? L.id : operatorCanceledBy,
+      })
+      expect(stored.cancel_requested_at).toBeInstanceOf(Date)
+
+      // The replay of the same run (200, not 201) carries the stored request;
+      // the tenant view shows an operator cancel as `operator`.
+      const replay = await externalTrigger(token, approvalRecipe, key)
+      expect(replay.status).toBe(200)
+      expect(replay.body).toMatchObject({
+        id: runId,
+        approvalRequestId,
+        phase: 'Canceled',
+        cancelRequestedAt: (stored.cancel_requested_at as Date).toISOString(),
+        canceledBy: canceller === 'launcher' ? L.id : 'operator',
+      })
     }
   }, 60_000)
 
