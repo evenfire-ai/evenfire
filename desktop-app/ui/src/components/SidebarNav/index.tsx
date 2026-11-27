@@ -73,7 +73,10 @@ export function SidebarNav({
   const rename = useInlineRename({
     returnFocusToRef: renameTriggerRef,
     onRename: (key, nextTitle) => {
-      const [agentRef = '', chatId = ''] = key.split(SESSION_KEY_SEPARATOR)
+      const [agentRef, chatId, extra] = key.split(SESSION_KEY_SEPARATOR)
+      if (!agentRef || !chatId || extra !== undefined) {
+        return Promise.reject(new Error('Invalid session key'))
+      }
       return onRenameChatForAgent(agentRef, chatId, nextTitle)
     },
     onRejected: () => pushToast('Could not rename the session.', 'error'),

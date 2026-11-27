@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { SidebarNav } from '../SidebarNav'
 import type { FileExplorerTreeProps } from '../SidebarNav/FileExplorerTree/types'
 import type { SidebarNavProps } from '../SidebarNav/types'
 
+const renameChat = vi.hoisted(() => vi.fn())
 const sidebarNavChatState = vi.hoisted(() => ({
   latestChatSessions: [] as Array<{
     agentRef: string
@@ -38,7 +39,7 @@ vi.mock('@contexts/AgentChatActionsContext', () => ({
     captureChatDeleteFence: vi.fn(async () => {
       throw new Error('no delete target')
     }),
-    handleRenameChatForAgent: vi.fn(),
+    handleRenameChatForAgent: renameChat,
     handleDeleteChatForAgent: vi.fn(),
   }),
 }))
@@ -146,6 +147,24 @@ describe('SidebarNav logo', () => {
     expect(document.activeElement).toBe(
       screen.getByRole('button', { name: 'Session options for First' })
     )
+  })
+
+  it('rejects malformed session identities before dispatching a rename', async () => {
+    sidebarNavChatState.latestChatSessions = [{ agentRef: 'alpha', id: '', title: 'Broken' }]
+    const pushToast = vi.fn()
+    render(<SidebarNav {...baseProps({ pushToast })} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Session options for Broken' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    const input = screen.getByRole('textbox', { name: 'Rename session' })
+    fireEvent.change(input, { target: { value: 'Updated' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith('Could not rename the session.', 'error')
+    )
+    expect(renameChat).not.toHaveBeenCalled()
+    expect(
+      (screen.getByRole('textbox', { name: 'Rename session' }) as HTMLInputElement).value
+    ).toBe('Updated')
   })
 
   it('renders both theme lockup variants when expanded', () => {
