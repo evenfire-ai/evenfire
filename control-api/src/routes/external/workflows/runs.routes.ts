@@ -89,7 +89,7 @@ export function createExternalWorkflowRunsRoutes(gateway: K8sGateway): Router {
       }
 
       const limit = parseLimit(req.query?.limit)
-      const items = await listCanonicalRuns(ns, name, limit, caller)
+      const items = await listCanonicalRuns(ns, name, limit, 'tenant', caller)
       if (authority) {
         auditAuthorizedWorkflowRead(authority, {
           entityType: 'workflow_recipe',

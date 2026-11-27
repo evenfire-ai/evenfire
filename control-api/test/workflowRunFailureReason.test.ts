@@ -22,6 +22,6 @@ describe('workflow run failure diagnostics', () => {
       failure_reason: 'workflow_authority_invalid_binding',
     } as WorkflowRunRow
 
-    expect(mapDbRun(row).message).toBe('workflow_authority_invalid_binding')
+    expect(mapDbRun(row, 'tenant').message).toBe('workflow_authority_invalid_binding')
   })
 })

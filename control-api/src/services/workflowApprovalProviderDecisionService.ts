@@ -406,7 +406,7 @@ export async function recordProviderApprovalDecision(
     return {
       ok: true,
       duplicate: false,
-      ...(result.workflowRun ? { run: mapDbRun(result.workflowRun.row) } : {}),
+      ...(result.workflowRun ? { run: mapDbRun(result.workflowRun.row, 'tenant') } : {}),
     }
   })
   if (result.ok) enqueueWorkflowApprovalTraceProjection(input.approvalRequestId)
