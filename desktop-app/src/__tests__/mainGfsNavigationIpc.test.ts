@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { buildSandboxUiDeepLink, parseSandboxUiDeepLink } from '@clerum/desktop-app-links'
-import { buildGfsResourceDeepLink } from '../gfsDeepLinks.js'
+import {
+  buildGfsResourceDeepLink,
+  buildSandboxUiDeepLink,
+  parseSandboxUiDeepLink,
+} from '@clerum/desktop-app-links'
 
 type MainEvent = {
   senderFrame: { url: string }
@@ -159,9 +162,6 @@ vi.mock('../sandboxUiDeepLinks.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../sandboxUiDeepLinks.js')>()
   return { ...actual, parseSandboxUiDeepLink: harness.parseSandboxUiDeepLink }
 })
-vi.mock('../sandboxUiProtocolWindowPolicy.js', () => ({
-  shouldAcceptSandboxUiProtocolLink: vi.fn(() => true),
-}))
 vi.mock('../sandboxUiSessionRefresh.js', () => ({ notifySandboxUiHostResumed: vi.fn() }))
 vi.mock('../shortcutRouter.js', () => ({ wireHostDesktopShortcutRouting: vi.fn() }))
 vi.mock('../systemIcon.js', () => ({
@@ -348,6 +348,60 @@ describe('main.ts GFS navigation-generation composition', () => {
       ([channel]) => channel === 'auth:sessionCleared'
     )
     expect(notices).toEqual([['auth:sessionCleared']])
+  })
+
+  it('lets invalid App and resource protocol links reach main without any window or renderer effect', () => {
+    const mainWindow = harness.windows[0]
+    const ownContents = mainWindow?.webContents
+    if (!mainWindow || !ownContents)
+      throw new Error('main.ts did not create the owning BrowserWindow')
+    const openUrl = harness.appListeners.get('open-url')
+    if (!openUrl) throw new Error('main.ts did not register the OS deep-link route')
+    const listAppLinks = registeredHandler(
+      harness.handleHandlers,
+      'sandboxUi:listPendingDeepLinks'
+    ) as (event: MainEvent) => { links: unknown[] }
+    const listGfsLinks = registeredHandler(harness.handleHandlers, 'gfs:listPendingDeepLinks') as (
+      event: MainEvent
+    ) => { links: unknown[] }
+    const invalidAppLinks = [
+      'evenfire://app/sandbox-recipes/task-board/',
+      'evenfire://app/sandbox-recipes/task-board?path=%2Fsafe%2F..%2Fadmin',
+      'evenfire://app/sandbox-recipes/task-board?team=other%2Fteam',
+      'evenfire://app:444/sandbox-recipes/task-board',
+    ]
+    const invalidResourceLinks = [
+      'evenfire://files',
+      'evenfire://files?uri=gfs%3A%2F%2Fmain%2Fshort',
+    ]
+    const appBefore = listAppLinks(ipcEvent(ownContents)).links
+    const gfsBefore = listGfsLinks(ipcEvent(ownContents)).links
+    ownContents.send.mockClear()
+    mainWindow.focus.mockClear()
+    mainWindow.show.mockClear()
+    harness.parseSandboxUiDeepLink.mockClear()
+    harness.parseSandboxUiDeepLink.mockImplementation(parseSandboxUiDeepLink)
+
+    try {
+      for (const rawUrl of [...invalidAppLinks, ...invalidResourceLinks]) {
+        openUrl({ preventDefault: vi.fn() }, rawUrl)
+      }
+
+      expect(harness.parseSandboxUiDeepLink.mock.calls.map(([rawUrl]) => rawUrl)).toEqual(
+        invalidAppLinks
+      )
+      const deepLinkSends = ownContents.send.mock.calls.filter(
+        ([channel]) => channel === 'sandboxUi:deepLink' || channel === 'gfs:deepLink'
+      )
+      expect(deepLinkSends).toEqual([])
+      expect(harness.windows).toHaveLength(1)
+      expect(mainWindow.focus).not.toHaveBeenCalled()
+      expect(mainWindow.show).not.toHaveBeenCalled()
+      expect(listAppLinks(ipcEvent(ownContents)).links).toEqual(appBefore)
+      expect(listGfsLinks(ipcEvent(ownContents)).links).toEqual(gfsBefore)
+    } finally {
+      harness.parseSandboxUiDeepLink.mockReturnValue(null)
+    }
   })
 
   it('keeps post-invalidation App and resource links above the main queue reset floors', () => {

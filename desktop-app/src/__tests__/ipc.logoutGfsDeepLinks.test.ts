@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
 import type { AppService } from '../appService.js'
-import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '../gfsDeepLinks.js'
 import {
   GfsResourceDeepLinkQueue,
   createLogoutWithGfsResourceDeepLinkClear,

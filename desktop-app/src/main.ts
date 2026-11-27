@@ -1,6 +1,7 @@
 import { BrowserWindow, IpcMainEvent, app, ipcMain, nativeTheme, powerMonitor } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
+import { GFS_RESOURCE_DEEP_LINK_HOST, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
 import { AppService } from './appService.js'
 import { routeClerumOauthCompleted } from './clerumDeepLink.js'
 import {
@@ -19,7 +20,6 @@ import {
   verifyDevIsolationRuntime,
 } from './devIsolation.js'
 import { createEvenfireDeepLinkRouter } from './evenfireDeepLinkRouter.js'
-import { GFS_RESOURCE_DEEP_LINK_HOST, parseGfsResourceDeepLink } from './gfsDeepLinks.js'
 import {
   GfsResourceDeepLinkQueue,
   GfsUserNavigationGeneration,
@@ -45,7 +45,6 @@ import {
   SANDBOX_UI_DEEP_LINK_PROTOCOL,
   parseSandboxUiDeepLink,
 } from './sandboxUiDeepLinks.js'
-import { shouldAcceptSandboxUiProtocolLink } from './sandboxUiProtocolWindowPolicy.js'
 import { notifySandboxUiHostResumed } from './sandboxUiSessionRefresh.js'
 import { wireHostDesktopShortcutRouting } from './shortcutRouter.js'
 import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.js'
@@ -415,15 +414,16 @@ const evenfireDeepLinkRouter = createEvenfireDeepLinkRouter<BrowserWindow>({
   appProtocol: DESKTOP_SETUP_PROTOCOL,
   focusMainWindow,
   getWindow: () => mainWindow,
-  handleSandboxUiDeepLink,
-  handleGfsResourceDeepLink,
-  gfsResourceDeepLinkHost: GFS_RESOURCE_DEEP_LINK_HOST,
   isRendererReady: () => mainWindowRendererReady,
   logout: logoutAndClearGfsResourceDeepLinks,
+  onPendingUrlDropped: host => {
+    console.warn('[Desktop] Dropped a pending deep link (queue full):', host)
+  },
   requestMainWindow,
-  sandboxUiDeepLinkHost: SANDBOX_UI_DEEP_LINK_HOST,
-  shouldAcceptSandboxUiProtocolLink,
-  shouldAcceptGfsResourceProtocolLink: rawUrl => parseGfsResourceDeepLink(rawUrl) !== null,
+  routes: {
+    [SANDBOX_UI_DEEP_LINK_HOST]: handleSandboxUiDeepLink,
+    [GFS_RESOURCE_DEEP_LINK_HOST]: handleGfsResourceDeepLink,
+  },
 })
 
 function registerCustomProtocols(): void {
