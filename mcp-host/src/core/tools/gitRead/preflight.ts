@@ -211,6 +211,17 @@ function isInside(real: string, root: string): boolean {
 }
 
 /** Inside the real root and not into protected state. */
+/**
+ * The path the kernel opens for `file`: each link is followed before the `..`
+ * after it, as open(2) does, and as git sees the path. `fs.realpathSync`
+ * collapses `..` in the text first, so with `lnk -> ../..` it judged
+ * `lnk/../x` as the link's own sibling `x`, not as `x` beside the link's
+ * target. Every confinement check resolves paths with this.
+ */
+function kernelPath(file: string): string {
+  return fs.realpathSync.native(file)
+}
+
 function confine(real: string, realRoot: string): void {
   if (!isInside(real, realRoot)) throw new GitReadRefusal('directory_outside_workspace')
   if (isProtectedRealPath(real, realRoot)) throw new GitReadRefusal('directory_protected')
@@ -257,7 +268,7 @@ export function checkAlternates(
     const joined = path.isAbsolute(entry) ? entry : `${objectsReal}/${entry}`
     let real: string
     try {
-      real = fs.realpathSync(joined)
+      real = kernelPath(joined)
     } catch {
       throw new GitReadRefusal('alternates_unresolved')
     }
@@ -289,7 +300,7 @@ export function walkRepositoryLinks(
   const inStore = (real: string): boolean => objectStores.some(store => isInside(real, store))
   const linkedElsewhere = (real: string): boolean => !inStore(real) && fs.lstatSync(real).nlink > 1
   const walk = (dir: string): void => {
-    const real = fs.realpathSync(dir)
+    const real = kernelPath(dir)
     if (seen.has(real)) return
     seen.add(real)
     for (const dirent of fs.readdirSync(real, { withFileTypes: true })) {
@@ -298,7 +309,7 @@ export function walkRepositoryLinks(
       if (dirent.isSymbolicLink()) {
         let target: string
         try {
-          target = fs.realpathSync(child)
+          target = kernelPath(child)
         } catch {
           throw new GitReadRefusal('repository_link_unresolved')
         }
@@ -342,10 +353,15 @@ export function checkLinkedWorktrees(commonDir: string, realRoot: string): void 
     // git records absolute paths. A relative one resolves against different
     // bases across git versions (2.39 uses the cwd), so it is refused.
     if (!path.isAbsolute(recorded)) throw new GitReadRefusal('directory_outside_workspace')
+    // git records normalized paths. A `.` or `..` segment would make the
+    // lexical check below disagree with the kernel for a missing path.
     const lexical = path.resolve(recorded)
+    if (lexical !== recorded.replace(/\/+$/, '')) {
+      throw new GitReadRefusal('directory_outside_workspace')
+    }
     let real = lexical
     try {
-      real = fs.realpathSync(lexical)
+      real = kernelPath(recorded)
     } catch {
       // A missing worktree is judged by its recorded path.
     }
@@ -613,7 +629,7 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
     if (ctx.verifyCallerRoot && verifyManagedCallerRootPath(ctx.root) === undefined) {
       return { kind: 'refused', category: 'root_unavailable' }
     }
-    realRoot = fs.realpathSync(ctx.root)
+    realRoot = kernelPath(ctx.root)
   } catch {
     return { kind: 'refused', category: 'root_unavailable' }
   }
@@ -622,11 +638,15 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
   const directory = validatePath(ctx.params.directory, ctx.root)
   if (!directory.valid) return { kind: 'refused', category: 'bad_path' }
   try {
-    cwd = fs.realpathSync(directory.resolved)
+    cwd = kernelPath(directory.resolved)
     if (!fs.statSync(cwd).isDirectory()) return { kind: 'refused', category: 'bad_path' }
   } catch {
     return { kind: 'refused', category: 'bad_path' }
   }
+  // validatePath judges the text-resolved path; git runs in the kernel's.
+  if (!isInside(cwd, realRoot)) return { kind: 'refused', category: 'directory_outside_workspace' }
+  if (isProtectedRealPath(cwd, realRoot))
+    return { kind: 'refused', category: 'directory_protected' }
 
   const env = gitReadEnv(path.dirname(realRoot))
   const run = (
@@ -652,7 +672,8 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
     if (lines.length !== 3) return { kind: 'refused', category: 'not_a_repository' }
     const [gitDir, commonDir, top] = lines.map(line => {
       try {
-        return fs.realpathSync(path.resolve(cwd, line))
+        // Joined as text, never normalized: the kernel resolves any `..`.
+        return kernelPath(path.isAbsolute(line) ? line : `${cwd}/${line}`)
       } catch {
         throw new GitReadRefusal('not_a_repository')
       }
@@ -668,7 +689,7 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
     // P3. The object store.
     let objects: string
     try {
-      objects = fs.realpathSync(path.join(commonDir, 'objects'))
+      objects = kernelPath(`${commonDir}/objects`)
     } catch {
       throw new GitReadRefusal('not_a_repository')
     }
@@ -730,7 +751,7 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
     const file = validatePath(path.posix.join(params.directory, params.paths[0]), ctx.root)
     if (!file.valid) return { kind: 'refused', category: 'bad_path' }
     try {
-      const real = fs.realpathSync(file.resolved)
+      const real = kernelPath(file.resolved)
       if (!isInside(real, realRoot) || isProtectedRealPath(real, realRoot)) {
         return { kind: 'refused', category: 'bad_path' }
       }
