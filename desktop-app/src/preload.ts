@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { DesktopCommandId, DesktopCommandSource } from './desktopCommands.js'
 import type { PluginConsentRequest } from './pluginSdkProtocol.js'
 import type {
+  BrowserSignInSnapshot,
+  BrowserSignInStartResult,
   DeepLinkAcknowledgmentAuthority,
   DesktopRuntimeConfigHandoffSelection,
   GfsResourceDeepLinkEnvelope,
@@ -9,6 +11,7 @@ import type {
   GfsWatchSubscriptionRequest,
   GfsWatchSubscriptionResult,
   HostMessageRequest,
+  LoginMethodsAnswer,
   ProfileSettingsOpenOptions,
   SandboxUiDeepLinkEnvelope,
   SandboxUiReleasedEvent,
@@ -156,6 +159,24 @@ const clerum = Object.freeze({
     googleLogin: (idToken: string) => ipcRenderer.invoke('auth:googleLogin', { idToken }),
     passwordLogin: (email: string, password: string) =>
       ipcRenderer.invoke('auth:passwordLogin', { email, password }),
+    getLoginMethods: () =>
+      ipcRenderer.invoke('auth:getLoginMethods') as Promise<LoginMethodsAnswer>,
+    startBrowserSignIn: () =>
+      ipcRenderer.invoke('auth:startBrowserSignIn') as Promise<BrowserSignInStartResult>,
+    cancelBrowserSignIn: () =>
+      ipcRenderer.invoke('auth:cancelBrowserSignIn') as Promise<BrowserSignInSnapshot>,
+    getBrowserSignInState: () =>
+      ipcRenderer.invoke('auth:getBrowserSignInState') as Promise<BrowserSignInSnapshot>,
+    acknowledgeBrowserSignInResult: (attemptId: number) =>
+      ipcRenderer.invoke('auth:acknowledgeBrowserSignInResult', {
+        attemptId,
+      }) as Promise<BrowserSignInSnapshot>,
+    onBrowserSignInChanged: (callback: (snapshot: BrowserSignInSnapshot) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, snapshot: BrowserSignInSnapshot) =>
+        callback(snapshot)
+      ipcRenderer.on('auth:browserSignInResult', listener)
+      return () => ipcRenderer.off('auth:browserSignInResult', listener)
+    },
     diagnoseLoginBackend: () => ipcRenderer.invoke('auth:diagnoseLoginBackend'),
     probeLocalhostReachable: () => ipcRenderer.invoke('auth:probeLocalhostReachable'),
     openDeploymentDocs: () => ipcRenderer.invoke('auth:openDeploymentDocs'),

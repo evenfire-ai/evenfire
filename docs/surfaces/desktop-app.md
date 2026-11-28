@@ -15,11 +15,18 @@ platform, and the [Control UI](control-ui.md) for the admin side of that split.
 
 ## The daily loop
 
-1. **Log in.** The sign-in screen offers email and password, posted to
-   `POST /api/v1/auth/password-login`. (The main process also exposes a
-   Google `idToken` login IPC, but no screen uses it today.) Once a session is
-   established, it is restored from the OS keychain via `keytar`, with a
-   local file fallback when no keychain is available.
+1. **Log in.** The sign-in screen shows the methods the environment lists at
+   `GET /api/v1/auth/methods`: email and password, posted to
+   `POST /api/v1/auth/password-login`, and, with member sign-in (OIDC) on,
+   "Continue with …" through the system browser. That opens Profile
+   UI's `/desktop-login` page, Profile UI returns the result through the
+   `evenfire://desktop-login` deep link, and the app redeems its code at
+   `POST /api/v1/oidc/desktop-sign-in/redeem` (step 7 of [Profile UI's
+   invitation flow](profile-ui.md#the-invitation-flow)). An environment
+   without the methods route gets the password form. (The main process also
+   exposes a Google `idToken` login IPC, but no screen uses it today.) Once a
+   session is established, it is restored from the OS keychain via `keytar`,
+   with a local file fallback when no keychain is available.
 2. **Pick a team.** Team listing and switching read the access catalog:
    `GET /api/v1/me/agents` and `GET /api/v1/me/contexts` for the signed-in
    user, `GET /api/v1/team/agents` and `GET /api/v1/team/contexts` for the
@@ -333,8 +340,8 @@ above for why leaving it unset is silently wrong rather than loudly broken.
 
 ## Limits
 
-- There is no Google or SSO sign-in screen; members sign in with email and
-  password.
+- Member sign-in (OIDC) opens the system browser, and the sign-in screen
+  offers it only where the environment turns it on.
 - The activity stream never carries internal reasoning / chain-of-thought
   content, and it is read-only — message submission always goes through the
   `/messages` endpoint, never the stream.

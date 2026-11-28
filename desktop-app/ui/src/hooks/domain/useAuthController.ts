@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { DEFAULT_TOAST_DURATION_MS } from '@constants/toasts'
+import { ipcErrorCode } from '@lib/ipcErrorCode'
 import { desktopQueryClient } from '@lib/queryClient'
 import { classifySignInFailure } from '@lib/signInFailure'
 import type {
@@ -18,6 +19,8 @@ import {
   resolveDesktopEnvironmentRestMatch,
 } from './desktopEnvironmentHandoff'
 import type { DesktopEnvironmentSwitchConfirmation, SetStatusFn } from './types'
+import { useBrowserSignIn } from './useBrowserSignIn'
+import { useLoginMethods } from './useLoginMethods'
 
 interface UseAuthControllerParams {
   setStatus: SetStatusFn
@@ -26,10 +29,9 @@ interface UseAuthControllerParams {
   logoutForEnvironmentMismatch: () => Promise<number | null>
 }
 
-// The code main raises for desktop setup, whole, after the IPC wrapper's `Error: `.
+// The code main raises for desktop setup, whole, bare or inside the IPC wrapper.
 function isMissingInvitationConfigError(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error)
-  return /(^|Error: )invitation_config_not_found$/.test(message)
+  return ipcErrorCode(error, ['invitation_config_not_found']) !== null
 }
 
 function describeLoginWait(seconds: number): string {
@@ -152,21 +154,55 @@ export function useAuthController({
     (!dependencyHealth.externalRestApi.ok || !dependencyHealth.rpcProxy.ok)
   )
 
-  const getDesktopEnvironmentHandoffAuthState = useCallback(
-    () => ({
-      booting: bootingRef.current,
-      busy: busyRef.current,
-      authTransitioning: authTransitioningRef.current,
-      isAuthenticated: isAuthenticatedRef.current,
-    }),
-    []
-  )
-
   const refreshRuntimeConfigState = useCallback(async () => {
     const state = await window.clerum.auth.getRuntimeConfigState()
     setRuntimeConfigState(state)
     return state
   }, [])
+
+  // Every call that can change the environment binding goes through `runBindingChange` (D15).
+  const loginMethods = useLoginMethods({ refreshRuntimeConfigState })
+  const { runBindingChange } = loginMethods
+  // `refresh` is stable, so the browser sign-in's callbacks keep their identity (P42).
+  const browserSignIn = useBrowserSignIn({
+    setStatus,
+    onSessionNeedsLoad,
+    refreshLoginMethods: loginMethods.refresh,
+  })
+  /**
+   * A browser sign-in that redeems blocks these auth actions at call time (D14): the password
+   * sign-in, which the backend switch also runs at its end; the environment changes outside a
+   * desktop-environment link; and a desktop-environment link's handoff gate and confirm. It is
+   * read from the hook's ref, so it holds before React commits the view (V32, A3-55). It is
+   * never written to `authTransitioningRef`, which other flows' `finally` blocks clear (X3).
+   *
+   * The password sign-in and the environment changes (save from the add form, select, the
+   * backend switch, delete and clear) return at once while it holds, with no call to main and
+   * no state change (Task 14a review I-1; final review FR-C1). Main does not refuse them while
+   * an attempt redeems. A password sign-in advances the generation, and so does an environment
+   * change that moves the binding, so main discards the redeem's answer, a session the server
+   * already issued, and ends the sign-in `replaced`, which shows nothing (decision 5; G1-m7).
+   * Delete and clear are refused even when they would not move it, so all five environment
+   * changes behave alike. The page also disables those controls; reading the ref here covers a
+   * click or an Enter that lands before that state commits. Nothing is shown: the sign-in's own
+   * outcome follows.
+   *
+   * Starting desktop setup, completing it and a new browser sign-in do not read it. Starting
+   * setup reads the invitation and opens the browser, and moves neither the generation nor the
+   * binding. Main refuses completing setup (`auth_transition_in_progress`, D11) and a new start
+   * (`browser_sign_in_finishing`) while an attempt redeems.
+   */
+  const browserSignInBlocksAuthActions = browserSignIn.isRedeeming
+
+  const getDesktopEnvironmentHandoffAuthState = useCallback(
+    () => ({
+      booting: bootingRef.current,
+      busy: busyRef.current,
+      authTransitioning: authTransitioningRef.current || browserSignInBlocksAuthActions(),
+      isAuthenticated: isAuthenticatedRef.current,
+    }),
+    [browserSignInBlocksAuthActions]
+  )
 
   const getSessionGeneration = useCallback(() => window.clerum.auth.getSessionGeneration(), [])
 
@@ -176,17 +212,16 @@ export function useAuthController({
       if (!normalizedEmail || !nextAuthorizationToken.trim()) {
         throw new Error('email and authorization token are required')
       }
-      const state = await window.clerum.auth.completeDesktopSetup(
-        normalizedEmail,
-        nextAuthorizationToken.trim()
+      const state = await runBindingChange(() =>
+        window.clerum.auth.completeDesktopSetup(normalizedEmail, nextAuthorizationToken.trim())
       )
       setRuntimeConfigState(state)
       setEmail(normalizedEmail)
       setDesktopSetupAuthorizationToken('')
       setDesktopSetupStarted(false)
-      setStatus('Desktop setup complete. Sign in with your email and password.', 'success')
+      setStatus('Desktop setup complete. Sign in to continue.', 'success')
     },
-    [setStatus]
+    [runBindingChange, setStatus]
   )
 
   // Boot effect
@@ -248,6 +283,8 @@ export function useAuthController({
   }, [onSessionNeedsLoad, setStatus])
 
   const handlePasswordLogin = async () => {
+    // Before the `try`, whose `finally` would write `busy` and `authTransitioning` (FR-C1).
+    if (browserSignInBlocksAuthActions()) return
     try {
       setBusy(true)
       setAuthTransitioning(true)
@@ -299,6 +336,8 @@ export function useAuthController({
   const handleSwitchLoginBackend = async () => {
     const hint = backendSwitchHint
     if (!hint) return
+    // Before the hint is cleared, so the switch stays offered (I-1).
+    if (browserSignInBlocksAuthActions()) return
     setBackendSwitchHint(null)
     const state = await handleSelectRuntimeConfig(hint.targetOptionId)
     if (!state) return
@@ -344,6 +383,9 @@ export function useAuthController({
     nextConfig?: DesktopRuntimeConfig,
     expectedSessionGeneration?: number
   ): Promise<DesktopRuntimeConfigState | null> => {
+    // A link's save carries a generation: its confirm checks the blocker, and main refuses it
+    // while an attempt redeems (D11). The add form's save does not (I-1).
+    if (expectedSessionGeneration === undefined && browserSignInBlocksAuthActions()) return null
     try {
       setBusy(true)
       const name = (nextConfig?.appName ?? runtimeConfigSetupName).trim()
@@ -362,10 +404,11 @@ export function useAuthController({
         rpcProxyBaseUrl,
         appName: name,
       }
-      const state =
+      const state = await runBindingChange(() =>
         expectedSessionGeneration === undefined
-          ? await window.clerum.auth.saveRuntimeConfig(configToSave)
-          : await window.clerum.auth.saveRuntimeConfig(configToSave, expectedSessionGeneration)
+          ? window.clerum.auth.saveRuntimeConfig(configToSave)
+          : window.clerum.auth.saveRuntimeConfig(configToSave, expectedSessionGeneration)
+      )
       setRuntimeConfigState(state)
       setRuntimeConfigSetupName('')
       setRuntimeConfigSetupExternalRestApiBaseUrl('')
@@ -409,6 +452,7 @@ export function useAuthController({
   }
 
   const handleDeleteRuntimeConfig = async (optionId: string) => {
+    if (browserSignInBlocksAuthActions()) return
     try {
       setBusy(true)
       // During npm-run-dev, Vite can hot-reload renderer code while Electron is
@@ -416,7 +460,7 @@ export function useAuthController({
       if (typeof window.clerum.auth.deleteRuntimeConfig !== 'function') {
         throw new Error('Restart the desktop app to finish loading the environment delete action')
       }
-      const state = await window.clerum.auth.deleteRuntimeConfig(optionId)
+      const state = await runBindingChange(() => window.clerum.auth.deleteRuntimeConfig(optionId))
       setRuntimeConfigState(state)
       setStatus('Environment deleted.', 'success', undefined, { global: false, toast: true })
     } catch (error) {
@@ -441,10 +485,11 @@ export function useAuthController({
 
   const handleSelectRuntimeConfig = useCallback(
     async (optionId: string): Promise<DesktopRuntimeConfigState | null> => {
+      if (browserSignInBlocksAuthActions()) return null
       try {
         setBusy(true)
         setBackendSwitchHint(null)
-        const state = await window.clerum.auth.selectRuntimeConfig(optionId)
+        const state = await runBindingChange(() => window.clerum.auth.selectRuntimeConfig(optionId))
         applySelectedRuntimeConfigState(state)
         reportDesktopEnvironmentSelected(state, setStatus)
         return state
@@ -458,7 +503,7 @@ export function useAuthController({
         setBusy(false)
       }
     },
-    [applySelectedRuntimeConfigState, setStatus]
+    [applySelectedRuntimeConfigState, browserSignInBlocksAuthActions, runBindingChange, setStatus]
   )
 
   const handleSelectRuntimeConfigForHandoff = useCallback(
@@ -469,9 +514,8 @@ export function useAuthController({
       try {
         setBusy(true)
         setBackendSwitchHint(null)
-        const selection = await window.clerum.auth.selectRuntimeConfigForHandoff(
-          optionId,
-          expectedSessionGeneration
+        const selection = await runBindingChange(() =>
+          window.clerum.auth.selectRuntimeConfigForHandoff(optionId, expectedSessionGeneration)
         )
         applySelectedRuntimeConfigState(selection.runtimeConfigState)
         if (selection.runtimeConfigState.activeOptionId !== optionId) {
@@ -509,7 +553,7 @@ export function useAuthController({
         setBusy(false)
       }
     },
-    [applySelectedRuntimeConfigState, setStatus]
+    [applySelectedRuntimeConfigState, runBindingChange, setStatus]
   )
 
   useEffect(() => {
@@ -545,9 +589,10 @@ export function useAuthController({
   ])
 
   const handleClearRuntimeConfigSelection = async (): Promise<DesktopRuntimeConfigState | null> => {
+    if (browserSignInBlocksAuthActions()) return null
     try {
       setBusy(true)
-      const state = await window.clerum.auth.clearRuntimeConfigSelection()
+      const state = await runBindingChange(() => window.clerum.auth.clearRuntimeConfigSelection())
       setRuntimeConfigState(state)
       setStatus('Environment unselected.', 'success', undefined, {
         global: false,
@@ -603,7 +648,12 @@ export function useAuthController({
       setStatus('Finish the current authentication action, then reopen this desktop link.', 'info')
     }
 
-    if (bootingRef.current || busyRef.current || authTransitioningRef.current) {
+    if (
+      bootingRef.current ||
+      busyRef.current ||
+      authTransitioningRef.current ||
+      browserSignInBlocksAuthActions()
+    ) {
       reportAuthenticationInProgress()
       return
     }
@@ -622,7 +672,7 @@ export function useAuthController({
         setStatus('Could not verify the desktop session. Try opening the link again.', 'error')
         return
       }
-      if (bootingRef.current || busyRef.current) {
+      if (bootingRef.current || busyRef.current || browserSignInBlocksAuthActions()) {
         reportAuthenticationInProgress()
         return
       }
@@ -652,7 +702,7 @@ export function useAuthController({
         reportSessionChanged()
         return
       }
-      if (bootingRef.current || busyRef.current) {
+      if (bootingRef.current || busyRef.current || browserSignInBlocksAuthActions()) {
         reportAuthenticationInProgress()
         return
       }
@@ -717,7 +767,11 @@ export function useAuthController({
           reportSessionChanged()
           return
         }
-        if (busyRef.current) {
+        // Redeeming cannot hold here with the real main: it refuses the selection while an
+        // attempt redeems (`assertProfileHandoffSessionIsSignedOut`, D11), and an attempt
+        // started after the selection advances the generation, which the check above reports.
+        // This read of the browser sign-in only backs those two up.
+        if (busyRef.current || browserSignInBlocksAuthActions()) {
           reportAuthenticationInProgress()
           return
         }
@@ -776,6 +830,23 @@ export function useAuthController({
     await window.clerum.auth.openDesktopRelease(releaseUrl)
   }
 
+  const { start: startBrowserSignIn } = browserSignIn
+  /**
+   * Starts a browser sign-in (D5). The start control is disabled while another auth action
+   * runs (D14, A3-68); the handler also returns at once then, for a click that lands before the
+   * disabled state commits. The call sets `busy` while it is in flight, so the dock is disabled
+   * until main answers; the waiting attempt then sets nothing.
+   */
+  const handleStartBrowserSignIn = useCallback(async () => {
+    if (bootingRef.current || busyRef.current || authTransitioningRef.current) return
+    setBusy(true)
+    try {
+      await startBrowserSignIn()
+    } finally {
+      setBusy(false)
+    }
+  }, [setBusy, startBrowserSignIn])
+
   return {
     booting,
     busy,
@@ -790,7 +861,14 @@ export function useAuthController({
     runtimeConfigSetupName,
     runtimeConfigSetupExternalRestApiBaseUrl,
     runtimeConfigSetupRpcProxyBaseUrl,
-    authTransitioning,
+    // Decision 8: a redeeming browser sign-in reaches every reader of `authTransitioning`. The
+    // dock (`RuntimeConfigDock`) is disabled, with no edit there. The sign-in page disables
+    // "Save environment" and the backend switch with it (R-38), and leaves redeeming out of its
+    // password submit's "Signing in..." label (R-15). Onboarding's invited
+    // step (`InvitedMember`) shows its in-progress label, and main refuses completing setup
+    // (`completeDesktopSetup`) while an attempt redeems anyway (D11). The raw flag stays what
+    // the flows write and their `finally` blocks clear (X3).
+    authTransitioning: authTransitioning || browserSignIn.view.phase === 'redeeming',
     runtimeConfigState,
     dependencyHealth,
     desktopReleaseStatus,
@@ -801,6 +879,11 @@ export function useAuthController({
     runtimeConfigMissing,
     showRuntimeConfigSelector,
     hasDependencyOutage,
+    loginScreen: loginMethods.model,
+    browserSignIn: browserSignIn.view,
+    refreshLoginMethods: loginMethods.refresh,
+    handleStartBrowserSignIn,
+    handleCancelBrowserSignIn: browserSignIn.cancel,
     setBooting,
     setBusy,
     setStatusText,

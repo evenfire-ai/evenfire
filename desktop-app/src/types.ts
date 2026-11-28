@@ -1,4 +1,6 @@
 import type { FileReferenceV1, LocationReferenceV1 } from '@clerum/gfs-interaction-policy'
+// Type-only cycle, erased at compile time: browserSignInModel.ts imports its types from here.
+import type { DesktopLoginRefusalReason } from './browserSignInModel.js'
 import type { ImageInputDecision } from './imageInputDecision'
 
 export type Role = 'admin' | 'inviter' | 'member'
@@ -716,6 +718,42 @@ export type SessionState = {
   /** Main-process authentication epoch captured with this identity snapshot. */
   sessionGeneration?: number
 }
+
+/** Why a browser sign-in ended as `failed`, when main knows. */
+export type BrowserSignInFailureReason =
+  | 'different_environment'
+  | 'unavailable'
+  | 'no_longer_available'
+  | 'environment_changed'
+
+/** The one end state an attempt reaches. A refusal carries a reason from PR 2's closed set. */
+export type BrowserSignInEnd =
+  | { outcome: 'signed_in' | 'cancelled' | 'timed_out' | 'replaced' }
+  | { outcome: 'refused'; reason: DesktopLoginRefusalReason }
+  | { outcome: 'failed'; reason?: BrowserSignInFailureReason }
+
+/**
+ * What `auth:browserSignInResult` carries and `auth:getBrowserSignInState` returns. The renderer
+ * keeps the newer of two snapshots (`newerBrowserSignInSnapshot`).
+ */
+export type BrowserSignInSnapshot =
+  | { attemptId: number | null; phase: 'idle' }
+  | { attemptId: number; phase: 'waiting' | 'redeeming' }
+  | ({ attemptId: number; phase: 'ended' } & BrowserSignInEnd)
+
+/**
+ * What the login screen offers, built by `buildLoginMethodsModel` in main. A `methods` model
+ * always has a provider, the password form, or both.
+ */
+export type LoginMethodsModel =
+  | { kind: 'methods'; provider: { label: string } | null; password: boolean }
+  | { kind: 'misconfigured' }
+  | { kind: 'unreachable' }
+
+/** The model with the generation of the binding it was read for. */
+export type LoginMethodsAnswer = { model: LoginMethodsModel; generation: number }
+
+export type BrowserSignInStartResult = { attemptId: number }
 
 export type PasswordLoginResult = SessionState
 

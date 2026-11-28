@@ -57,6 +57,9 @@ const makeAuthValue = (overrides: Partial<AuthContextValue> = {}): AuthContextVa
   showRuntimeConfigSelector: false,
   dependencyHealth: null,
   hasDependencyOutage: false,
+  loginScreen: { kind: 'loading' },
+  browserSignIn: { attemptId: null, phase: 'idle' },
+  refreshLoginMethods: vi.fn(),
   setBooting: vi.fn(),
   setEmail: vi.fn(),
   setPassword: vi.fn(),
@@ -80,6 +83,8 @@ const makeAuthValue = (overrides: Partial<AuthContextValue> = {}): AuthContextVa
   handleConfirmDesktopEnvironmentSetup: vi.fn(),
   handleOpenDesktopRelease: vi.fn(),
   handleLogout: vi.fn(),
+  handleStartBrowserSignIn: vi.fn(),
+  handleCancelBrowserSignIn: vi.fn(),
   ...overrides,
 })
 

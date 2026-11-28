@@ -8,6 +8,8 @@ import {
   AccessCatalog,
   AgentWithMcpServers,
   ApprovalDecisionResult,
+  BrowserSignInSnapshot,
+  BrowserSignInStartResult,
   ChatAuthorityScope,
   ChatDeleteFence,
   ChatDeleteResult,
@@ -33,6 +35,7 @@ import {
   HostRuntimeStatus,
   HostStatusStreamEvent,
   LoginBackendHint,
+  LoginMethodsAnswer,
   MessageToolStep,
   PasswordLoginResult,
   PendingWorkflowApproval,
@@ -92,6 +95,13 @@ declare global {
         deleteRuntimeConfig: (optionId: string) => Promise<DesktopRuntimeConfigState>
         googleLogin: (idToken: string) => Promise<SessionState>
         passwordLogin: (email: string, password: string) => Promise<PasswordLoginResult>
+        getLoginMethods: () => Promise<LoginMethodsAnswer>
+        startBrowserSignIn: () => Promise<BrowserSignInStartResult>
+        cancelBrowserSignIn: () => Promise<BrowserSignInSnapshot>
+        getBrowserSignInState: () => Promise<BrowserSignInSnapshot>
+        acknowledgeBrowserSignInResult: (attemptId: number) => Promise<BrowserSignInSnapshot>
+        /** `auth:browserSignInResult`: every snapshot change, in the shape the state read returns. */
+        onBrowserSignInChanged: (callback: (snapshot: BrowserSignInSnapshot) => void) => () => void
         diagnoseLoginBackend: () => Promise<LoginBackendHint | null>
         probeLocalhostReachable: () => Promise<boolean>
         openDeploymentDocs: () => Promise<{ opened: true }>

@@ -2,6 +2,23 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { AuthClient } from './authClient.js'
+import {
+  type BrowserSignInAttempt,
+  BrowserSignInAttempts,
+  type BrowserSignInClock,
+  createBrowserSignInSecrets,
+  mapDesktopLoginErrorLink,
+  mapRedeemAnswer,
+  parseRedeemResult,
+} from './browserSignIn.js'
+import {
+  type DesktopLoginLink,
+  type RedeemHttpAnswer,
+  buildDesktopLoginPageUrl,
+  buildLoginMethodsModel,
+  parseDesktopLoginLink,
+  readUsableOidc,
+} from './browserSignInModel.js'
 import { bindChatStoreForUser, unbindChatStore } from './chatStoreBinding.js'
 import {
   clearDesktopRuntimeConfigSelection,
@@ -62,6 +79,8 @@ import {
   ApprovalDecisionResult,
   ApprovalMode,
   ApprovalModeResult,
+  BrowserSignInSnapshot,
+  BrowserSignInStartResult,
   ChatAuthorityScope,
   ContextBreakdownResult,
   DependencyHealth,
@@ -78,6 +97,8 @@ import {
   HostRuntimeStatus,
   HostStatusStreamEvent,
   LoginBackendHint,
+  LoginMethodsAnswer,
+  LoginResult,
   PasswordLoginResult,
   PendingWorkflowApproval,
   PrewarmHostResult,
@@ -886,6 +907,17 @@ export interface AppServiceOptions {
   tokenStore?: TokenStore
   onSandboxUiSessionInvalidated?: () => void
   onSessionCleared?: () => void
+  /** Each browser sign-in snapshot change, pushed after the change (D6, D13). */
+  onBrowserSignInChanged?: (snapshot: BrowserSignInSnapshot) => void
+  /** Whether this build receives browser sign-in links. Defaults to false (decision 2). */
+  browserSignInLinksAvailable?: boolean
+  /**
+   * Test-only. Called synchronously after each generation advance, inside its own guard.
+   * main.ts never passes it.
+   */
+  onSessionGenerationAdvanced?: (value: number) => void
+  /** Test-only clock for the browser sign-in deadline. main.ts never passes it. */
+  browserSignInClock?: BrowserSignInClock
   /** Transport, clock and logging seams of the GFS watch client; tests only. */
   gfsWatch?: Pick<GfsWatchClientDeps, 'fetch' | 'requestJson' | 'clock' | 'random' | 'log'>
 }
@@ -911,6 +943,10 @@ export class AppService {
   private readonly tokenStore: TokenStore
   private readonly onSandboxUiSessionInvalidated?: () => void
   private readonly onSessionCleared?: () => void
+  private readonly onBrowserSignInChanged?: (snapshot: BrowserSignInSnapshot) => void
+  private readonly onSessionGenerationAdvanced?: (value: number) => void
+  private readonly browserSignInLinksAvailable: boolean
+  private readonly browserSignIn: BrowserSignInAttempts
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
   private sessionToken: string | null = null
   private me: SessionMe | null = null
@@ -969,7 +1005,8 @@ export class AppService {
     controller: AbortController
     promise: Promise<unknown>
   }>()
-  private sessionGeneration = 0
+  // V1. Read and written only through the `sessionGeneration` accessor pair (D6).
+  private sessionGenerationValue = 0
   private sandboxUiLifecycleQueue: Promise<void> = Promise.resolve()
   private workflowApprovalTeamById = new Map<string, string>()
   private workflowTeamByKey = new Map<string, string>()
@@ -1016,6 +1053,20 @@ export class AppService {
     this.tokenStore = options.tokenStore ?? new TokenStore()
     this.onSandboxUiSessionInvalidated = options.onSandboxUiSessionInvalidated
     this.onSessionCleared = options.onSessionCleared
+    this.onBrowserSignInChanged = options.onBrowserSignInChanged
+    this.onSessionGenerationAdvanced = options.onSessionGenerationAdvanced
+    this.browserSignInLinksAvailable = options.browserSignInLinksAvailable ?? false
+    this.browserSignIn = new BrowserSignInAttempts({
+      push: snapshot => this.onBrowserSignInChanged?.(snapshot),
+      // Read at each call, so a console spy set up after construction still sees the line. The
+      // store hands over the error's class only (D18).
+      warn: (message, errorClass) => console.warn(message, errorClass),
+      clock: options.browserSignInClock ?? {
+        now: Date.now,
+        setTimer: setTimeout,
+        clearTimer: clearTimeout,
+      },
+    })
     this.gfsWatch = createGfsWatchClient({
       ...options.gfsWatch,
       baseUrl: () => config.externalRestApiBaseUrl,
@@ -1028,6 +1079,33 @@ export class AppService {
           )
         }),
     })
+  }
+
+  /** V1, the session generation. */
+  private get sessionGeneration(): number {
+    return this.sessionGenerationValue
+  }
+
+  /**
+   * Every generation advance comes through here, so none can skip the browser sign-in hook (D6).
+   * It writes V1, then ends a waiting attempt `replaced`, then tells the test-only observer. The
+   * hook never throws and pushes nothing before it returns; a throw from the observer is logged
+   * and never reaches the bump site, which may be the first statement of a logout.
+   */
+  private set sessionGeneration(value: number) {
+    this.sessionGenerationValue = value
+    this.browserSignIn.onGenerationAdvanced()
+    const observe = this.onSessionGenerationAdvanced
+    if (!observe) return
+    try {
+      observe(value)
+    } catch (error) {
+      // Only the error's class: a message may carry a URL (D18).
+      console.warn(
+        '[AppService] The session generation observer failed:',
+        error instanceof Error ? error.name : typeof error
+      )
+    }
   }
 
   private static dedupe(values: string[]): string[] {
@@ -1151,18 +1229,28 @@ export class AppService {
     }
   }
 
+  /**
+   * Whether `binding` is still the active environment: the same profile id and the same REST
+   * endpoint. A throw from capturing the active binding is not caught here.
+   */
+  private authEnvironmentBindingMatches(binding: {
+    environmentKey: string
+    profileId: string | null
+    restBaseUrl: string
+  }): boolean {
+    const current = this.captureAuthEnvironmentBinding()
+    return (
+      current.profileId === binding.profileId &&
+      sameDesktopRestEndpoint(current.restBaseUrl, binding.restBaseUrl)
+    )
+  }
+
   private assertAuthEnvironmentBinding(binding: {
     environmentKey: string
     profileId: string | null
     restBaseUrl: string
   }): void {
-    const current = this.captureAuthEnvironmentBinding()
-    if (
-      current.profileId !== binding.profileId ||
-      !sameDesktopRestEndpoint(current.restBaseUrl, binding.restBaseUrl)
-    ) {
-      throw new Error('stale_runtime_environment')
-    }
+    if (!this.authEnvironmentBindingMatches(binding)) throw new Error('stale_runtime_environment')
   }
 
   private runtimeConfigDiscoveryMatchesCurrentBinding(discovery: RuntimeConfigDiscovery): boolean {
@@ -2119,6 +2207,28 @@ export class AppService {
     return this.sessionGeneration
   }
 
+  /**
+   * Test seam (state model §7.3, seam 2); not exposed over IPC. Whether a session token and a
+   * principal are set, read with no side effect. Unlike `getSessionState`, it never runs a
+   * restore, and unlike `getCachedUserId`, it shows a half-written session.
+   */
+  getSessionPresence(): { hasToken: boolean; hasMe: boolean } {
+    return { hasToken: this.sessionToken !== null, hasMe: this.me !== null }
+  }
+
+  /**
+   * Test seam; not exposed over IPC. Resolves once the auth owner queue is idle: it awaits the
+   * queue's tail again while ops were queued during the wait. The tail never rejects
+   * (`withNativeAuthEnvironmentCommit`).
+   */
+  async whenAuthCommitsSettled(): Promise<void> {
+    for (;;) {
+      const tail = this.nativeAuthEnvironmentCommitQueue
+      await tail
+      if (this.nativeAuthEnvironmentCommitQueue === tail) return
+    }
+  }
+
   private assertSessionGeneration(expectedSessionGeneration: number): void {
     if (this.sessionGeneration !== expectedSessionGeneration) {
       throw new Error('stale_session_generation')
@@ -2330,15 +2440,26 @@ export class AppService {
       })
     } finally {
       if (registered) {
-        await this.withNativeAuthEnvironmentCommit(async () => {
-          this.interactiveLoginAttempts = Math.max(0, this.interactiveLoginAttempts - 1)
-          if (this.interactiveLoginAttempts === 0 && !this.sessionToken && !this.me) {
-            await this.commitPendingRuntimeConfigDiscoveryIfSafe().catch(() => undefined)
-          }
-          if (this.interactiveLoginAttempts === 0) await this.endSessionRejectedDuringLogin()
-        })
+        await this.withNativeAuthEnvironmentCommit(() => this.settleInteractiveLoginAttempt())
       }
     }
+  }
+
+  /**
+   * The settle step of an interactive login (D11). Its caller runs it inside an owner op, once
+   * per registered attempt. The last attempt to settle while signed out commits a pending
+   * discovery, and the last to settle ends a session that `/me` rejected while logins ran.
+   */
+  private async settleInteractiveLoginAttempt(): Promise<void> {
+    this.interactiveLoginAttempts = Math.max(0, this.interactiveLoginAttempts - 1)
+    if (this.interactiveLoginAttempts === 0 && !this.sessionToken && !this.me) {
+      // Dropping this error is correct: a discovery whose save fails stays pending
+      // (`applyRuntimeConfigDiscovery` clears it only after the save), so the next signed-out
+      // commit site retries it. Rethrowing from the login's `finally` would replace the
+      // login's own result or error.
+      await this.commitPendingRuntimeConfigDiscoveryIfSafe().catch(() => undefined)
+    }
+    if (this.interactiveLoginAttempts === 0) await this.endSessionRejectedDuringLogin()
   }
 
   private async openProfileDesktopSetup(email: string): Promise<{
@@ -2525,14 +2646,326 @@ export class AppService {
       return await this.completePasswordLogin(normalizedEmail, password, loginGeneration)
     } finally {
       if (registered) {
-        await this.withNativeAuthEnvironmentCommit(async () => {
-          this.interactiveLoginAttempts = Math.max(0, this.interactiveLoginAttempts - 1)
-          if (this.interactiveLoginAttempts === 0 && !this.sessionToken && !this.me) {
-            await this.commitPendingRuntimeConfigDiscoveryIfSafe().catch(() => undefined)
-          }
-          if (this.interactiveLoginAttempts === 0) await this.endSessionRejectedDuringLogin()
-        })
+        await this.withNativeAuthEnvironmentCommit(() => this.settleInteractiveLoginAttempt())
       }
+    }
+  }
+
+  /**
+   * The login screen's model for the active environment (E12; design §10.1). One owner op
+   * captures the generation and the binding and dispatches the methods read to the binding's REST
+   * URL; the read is awaited outside the owner. The answer carries the generation captured at
+   * dispatch, so the renderer drops a model read for an older binding. With no environment
+   * configured it refuses `desktop_setup_required` without fetching, so it never reads the
+   * fallback REST URL.
+   */
+  async getLoginMethods(): Promise<LoginMethodsAnswer> {
+    const dispatch = await this.withNativeAuthEnvironmentCommit(async () => {
+      hydrateDesktopRuntimeConfig()
+      if (!isDesktopRuntimeConfigured()) throw new Error('desktop_setup_required')
+      const binding = this.captureAuthEnvironmentBinding()
+      return {
+        generation: this.sessionGeneration,
+        read: this.authClient.getLoginMethodsAt(binding.restBaseUrl),
+      }
+    })
+    const answer = await dispatch.read
+    return {
+      model: buildLoginMethodsModel(answer, { linksAvailable: this.browserSignInLinksAvailable }),
+      generation: dispatch.generation,
+    }
+  }
+
+  /**
+   * Starts a browser sign-in (D3, D4, D5, D16). Refusals are thrown as `Error('<code>')`.
+   * - Op 1, in the owner: refuses `desktop_setup_required` with no environment configured,
+   *   `browser_sign_in_requires_signout` while signed in, `browser_sign_in_unavailable_here`
+   *   where links cannot arrive, and `browser_sign_in_finishing` while an attempt redeems. Then
+   *   it advances the generation, which ends a waiting predecessor `replaced` (D3, D6), captures
+   *   the binding and dispatches its own methods read to the binding's REST URL. It never takes
+   *   `signInUrl` from the renderer or from an earlier read.
+   * - The read is awaited outside the owner.
+   * - Op 2, in the owner: refuses `stale_session_generation` or `stale_runtime_environment` when
+   *   the read crossed a generation advance or a binding change, `methods_unavailable` when the
+   *   environment could not be read, and `browser_sign_in_not_offered` when its answer has no
+   *   usable `oidc`. Desktop checks the `signInUrl` shape (PR 2's parser), never its origin: the
+   *   page is served on another origin than the REST URL. Then it records the attempt.
+   * - The browser opens outside the owner, once. If it cannot, that attempt, by its id, ends
+   *   `failed` if it still waits (A3-66), and start refuses `browser_open_failed`.
+   */
+  async startBrowserSignIn(): Promise<BrowserSignInStartResult> {
+    const dispatch = await this.withNativeAuthEnvironmentCommit(async () => {
+      hydrateDesktopRuntimeConfig()
+      if (!isDesktopRuntimeConfigured()) throw new Error('desktop_setup_required')
+      if (this.sessionToken !== null || this.me !== null) {
+        throw new Error('browser_sign_in_requires_signout')
+      }
+      if (!this.browserSignInLinksAvailable) throw new Error('browser_sign_in_unavailable_here')
+      if (this.browserSignIn.current()?.phase === 'redeeming') {
+        throw new Error('browser_sign_in_finishing')
+      }
+      const generation = ++this.sessionGeneration
+      const binding = this.captureAuthEnvironmentBinding()
+      return { generation, binding, read: this.authClient.getLoginMethodsAt(binding.restBaseUrl) }
+    })
+    const answer = await dispatch.read
+    const opening = await this.withNativeAuthEnvironmentCommit(async () => {
+      this.assertSessionGeneration(dispatch.generation)
+      this.assertAuthEnvironmentBinding(dispatch.binding)
+      // `readUsableOidc` is null for `unreachable` too, so this test comes first.
+      if (answer.status === 'unreachable') throw new Error('methods_unavailable')
+      const oidc = readUsableOidc(answer, { linksAvailable: this.browserSignInLinksAvailable })
+      if (oidc === null) throw new Error('browser_sign_in_not_offered')
+      const { verifier, state, challenge } = createBrowserSignInSecrets()
+      // Built before the record: PR 2's builder throws on a value of a bad shape, and a throw
+      // here must leave no attempt waiting for a page that never opens.
+      const pageUrl = buildDesktopLoginPageUrl(oidc.signInUrl, { challenge, state })
+      const attemptId = this.browserSignIn.record({
+        state,
+        verifier,
+        binding: dispatch.binding,
+        generation: dispatch.generation,
+      })
+      return { attemptId, pageUrl }
+    })
+    try {
+      await openExternalDataUrl(opening.pageUrl, { requireHttps: true })
+    } catch {
+      // The error is neither logged nor passed on: Electron's rejection may echo the page URL,
+      // whose fragment carries the state (D18). The fixed code tells the renderer what happened.
+      this.browserSignIn.endIfWaiting(opening.attemptId, { outcome: 'failed' })
+      console.warn('[AppService] Browser sign-in could not open the browser')
+      throw new Error('browser_open_failed')
+    }
+    return { attemptId: opening.attemptId }
+  }
+
+  /**
+   * Cancel (D10): a waiting attempt ends `cancelled`; a redeeming one is left to finish. Returns
+   * the snapshot.
+   */
+  cancelBrowserSignIn(): BrowserSignInSnapshot {
+    return this.browserSignIn.cancel()
+  }
+
+  /**
+   * The snapshot (V14), once the deadline is applied (D12, A3-67): a waiting attempt past its
+   * wall-clock deadline ends `timed_out` here, and that end is pushed as any other is (D6). An
+   * `ended` outcome stays until the renderer acknowledges it, however often it is read (D13). The
+   * snapshot carries the attempt id, the phase and the closed outcome and reason, nothing else
+   * (D18).
+   */
+  getBrowserSignInState(): BrowserSignInSnapshot {
+    return this.browserSignIn.snapshot()
+  }
+
+  /**
+   * The renderer's acknowledgement of an outcome it has shown (D13): `ended` for `attemptId`
+   * becomes `idle` for it, which is pushed. An acknowledgement for any other id, such as an older
+   * attempt's, is ignored (A3-54). It does not apply the deadline (A3-67). Returns the snapshot.
+   */
+  acknowledgeBrowserSignInResult(attemptId: number): BrowserSignInSnapshot {
+    return this.browserSignIn.acknowledge(attemptId)
+  }
+
+  /**
+   * The deadline check for a resume or an unlock-screen (D12), where a sleep may have kept the
+   * deadline timer from firing: a waiting attempt past its wall-clock deadline ends `timed_out`,
+   * and that end is pushed (deferred, D6), so a renderer that reads nothing still learns of it
+   * (A3-26). `main.ts`'s power monitor calls it on `resume` and `unlock-screen`.
+   */
+  checkBrowserSignInDeadline(): void {
+    this.browserSignIn.checkDeadline()
+  }
+
+  /**
+   * A `desktop-login` link from main's handler (D8, D9). The sync pre-match parses it with PR 2's
+   * parser and matches its state against the waiting attempt, with the deadline applied; any
+   * other link is dropped with no log, push or window. A match queues the acceptance op in the
+   * auth owner before this returns `true`, so the op runs ahead of any restore that a new
+   * window's boot starts (A3-33). `true` raises the window.
+   *
+   * It never throws to the router: an unexpected error is logged with fixed text and the error's
+   * class, never the link, and the link is dropped.
+   */
+  acceptDesktopLoginLink(rawUrl: string): boolean {
+    try {
+      const link = parseDesktopLoginLink(rawUrl)
+      if (link === null) return false
+      const attempt = this.browserSignIn.matchWaiting(link.state)
+      if (attempt === null) return false
+      const attemptId = attempt.id
+      void this.completeDesktopLogin(attemptId, link).catch((error: unknown) => {
+        // R-4, R-25: the window is raised. An attempt left `redeeming` would never end (L1), and
+        // one still `waiting`, because the acceptance op threw before the redeem, would wait for
+        // its deadline. One more owner op ends it `failed`; `end` does nothing to an attempt that
+        // has ended or been replaced. A counted redeem has already settled its count in
+        // `completeDesktopLogin`'s `finally` (D11). The op cannot reject: `end` only writes memory
+        // and defers its push (D6). Only the error's class is logged: a message can carry a URL
+        // or a server body (D18).
+        void this.withNativeAuthEnvironmentCommit(async () => {
+          this.browserSignIn.end(attemptId, { outcome: 'failed' })
+        })
+        console.warn(
+          '[AppService] Browser sign-in link handling failed:',
+          error instanceof Error ? error.name : typeof error
+        )
+      })
+      return true
+    } catch (error) {
+      // The router must not see a throw (D8); the link is dropped and the attempt, if one waits,
+      // keeps waiting. Only the error's class is logged, never the link (D18).
+      console.warn(
+        '[AppService] Browser sign-in link acceptance failed:',
+        error instanceof Error ? error.name : typeof error
+      )
+      return false
+    }
+  }
+
+  /**
+   * D9 for attempt `attemptId` after its pre-match: the acceptance op, the redeem awaited outside
+   * the owner, then the install op. The code lives only in `link` and the request body (D18).
+   * The first owner op is queued before the first `await`, so the caller's `true` follows it.
+   *
+   * D11: the acceptance op counts the redeem as an interactive login when it begins it, so setup,
+   * the handoff and a restore wait for it as they wait for a password login. Once the install op
+   * has run, or the redeem has failed, the `finally` settles the count in its own owner op, as
+   * Google and password login do. A link that redeems nothing is never counted or settled.
+   */
+  private async completeDesktopLogin(attemptId: number, link: DesktopLoginLink): Promise<void> {
+    const login = { counted: false }
+    try {
+      const dispatch = await this.withNativeAuthEnvironmentCommit(async () =>
+        this.acceptDesktopLogin(attemptId, link, login)
+      )
+      if (dispatch === null) return
+      const answer = await dispatch.redeem
+      // The redeem 200 is the one arm with a body; its status alone overlaps the other HTTP arm.
+      const session = 'body' in answer ? AppService.readRedeemedSession(answer.body) : null
+      await this.withNativeAuthEnvironmentCommit(async () => {
+        const attempt = this.browserSignIn.current()
+        if (attempt === null || attempt.id !== attemptId || attempt.phase !== 'redeeming') return
+        // A generation advance during the redeem (D2), or a binding change (D7): the answer is
+        // discarded, whatever it was.
+        const found = this.isBrowserSignInAttemptCurrent(attempt)
+        if (found !== 'current') {
+          this.endStaleBrowserSignIn(attemptId, found)
+          return
+        }
+        if (!('body' in answer)) {
+          this.browserSignIn.end(attemptId, mapRedeemAnswer(answer))
+          return
+        }
+        if (session === null) {
+          this.browserSignIn.end(attemptId, { outcome: 'failed' })
+          return
+        }
+        try {
+          // `installAuthenticatedLogin` asserts the attempt's generation again first.
+          await this.installAuthenticatedLogin(session, attempt.generation)
+        } catch (error) {
+          // X1: the attempt ends `failed` whatever the install left behind. The error goes on,
+          // after the settle step below, to the chain's last catch, which logs its class.
+          this.browserSignIn.end(attemptId, { outcome: 'failed' })
+          throw error
+        }
+        this.browserSignIn.end(attemptId, { outcome: 'signed_in' })
+      })
+    } finally {
+      if (login.counted) {
+        await this.withNativeAuthEnvironmentCommit(() => this.settleInteractiveLoginAttempt())
+      }
+    }
+  }
+
+  /**
+   * The acceptance op (D9), run inside the owner. It re-checks the attempt (waiting, its state
+   * and the deadline, through `matchWaiting`) and that it is current (D7). An `error` link ends
+   * it (D17); a code for another environment ends it `failed(different_environment)` with
+   * nothing redeemed. Otherwise the attempt moves to `redeeming`, the redeem is counted as an
+   * interactive login and marked in `login` for the caller to settle (D11), and the one redeem
+   * goes to its bound REST URL, never retried. Returns that request, wrapped so the owner does
+   * not await it, or null when nothing was sent.
+   */
+  private acceptDesktopLogin(
+    attemptId: number,
+    link: DesktopLoginLink,
+    login: { counted: boolean }
+  ): { redeem: Promise<RedeemHttpAnswer> } | null {
+    const attempt = this.browserSignIn.matchWaiting(link.state)
+    if (attempt === null || attempt.id !== attemptId) return null
+    const found = this.isBrowserSignInAttemptCurrent(attempt)
+    if (found !== 'current') {
+      this.endStaleBrowserSignIn(attemptId, found)
+      return null
+    }
+    switch (link.kind) {
+      case 'error':
+        this.browserSignIn.end(attemptId, mapDesktopLoginErrorLink(link))
+        return null
+      case 'code':
+        // C1, A3-30: the same endpoint as the attempt's, compared as discovery compares it (host
+        // case, one root dot and trailing slashes aside), never by prefix. This stops another
+        // environment from relaying a code (design §13).
+        if (!sameDesktopRestEndpoint(link.environment, attempt.binding.restBaseUrl)) {
+          this.browserSignIn.end(attemptId, { outcome: 'failed', reason: 'different_environment' })
+          return null
+        }
+        if (!this.browserSignIn.beginRedeem(attemptId)) return null
+        // D11, in the op that began the redeem. The mark comes before the dispatch, so whatever
+        // happens from here, the caller's `finally` settles this count once.
+        this.interactiveLoginAttempts += 1
+        login.counted = true
+        return {
+          redeem: this.authClient.redeemDesktopSignInAt(attempt.binding.restBaseUrl, {
+            code: link.code,
+            codeVerifier: attempt.verifier,
+          }),
+        }
+      default: {
+        // R-7: a new link kind in PR 2's type fails to compile here. At run time the parser
+        // returns only the two kinds above; anything else would still end the attempt once.
+        const unhandled: never = link
+        void unhandled
+        this.browserSignIn.end(attemptId, { outcome: 'failed' })
+        return null
+      }
+    }
+  }
+
+  /**
+   * D7: whether `attempt` still belongs to this session and environment. A moved generation is
+   * `replaced` (D2); the same generation with another binding (profile id or REST endpoint) is
+   * `environment_changed`. A throw from capturing the active binding goes on to the link
+   * chain's last catch.
+   */
+  private isBrowserSignInAttemptCurrent(
+    attempt: BrowserSignInAttempt
+  ): 'current' | 'replaced' | 'environment_changed' {
+    if (attempt.generation !== this.sessionGeneration) return 'replaced'
+    return this.authEnvironmentBindingMatches(attempt.binding) ? 'current' : 'environment_changed'
+  }
+
+  /** Ends attempt `attemptId` as D7 found it: `replaced`, or `failed(environment_changed)`. */
+  private endStaleBrowserSignIn(attemptId: number, found: 'replaced' | 'environment_changed') {
+    this.browserSignIn.end(
+      attemptId,
+      found === 'replaced'
+        ? { outcome: 'replaced' }
+        : { outcome: 'failed', reason: 'environment_changed' }
+    )
+  }
+
+  /** A redeem 200's session, or null when Desktop cannot install it (R-4, Review Focus 4). */
+  private static readRedeemedSession(body: unknown): LoginResult | null {
+    try {
+      return parseRedeemResult(body)
+    } catch {
+      // Not rethrown: an unusable 200 is an end state, `failed`, which the install op writes
+      // after its current checks (R-4). The body is the server's and is not logged (D18).
+      console.warn('[AppService] Browser sign-in answer is not a usable session')
+      return null
     }
   }
 

@@ -2,6 +2,7 @@ import { BrowserWindow, IpcMainEvent, app, ipcMain, nativeTheme, powerMonitor } 
 import fs from 'node:fs'
 import path from 'node:path'
 import { AppService } from './appService.js'
+import { createDesktopLoginLinkHandler } from './browserSignIn.js'
 import { routeClerumOauthCompleted } from './clerumDeepLink.js'
 import {
   config,
@@ -104,6 +105,15 @@ const appService = new AppService({
       mainWindow.webContents.send('auth:sessionCleared')
     }
   },
+  // C-1: the snapshot crosses as the service built it. With no window nothing is sent; the
+  // snapshot stays in the service, where auth:getBrowserSignInState returns it (D13).
+  onBrowserSignInChanged: snapshot => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('auth:browserSignInResult', snapshot)
+    }
+  },
+  // An instance that routes no deep links never receives the `desktop-login` link (D16).
+  browserSignInLinksAvailable: devIsolationPolicy.acceptDeepLinks,
 })
 const gfsResourceDeepLinkQueue = new GfsResourceDeepLinkQueue()
 const gfsUserNavigationGeneration = new GfsUserNavigationGeneration()
@@ -194,6 +204,8 @@ function emitWindowControlsState(win: BrowserWindow): void {
  * app-wide (not per-window); `send` is a no-op when the webContents is gone.
  * The sandbox UI session loop gets the same tick: a cookie that expired during
  * sleep is re-minted now instead of whenever its timer catches up.
+ * The browser sign-in deadline is checked first (D12): a sleep may have kept its
+ * timer from firing, and a throwing listener ahead of it would skip the check.
  */
 function wirePowerMonitor(): void {
   const emit = () => {
@@ -201,6 +213,9 @@ function wirePowerMonitor(): void {
       mainWindow.webContents.send('system:resume')
     }
   }
+  const checkBrowserSignInDeadline = () => appService.checkBrowserSignInDeadline()
+  powerMonitor.on('resume', checkBrowserSignInDeadline)
+  powerMonitor.on('unlock-screen', checkBrowserSignInDeadline)
   powerMonitor.on('resume', emit)
   powerMonitor.on('unlock-screen', emit)
   powerMonitor.on('resume', notifySandboxUiHostResumed)
@@ -411,12 +426,34 @@ function handleGfsResourceDeepLink(rawUrl: string): boolean {
   return true
 }
 
+// D8: only a link that matches the waiting attempt requests the window, and on macOS that request
+// also cancels a deferred quit (A3-70).
+const handOffDesktopLoginLink = createDesktopLoginLinkHandler({
+  accept: rawUrl => appService.acceptDesktopLoginLink(rawUrl),
+  requestMainWindow,
+})
+
+function handleDesktopLoginLink(rawUrl: string): void {
+  try {
+    handOffDesktopLoginLink(rawUrl)
+  } catch (error) {
+    // Acceptance never throws by contract. If the hand-off throws anyway, the link is dropped
+    // here, so the throw cannot leave the `open-url` or `second-instance` handler and stop the
+    // links after it. Only the error's class is logged: its message may carry the link (D18).
+    console.warn(
+      '[Desktop] A desktop-login link could not be handled:',
+      error instanceof Error ? error.name : typeof error
+    )
+  }
+}
+
 const evenfireDeepLinkRouter = createEvenfireDeepLinkRouter<BrowserWindow>({
   appProtocol: DESKTOP_SETUP_PROTOCOL,
   focusMainWindow,
   getWindow: () => mainWindow,
   handleSandboxUiDeepLink,
   handleGfsResourceDeepLink,
+  handleDesktopLoginLink,
   gfsResourceDeepLinkHost: GFS_RESOURCE_DEEP_LINK_HOST,
   isRendererReady: () => mainWindowRendererReady,
   logout: logoutAndClearGfsResourceDeepLinks,

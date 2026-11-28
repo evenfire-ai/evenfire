@@ -12,6 +12,12 @@ const auth = {
   onDesktopEnvironmentSetup: vi.fn(),
   onExternalLogout: vi.fn(),
   onSessionCleared: vi.fn(),
+  getLoginMethods: vi.fn(),
+  getBrowserSignInState: vi.fn(),
+  onBrowserSignInChanged: vi.fn(),
+  startBrowserSignIn: vi.fn(),
+  cancelBrowserSignIn: vi.fn(),
+  acknowledgeBrowserSignInResult: vi.fn(),
 }
 
 let sessionClearedListener: Listener | null = null
@@ -25,6 +31,12 @@ beforeEach(() => {
   auth.onDesktopSetupToken.mockReturnValue(() => undefined)
   auth.onDesktopEnvironmentSetup.mockReturnValue(() => undefined)
   auth.onExternalLogout.mockReturnValue(() => undefined)
+  auth.getLoginMethods.mockResolvedValue({
+    model: { kind: 'methods', provider: null, password: true },
+    generation: 0,
+  })
+  auth.getBrowserSignInState.mockResolvedValue({ attemptId: null, phase: 'idle' })
+  auth.onBrowserSignInChanged.mockReturnValue(() => undefined)
   auth.onSessionCleared.mockReset()
   auth.onSessionCleared.mockImplementation((listener: Listener) => {
     sessionClearedListener = listener

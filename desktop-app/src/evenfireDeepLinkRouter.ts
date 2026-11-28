@@ -1,3 +1,5 @@
+import { DESKTOP_LOGIN_DEEP_LINK_HOST } from './browserSignInModel.js'
+
 type RendererTarget = {
   isDestroyed: () => boolean
   webContents: {
@@ -11,6 +13,11 @@ type EvenfireDeepLinkRouterOptions<TWindow extends RendererTarget> = {
   getWindow: () => TWindow | null
   handleSandboxUiDeepLink: (rawUrl: string) => boolean
   handleGfsResourceDeepLink: (rawUrl: string) => boolean
+  /**
+   * Main's `desktop-login` handler (D8). The router calls it synchronously and does nothing else
+   * with the link: no send, no focus, no queue, no log.
+   */
+  handleDesktopLoginLink: (rawUrl: string) => void
   isRendererReady: () => boolean
   logout: () => Promise<unknown>
   gfsResourceDeepLinkHost: string
@@ -44,7 +51,29 @@ export function createEvenfireDeepLinkRouter<TWindow extends RendererTarget>(
     return window
   }
 
+  /**
+   * The parsed link and its lower-cased host when `rawUrl` is an app-protocol URL; otherwise
+   * null. `handle` and `enqueuePending` both classify through it, so they agree on every host in
+   * any letter case.
+   */
+  const parseAppLink = (rawUrl: string): Readonly<{ parsed: URL; hostname: string }> | null => {
+    let parsed: URL
+    try {
+      parsed = new URL(rawUrl)
+    } catch {
+      // Not a URL, so no link this router serves: it is dropped, as before. It is not logged,
+      // because the string may carry a code or a token (D18).
+      return null
+    }
+    if (parsed.protocol !== `${appProtocol}:`) return null
+    return { parsed, hostname: parsed.hostname.toLowerCase() }
+  }
+
   const enqueuePending = (rawUrl: string): void => {
+    // A desktop-login link is never queued (D8, A3-31): it carries a code, and it would take the
+    // slot of a queued setup link. The links main.ts queues are the ones the app was launched
+    // with, and no attempt (kept in memory only) can be waiting for those.
+    if (parseAppLink(rawUrl)?.hostname === DESKTOP_LOGIN_DEEP_LINK_HOST) return
     if (pendingEvenfireUrls.includes(rawUrl)) return
     pendingEvenfireUrls.push(rawUrl)
     if (pendingEvenfireUrls.length > maxPendingUrls) {
@@ -89,15 +118,15 @@ export function createEvenfireDeepLinkRouter<TWindow extends RendererTarget>(
   }
 
   const handle = (rawUrl: string): void => {
-    let parsed: URL
-    try {
-      parsed = new URL(rawUrl)
-    } catch {
+    const appLink = parseAppLink(rawUrl)
+    if (appLink === null) return
+    const { parsed, hostname } = appLink
+
+    if (hostname === DESKTOP_LOGIN_DEEP_LINK_HOST) {
+      options.handleDesktopLoginLink(rawUrl)
       return
     }
-    if (parsed.protocol !== `${appProtocol}:`) return
 
-    const hostname = parsed.hostname.toLowerCase()
     if (hostname === sandboxUiDeepLinkHost) {
       if (!options.shouldAcceptSandboxUiProtocolLink(rawUrl)) return
       options.handleSandboxUiDeepLink(rawUrl)

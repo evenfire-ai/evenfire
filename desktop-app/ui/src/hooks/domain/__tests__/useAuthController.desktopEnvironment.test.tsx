@@ -26,6 +26,12 @@ const mocks = vi.hoisted(() => ({
   selectRuntimeConfigForHandoff: vi.fn(),
   setStatus: vi.fn(),
   loadSession: vi.fn(),
+  getLoginMethods: vi.fn(),
+  getBrowserSignInState: vi.fn(),
+  onBrowserSignInChanged: vi.fn(),
+  startBrowserSignIn: vi.fn(),
+  cancelBrowserSignIn: vi.fn(),
+  acknowledgeBrowserSignInResult: vi.fn(),
 }))
 
 vi.mock('@lib/queryClient', () => ({
@@ -209,6 +215,12 @@ beforeEach(async () => {
   })
   mocks.onExternalLogout.mockReturnValue(() => undefined)
   mocks.onSessionCleared.mockReturnValue(() => undefined)
+  mocks.getLoginMethods.mockResolvedValue({
+    model: { kind: 'methods', provider: null, password: true },
+    generation: 0,
+  })
+  mocks.getBrowserSignInState.mockResolvedValue({ attemptId: null, phase: 'idle' })
+  mocks.onBrowserSignInChanged.mockReturnValue(() => undefined)
   mocks.onDesktopEnvironmentSetup.mockImplementation(
     (listener: (payload: DesktopEnvironmentSetupPayload) => void | Promise<void>) => {
       desktopEnvironmentSetupListener = listener
@@ -229,6 +241,12 @@ beforeEach(async () => {
       completeDesktopSetup: mocks.completeDesktopSetup,
       onExternalLogout: mocks.onExternalLogout,
       onSessionCleared: mocks.onSessionCleared,
+      getLoginMethods: mocks.getLoginMethods,
+      getBrowserSignInState: mocks.getBrowserSignInState,
+      onBrowserSignInChanged: mocks.onBrowserSignInChanged,
+      startBrowserSignIn: mocks.startBrowserSignIn,
+      cancelBrowserSignIn: mocks.cancelBrowserSignIn,
+      acknowledgeBrowserSignInResult: mocks.acknowledgeBrowserSignInResult,
     },
   }
 })

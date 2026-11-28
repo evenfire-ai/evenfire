@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "activeProfileId": "legacy-bare-1795629013016",
+  "profiles": [
+    {
+      "id": "legacy-slash-1795629013015",
+      "appName": "Legacy slash",
+      "fileName": "runtime-config-legacy-slash.json",
+      "createdAt": "2026-11-25T17:50:13.015Z",
+      "updatedAt": "2026-11-25T17:50:13.015Z"
+    },
+    {
+      "id": "legacy-bare-1795629013016",
+      "appName": "Legacy bare",
+      "fileName": "runtime-config-legacy-bare.json",
+      "createdAt": "2026-11-25T17:50:13.016Z",
+      "updatedAt": "2026-11-25T17:50:13.016Z"
+    }
+  ]
+}

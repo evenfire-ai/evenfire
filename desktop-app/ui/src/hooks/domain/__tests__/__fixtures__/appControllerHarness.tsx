@@ -335,6 +335,16 @@ export function extendMockClerumForAppController(
       onDesktopEnvironmentSetup,
       onExternalLogout: vi.fn(() => () => undefined),
       onSessionCleared: vi.fn(() => () => undefined),
+      // Browser sign-in (design §10.1): the password form, and no attempt.
+      getLoginMethods: vi.fn(async () => ({
+        model: { kind: 'methods', provider: null, password: true },
+        generation: 0,
+      })),
+      getBrowserSignInState: vi.fn(async () => ({ attemptId: null, phase: 'idle' })),
+      onBrowserSignInChanged: vi.fn(() => () => undefined),
+      startBrowserSignIn: vi.fn(),
+      cancelBrowserSignIn: vi.fn(),
+      acknowledgeBrowserSignInResult: vi.fn(),
     },
     team: {
       list: vi.fn(async () => teamDirectoryPayload),

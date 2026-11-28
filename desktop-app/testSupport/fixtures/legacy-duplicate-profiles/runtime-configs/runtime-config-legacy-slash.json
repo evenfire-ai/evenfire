@@ -1,0 +1,5 @@
+{
+  "externalRestApiBaseUrl": "https://api-x.example.test/",
+  "rpcProxyBaseUrl": "",
+  "appName": "Legacy slash"
+}
