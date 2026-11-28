@@ -249,14 +249,16 @@ describe('typed-git redirect', () => {
     expect(redirected(second.toolMessages[0])).toBe(true)
   })
 
-  it('a denied shell is redirected', async () => {
+  it('a shell the user denied is not redirected: the shell card shows again', async () => {
     const result = await run({
       mode: 'auto',
       turns: [[shell('git status')]],
       prepare: conversation => recordDenial(conversation, 'shell_exec', 'u1'),
     })
-    expect(result.approval).toBeUndefined()
-    expect(redirected(result.toolMessages[0])).toBe(true)
+    expect(result.toolMessages.map(redirected)).toEqual([])
+    // Witness: the denied shell's exact card is pending, as without the redirect.
+    expect(result.approval?.tool_name).toBe('shell_exec')
+    expect(result.approval?.authorization_scope).toBe('exact_invocation')
   })
 
   it('a non-git command is not redirected', async () => {

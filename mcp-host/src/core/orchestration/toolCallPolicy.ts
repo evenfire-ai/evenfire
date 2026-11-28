@@ -413,7 +413,7 @@ async function applyApprovalMode(
   let cause: GateCause | undefined = gate === 'proceed' ? 'none' : gate.cause
   let approval = gate === 'proceed' ? undefined : gate.approval
   let decision = readDecision(config, call, cause)
-  const redirected = typedGitRedirect(config, call, cause, decision)
+  const redirected = typedGitRedirect(config, call, decision)
   if (redirected) return redirected
   if (decision.kind === 'classify') {
     const verdict = await config.approvalMode!.classify(call, approval?.description ?? '')
@@ -463,23 +463,22 @@ function gitReadCardFree(config: LoopConfig): boolean {
 
 /**
  * In auto, a typed read-only git shell command that would be classified or
- * carded (A3, or A5 for a denied shell) is answered with a fixed text that
- * points to `git_read`, once per command text per task. Grants, admin-forced,
- * live and guardrail causes, and every manual or allow-all cell keep today's
- * path.
+ * carded as A3 is answered with a fixed text that points to `git_read`, once
+ * per command text per task. A shell the user denied (A5) is never
+ * redirected: the redirect must not steer around a denial. Grants,
+ * admin-forced, live and guardrail causes, and every manual or allow-all cell
+ * keep today's path.
  */
 function typedGitRedirect(
   config: LoopConfig,
   call: ToolCall,
-  cause: GateCause | undefined,
   decision: ModeDecision
 ): ToolCallAdmission | undefined {
   if (call.name !== 'shell_exec') return undefined
   const command = call.arguments.command
   if (typeof command !== 'string') return undefined
   const eligible =
-    (decision.cell === 'A3' && (decision.kind === 'classify' || decision.kind === 'card')) ||
-    (decision.kind === 'card' && decision.cell === 'A5' && cause === 'denied')
+    decision.cell === 'A3' && (decision.kind === 'classify' || decision.kind === 'card')
   if (!eligible) return undefined
   // Only names-only commands: git_read cards content reads in auto too.
   const typed = matchTypedGitRead(command)

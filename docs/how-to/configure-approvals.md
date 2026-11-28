@@ -149,7 +149,7 @@ choice, so raising it again restores that choice.
 | Mode | What a gated call does |
 | --- | --- |
 | `manual` | Today's card. The classifier is not called. |
-| `auto` | Judges `shell_exec` on the models below. Read-only commands inside the workspace run; anything else shows the shell card. A typed `git` command that only lists repository state (`git status`, `git log` without a patch, branch and tag listings) is answered once with a pointer to `git_read` instead, when no guardrail rule is configured; sending it again takes the shell path. `http_request` runs with no card, and so does a `git_read` call that returns only names and ids; a `git_read` call that can return file content shows a card. Every other tool still shows a card. |
+| `auto` | Judges `shell_exec` on the models below. Read-only commands inside the workspace run; anything else shows the shell card. A typed `git` command that only lists repository state (`git status`, `git log` without a patch, branch and tag listings) is answered once with a pointer to `git_read` instead, when no guardrail rule is configured and you have not denied the shell in that session; sending it again takes the shell path. `http_request` runs with no card, and so does a `git_read` call that returns only names and ids; a `git_read` call that can return file content shows a card. Every other tool still shows a card. |
 | `allow_all` | Runs every call that would have shown a card, except two. `cron_manage` asks exactly when manual would (see below). A guardrail `ask` (an explicit `ask` rule, or the `unmatched_ask` default of a Host with guardrail rules) still shows its card. |
 
 `cron_manage` asks exactly when manual would, in every mode. A task grant

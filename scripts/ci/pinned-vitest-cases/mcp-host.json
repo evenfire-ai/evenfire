@@ -2533,7 +2533,7 @@
   },
   {
     "suite": "gitRedirect.integration.test.ts",
-    "fullName": "typed-git redirect a denied shell is redirected"
+    "fullName": "typed-git redirect a shell the user denied is not redirected: the shell card shows again"
   },
   {
     "suite": "gitRedirect.integration.test.ts",
