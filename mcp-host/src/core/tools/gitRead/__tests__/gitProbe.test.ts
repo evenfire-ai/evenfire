@@ -1,10 +1,8 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   GIT_READ_MIN_VERSION,
   type GitProbeDeps,
-  __resetGitProbeForTest,
   parseGitVersion,
-  probeGitRead,
   probeGitReadWith,
 } from '../probe'
 
@@ -141,14 +139,15 @@ describe('probeGitReadWith', () => {
 })
 
 describe('probeGitRead', () => {
-  afterEach(() => __resetGitProbeForTest())
-
-  it('spawns git once for any number of calls', () => {
-    __resetGitProbeForTest()
+  it('spawns git once for any number of calls', async () => {
+    // A fresh module, so the memo starts empty without a test-only reset.
+    vi.resetModules()
+    const { probeGitRead } = await import('../probe')
     const version = vi.fn(() => 'git version 2.39.5\n')
     const first = probeGitRead(deps({ version }))
     const second = probeGitRead(deps({ version }))
     expect(second).toBe(first)
     expect(version).toHaveBeenCalledTimes(1)
+    expect(first).toMatchObject({ available: true })
   })
 })

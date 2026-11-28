@@ -116,8 +116,3 @@ export function probeGitRead(deps: GitProbeDeps = realDeps): GitReadAvailability
   }
   return memo
 }
-
-/** Test seam: forget the memoised probe. */
-export function __resetGitProbeForTest(): void {
-  memo = undefined
-}
