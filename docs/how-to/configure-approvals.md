@@ -28,8 +28,11 @@ platform-managed paths by name, so content stored in the repository under
 another name is not excluded; that is one reason content reads show a card
 in `auto`. It refuses a
 repository whose configuration has settings it does not accept (drivers,
-filters, includes, signing tools and the like), whose files link outside the
-workspace, or whose index names paths outside the worktree. It also refuses
+filters, includes, signing tools and the like), or whose git directory or
+object stores contain a link that leads outside the workspace or does not
+resolve. For `status`, and for `grep` and `diff` of the worktree, it also
+refuses an index that names paths outside the worktree, and for a worktree
+`grep` an index path whose leading directory is a link. It also refuses
 revisions in git notes history. In `auto`, a call that returns only names,
 ids and metadata such as blob ids, line counts, sizes and rename similarity (`status`, `log` without a
 patch, branches, tags, refs, `remote`, listings) runs with no card, and that metadata
