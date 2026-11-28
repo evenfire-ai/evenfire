@@ -322,6 +322,7 @@ describe('ApprovalModePicker', () => {
       send.release()
     })
     expect(trigger.getAttribute('aria-disabled')).toBeNull()
+    expect(queryByTestId('approval-mode-option-manual')).toBeNull()
     fireEvent.click(trigger)
     await act(async () => {
       fireEvent.click(getByTestId('approval-mode-option-auto'))
