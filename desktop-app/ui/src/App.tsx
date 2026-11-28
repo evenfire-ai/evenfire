@@ -3872,7 +3872,7 @@ export function App() {
     !sessionInvalidation &&
     gfsDeepLinkAcceptingRef.current &&
     processingGfsDeepLinkIdRef.current === null &&
-    activeGfsDeepLinkRef.current === null &&
+    activeGfsDeepLink === null &&
     firstPendingGfsDeepLink?.request === null &&
     (firstPendingGfsDeepLink.receivedIdentity === null ||
       firstPendingGfsDeepLink.receivedIdentity === vm.authenticatedPrincipalIdentity)
