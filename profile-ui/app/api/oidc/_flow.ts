@@ -7,7 +7,12 @@ import {
   isOidcReturnTo,
 } from '../../constants/oidc'
 import { EXTERNAL_REST_API_INTERNAL_URL } from '../../constants/serverApi'
-import { OIDC_REFUSAL_REASONS, type OidcCompletionOutcome, type OidcRefusalReason } from './types'
+import {
+  OIDC_REFUSAL_REASONS,
+  type OidcAttemptExtras,
+  type OidcCompletionOutcome,
+  type OidcRefusalReason,
+} from './types'
 
 export const OIDC_BROWSER_COOKIE_MAX_AGE_SECONDS = 600
 /** Control API and Profile UI clocks can differ by a small amount. */
@@ -18,9 +23,11 @@ export const OIDC_PROFILE_FETCH_TIMEOUT_MS = OIDC_OPERATION_DEADLINE_MS + 2_000
 
 const BINDING_RE = /^[A-Za-z0-9_-]{43}$/
 const STATE_RE = /^[A-Za-z0-9_-]{32,512}$/
+/** The one-time code Evenfire Desktop redeems for its own session. */
+const DESKTOP_SIGN_IN_CODE_RE = /^[A-Za-z0-9_-]{43}$/
 const CALLBACK_PATH = '/api/oidc/callback'
 /** The member session cookie External REST sets for password login (`sessionCookie.ts`). */
-const PROFILE_SESSION_COOKIE_PREFIX = 'profile_session='
+export const PROFILE_SESSION_COOKIE_PREFIX = 'profile_session='
 const SAFE_FAILURES = [
   'oidc_not_configured',
   'oidc_attempt_rejected',
@@ -31,6 +38,7 @@ const SAFE_FAILURES = [
   'oidc_storage_unavailable',
   'oidc_operation_cancelled',
   'oidc_unavailable',
+  'desktop_sign_in_unavailable',
 ] as const
 const REFUSAL_REASON_SET: ReadonlySet<string> = new Set(OIDC_REFUSAL_REASONS)
 const SAFE_FAILURE_SET: ReadonlySet<string> = new Set(SAFE_FAILURES)
@@ -40,7 +48,7 @@ export type OidcProfileConfiguration = Readonly<{
   memberAuthenticationActivated: boolean
 }>
 
-export type { OidcCompletionOutcome }
+export type { OidcAttemptExtras, OidcCompletionOutcome }
 
 export type OidcFailureCode = (typeof SAFE_FAILURES)[number] | 'invalid_upstream'
 
@@ -166,8 +174,9 @@ async function requestExternalWithHeaders<T>(
       typeof body.retrySameAttempt === 'boolean'
         ? body.retrySameAttempt
         : true
+    // 409 is External REST's "Desktop sign-in is off here" (desktop_sign_in_unavailable).
     throw new OidcProfileFlowError(
-      [400, 404, 429, 503].includes(response.status) ? response.status : 503,
+      [400, 404, 409, 429, 503].includes(response.status) ? response.status : 503,
       error,
       retryableCode && retrySameAttempt !== false
     )
@@ -286,7 +295,7 @@ export function returnToCookieName(state: string): string {
 }
 
 /** Every value the request's Cookie header carries under `name`, or none for an oversized header. */
-function cookieValues(request: Request, name: string): string[] {
+export function cookieValues(request: Request, name: string): string[] {
   const header = request.headers.get('cookie')
   if (!header || header.length > 16_384) return []
   const values: string[] = []
@@ -349,7 +358,9 @@ export async function postOidcProfileFlow<T>(
  * Completes the attempt. When member sign-in is on, External REST answers a sign-in
  * with the same `profile_session` Set-Cookie header password login sets; it is relayed
  * to the browser unchanged, so the token never passes through a response body. A refusal
- * carries one of the listed reasons and never a session.
+ * carries one of the listed reasons and never a session. A Desktop attempt's answer carries a
+ * one-time code and the edge's environment instead of a session; each outcome is read field by
+ * field, and any other key in the answer is ignored.
  */
 export async function completeOidcProfileFlow(
   body: Record<string, unknown>,
@@ -359,6 +370,8 @@ export async function completeOidcProfileFlow(
     outcome?: unknown
     memberAuthenticationActivated?: unknown
     reason?: unknown
+    code?: unknown
+    environment?: unknown
   }>('/oidc/profile-flow/complete', { method: 'POST', body: JSON.stringify(body) }, request)
   if (
     result?.outcome === 'identity_proof_verified' &&
@@ -381,6 +394,15 @@ export async function completeOidcProfileFlow(
     REFUSAL_REASON_SET.has(result.reason)
   ) {
     return { kind: 'refused', reason: result.reason as OidcRefusalReason }
+  }
+  if (
+    result?.outcome === 'desktop_code_issued' &&
+    result.memberAuthenticationActivated === true &&
+    typeof result.code === 'string' &&
+    DESKTOP_SIGN_IN_CODE_RE.test(result.code) &&
+    typeof result.environment === 'string'
+  ) {
+    return { kind: 'desktop_code_issued', code: result.code, environment: result.environment }
   }
   // The attempt was consumed upstream; an unrecognised answer cannot be retried.
   throw new OidcProfileFlowError(503, 'oidc_unavailable', false)
@@ -421,14 +443,58 @@ export function refusedRedirect(location: string, clearCookies: readonly string[
   return new Response(null, { status: 303, headers })
 }
 
+/**
+ * Starts an attempt. `extras` is copied field by field, so nothing else in it reaches External
+ * REST. For a Desktop attempt the edge echoes `signInContext`; the caller checks it. The answer is
+ * unchecked: `validatedAttemptRedirect` reads it.
+ */
 export async function beginOidcAttempt(
   browserBinding: string,
-  request: Request
-): Promise<{
-  authorizationUrl: string
-  expiresAt: string
-}> {
-  return postOidcProfileFlow('attempts', { browserBinding }, request)
+  request: Request,
+  extras: OidcAttemptExtras = {}
+): Promise<{ authorizationUrl: unknown; expiresAt: unknown; signInContext?: unknown }> {
+  return postOidcProfileFlow(
+    'attempts',
+    {
+      browserBinding,
+      ...(extras.desktopSignIn
+        ? { desktopSignIn: { codeChallenge: extras.desktopSignIn.codeChallenge } }
+        : {}),
+      ...(extras.invitationToken !== undefined ? { invitationToken: extras.invitationToken } : {}),
+    },
+    request
+  )
+}
+
+/**
+ * Where to send the browser for a started attempt, with the provider `state` that names its
+ * cookies and the cookies' Max-Age. Undefined when the authorization URL fails
+ * `validateAuthorizationUrl`, or the expiry is not a date, already past, or later than the cookie
+ * lifetime plus the allowed clock skew.
+ */
+export function validatedAttemptRedirect(
+  attempt: Readonly<{ authorizationUrl: unknown; expiresAt: unknown }>,
+  configuration: OidcProfileConfiguration
+): Readonly<{ authorizationUrl: URL; state: string; maxAge: number }> | undefined {
+  const authorizationUrl = validateAuthorizationUrl(
+    attempt.authorizationUrl,
+    configuration.redirectUri
+  )
+  // Read as before the extraction: a value that is not a date string gives an invalid date or
+  // one outside the window, and is refused below.
+  const expiresAt = new Date(attempt.expiresAt as string)
+  const maxAge = Math.floor((expiresAt.getTime() - Date.now()) / 1000)
+  const state = authorizationUrl?.searchParams.get('state')
+  if (
+    !authorizationUrl ||
+    !state ||
+    !Number.isFinite(expiresAt.getTime()) ||
+    maxAge <= 0 ||
+    maxAge > OIDC_BROWSER_COOKIE_MAX_AGE_SECONDS + OIDC_BROWSER_CLOCK_SKEW_SECONDS
+  ) {
+    return undefined
+  }
+  return { authorizationUrl, state, maxAge }
 }
 
 export function validateAuthorizationUrl(rawUrl: unknown, callback: string): URL | undefined {
@@ -482,21 +548,31 @@ export function validateAuthorizationUrl(rawUrl: unknown, callback: string): URL
   }
 }
 
+/**
+ * The callback's state when its URL carries exactly one well-formed `state`, whatever its other
+ * parameters; otherwise undefined. A callback `parseCallbackParameters` refuses as invalid can
+ * still name its attempt this way.
+ */
+export function singleCallbackState(request: Request): string | undefined {
+  const stateValues = new URL(request.url).searchParams.getAll('state')
+  return stateValues.length === 1 && validState(stateValues[0]) ? stateValues[0] : undefined
+}
+
 export function parseCallbackParameters(
   request: Request
 ):
   | Readonly<{ kind: 'success'; state: string; code: string; issuer?: string }>
   | Readonly<{ kind: 'denied'; state: string }>
   | Readonly<{ kind: 'retryable-error'; state: string }>
+  | Readonly<{ kind: 'provider-error'; state: string }>
   | Readonly<{ kind: 'invalid' }> {
   const params = new URL(request.url).searchParams
-  const stateValues = params.getAll('state')
+  const state = singleCallbackState(request)
   const codes = params.getAll('code')
   const errors = params.getAll('error')
   const issuers = params.getAll('iss')
   if (
-    stateValues.length !== 1 ||
-    !validState(stateValues[0]) ||
+    state === undefined ||
     codes.length > 1 ||
     errors.length > 1 ||
     issuers.length > 1 ||
@@ -504,7 +580,6 @@ export function parseCallbackParameters(
   ) {
     return { kind: 'invalid' }
   }
-  const state = stateValues[0]
   if (codes.length === 1) {
     const issuer = issuers[0]
     const code = codes[0]
@@ -521,6 +596,11 @@ export function parseCallbackParameters(
   }
   if (errors.length === 1 && ['server_error', 'temporarily_unavailable'].includes(errors[0])) {
     return { kind: 'retryable-error', state }
+  }
+  // Any other provider error (`login_required`, for example). Its state is kept so the attempt
+  // it ends can be answered; the error value itself goes no further.
+  if (errors.length === 1) {
+    return { kind: 'provider-error', state }
   }
   return { kind: 'invalid' }
 }

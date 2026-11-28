@@ -202,11 +202,30 @@
     ],
     "status": 200
   },
+  "POST /api/v1/oidc/profile-flow/complete rate-limited": {
+    "body": {
+      "error": "oidc_unavailable",
+      "retryAfterSeconds": 60
+    },
+    "retryAfter": "60",
+    "setCookie": [],
+    "status": 429
+  },
   "POST /api/v1/oidc/profile-flow/complete refused": {
     "body": {
       "memberAuthenticationActivated": true,
       "outcome": "refused",
       "reason": "not_eligible"
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 200
+  },
+  "POST /api/v1/oidc/profile-flow/complete refused-invitation-email-mismatch": {
+    "body": {
+      "memberAuthenticationActivated": true,
+      "outcome": "refused",
+      "reason": "invitation_email_mismatch"
     },
     "retryAfter": null,
     "setCookie": [],

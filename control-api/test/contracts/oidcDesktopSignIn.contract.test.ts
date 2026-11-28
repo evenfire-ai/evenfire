@@ -192,6 +192,22 @@ const cases: readonly ContractCase[] = [
     body: { outcome: 'refused', memberAuthenticationActivated: true, reason: 'not_eligible' },
   },
   {
+    // An invitation sign-in whose email is not the invited address.
+    key: 'POST /external/oidc/profile-flow/complete refused-invitation-email-mismatch',
+    dependencies: {
+      provider: activated,
+      engine: { completeIdentityProofAttempt: async () => proofFrom(activated) as never },
+      signInMember: async () => ({ status: 'refused', reason: 'invitation_email_mismatch' }),
+    },
+    send: app => request(app).post('/external/oidc/profile-flow/complete').send(completeBody),
+    status: 200,
+    body: {
+      outcome: 'refused',
+      memberAuthenticationActivated: true,
+      reason: 'invitation_email_mismatch',
+    },
+  },
+  {
     key: 'POST /external/oidc/profile-flow/complete identity-proof-verified',
     dependencies: {
       provider: proofOnly,

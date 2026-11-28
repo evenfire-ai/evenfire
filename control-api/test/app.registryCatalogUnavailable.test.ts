@@ -40,6 +40,8 @@ vi.mock('../src/middleware/rateLimitMiddleware.js', () => ({
     () => (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
       next(),
   createRateLimitEnforcer: () => async () => true,
+  // The OIDC profile-flow routes build their invitation hub bucket with the app.
+  createRateLimitCheck: () => async () => ({ outcome: 'allowed' }),
 }))
 
 describe('app: registry-unavailable forwarding at the global error handler (real middleware)', () => {

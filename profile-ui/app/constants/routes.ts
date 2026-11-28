@@ -1,3 +1,4 @@
+import { DESKTOP_LOGIN_PATH } from '@clerum/desktop-app-links'
 import type { OidcRefusalReason } from '../api/oidc/types'
 import type { OidcReturnTo } from './oidc'
 
@@ -28,12 +29,14 @@ export const PROFILE_ROUTES = {
     channel: (network: string) => `/channels/${segment(network)}`,
   },
   connectedAccounts: '/connected-accounts',
+  desktopLogin: DESKTOP_LOGIN_PATH,
   desktopSetup: '/desktop-setup',
   forgotPassword: (query?: ProfileRouteQuery) => withQuery('/forgot-password', query),
   invitation: (token: string) => `/invitations/${segment(token)}`,
   openDesktopApp: (recipeNs: string, recipeName: string) =>
     `/open/apps/${segment(recipeNs)}/${segment(recipeName)}`,
   oidcStart: '/api/oidc/start',
+  oidcDesktopStart: '/api/oidc/desktop-start',
   oidcSignedIn: '/oidc/signed-in',
   oidcSignedInWithReturn: (returnTo: OidcReturnTo) =>
     withQuery('/oidc/signed-in', { next: returnTo }),

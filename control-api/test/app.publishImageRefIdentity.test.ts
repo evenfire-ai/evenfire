@@ -39,6 +39,8 @@ vi.mock('../src/middleware/rateLimitMiddleware.js', () => ({
     () => (_req: express.Request, _res: express.Response, next: express.NextFunction) =>
       next(),
   createRateLimitEnforcer: () => async () => true,
+  // The OIDC profile-flow routes build their invitation hub bucket with the app.
+  createRateLimitCheck: () => async () => ({ outcome: 'allowed' }),
 }))
 
 const baseBody = (imageRef: string) => ({

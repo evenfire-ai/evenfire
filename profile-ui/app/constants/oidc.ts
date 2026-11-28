@@ -19,10 +19,21 @@ export function isOidcReturnTo(value: unknown): value is OidcReturnTo {
 }
 
 /**
- * Most bytes `/api/oidc/start` reads from its unauthenticated form body to find `returnTo`.
- * LoginPanel's real body, `returnTo=desktop-setup`, is 22 bytes.
+ * Most bytes `/api/oidc/start` and `/api/oidc/desktop-start` read from their unauthenticated
+ * form bodies (`readStartForm`). LoginPanel's real body, `returnTo=desktop-setup`, is 22 bytes;
+ * the Desktop sign-in form, two 43-character values, is 117 bytes. The invitation page posts a
+ * token of up to 2048 printable characters, which percent-encoding can triple to 6144 bytes; with
+ * `invitationToken=`, `returnTo=desktop-setup` and the separators, a form stays under 8 KiB.
  */
-export const OIDC_START_FORM_MAX_BYTES = 1024
+export const OIDC_START_FORM_MAX_BYTES = 8192
+
+/**
+ * An invitation token `/api/oidc/start` forwards. Tokens are made by the registration hub, in
+ * another repository, so only printable ASCII and a length are checked. External REST
+ * (`INVITATION_TOKEN_RE`) and Control API (`OIDC_INVITATION_TOKEN_RE`) apply the same rule; Profile
+ * UI keeps its own copy because it imports neither.
+ */
+export const OIDC_INVITATION_TOKEN_RE = /^[\x21-\x7e]{1,2048}$/
 
 export const OIDC_GENERIC_RESULT_MESSAGE = "Sign-in couldn't be completed. Start again."
 
@@ -37,4 +48,20 @@ export const OIDC_REFUSAL_MESSAGES: Readonly<Record<OidcRefusalReason, string>> 
   not_eligible: "Your account isn't allowed to sign in to Evenfire. Contact your administrator.",
   no_account: "There's no Evenfire account for this sign-in. Ask your administrator to add you.",
   provider_configuration: "Sign-in isn't configured correctly. Contact your administrator.",
+  invitation_email_mismatch: 'This invitation was sent to another address.',
 }
+
+/** What the Desktop sign-in pages say. */
+export const DESKTOP_SIGN_IN_COPY = {
+  pageTitle: 'Sign in to Evenfire Desktop',
+  pageDescription: 'This signs in the Evenfire Desktop app on this computer.',
+  continueWith: 'Continue with',
+  invalidLink: 'This sign-in link is not valid. Start again from Evenfire Desktop.',
+  unavailable: "Desktop sign-in isn't available here.",
+  failed: 'Desktop sign-in failed. Start again from Evenfire Desktop.',
+  startFailed: "Desktop sign-in couldn't start. Start again from Evenfire Desktop.",
+  cancelled: 'Sign-in was cancelled. Start again from Evenfire Desktop.',
+  handoffTitle: 'Return to Evenfire Desktop',
+  handoffMessage:
+    'Evenfire Desktop should open and finish signing in. Use the button if your browser asks first.',
+} as const

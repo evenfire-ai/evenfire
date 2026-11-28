@@ -34,11 +34,28 @@ export async function insertDesktopSignInContext(
 }
 
 /**
+ * Records that an attempt was started from an invitation link the hub
+ * accepted: the local invitation's id and its lower-cased email. The token
+ * itself is never stored.
+ */
+export async function insertInvitationSignInContext(
+  db: Pick<DbClient, 'query'>,
+  attemptId: string,
+  context: Readonly<{ invitationId: string; invitedEmail: string }>
+): Promise<void> {
+  await db.query(
+    `INSERT INTO oidc_attempt_sign_in_contexts (attempt_id, context_kind, invitation_id, invited_email)
+     VALUES ($1, 'invitation', $2, $3)`,
+    [attemptId, context.invitationId, context.invitedEmail]
+  )
+}
+
+/**
  * Maps the claim row's context columns. No context row (null columns from the
  * LEFT JOIN, or no columns at all) is a plain attempt. A row the schema's
  * kind/columns CHECK should have refused throws instead of passing as plain,
- * so a Desktop or invitation attempt can never complete as an ordinary
- * sign-in.
+ * so a Desktop or invitation attempt never passes as a plain attempt, without
+ * its context.
  */
 export function signInContextFromClaimRow(
   row: OidcAttemptSignInContextColumns

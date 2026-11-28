@@ -14,7 +14,7 @@ import {
 import { isSessionIssuanceUnavailable } from '../http/passwordAdmissionError.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import { requestedSessionContract } from './auth.js'
-import { DESKTOP_SIGN_IN_CODE_RE, REFUSAL_REASONS, clientRateKey } from './oidcProfileFlow.js'
+import { DESKTOP_SIGN_IN_CODE_RE, clientRateKey } from './oidcProfileFlow.js'
 
 /** An RFC 7636 code verifier. */
 const CODE_VERIFIER_RE = /^[A-Za-z0-9._~-]{43,128}$/
@@ -25,9 +25,26 @@ const REDEEM_PER_CLIENT_LIMIT = 60
 const REDEEM_WINDOW_SECONDS = 60
 
 /**
+ * The refusal reasons redeem relays in its 403: exactly Desktop's closed set
+ * (`DESKTOP_LOGIN_REFUSAL_REASONS` in packages/desktop-app-links). A test holds the two equal.
+ * Any other reason is the 503 row. This is not /complete's set: that one also carries
+ * `invitation_email_mismatch`, which Desktop has no reason for.
+ */
+export const DESKTOP_SIGN_IN_REFUSAL_REASONS: ReadonlySet<string> = new Set([
+  'account_disabled',
+  'identity_conflict',
+  'account_needs_attention',
+  'email_claim_missing',
+  'email_unverified',
+  'not_eligible',
+  'no_account',
+  'provider_configuration',
+])
+
+/**
  * control-api failures relayed with their own status, each with the one code it may carry.
- * relayFailure relays three more outside this map: the 403 refusal with an allowlisted reason,
- * control-api's limiter 429 and its session deferral 503.
+ * relayFailure relays three more outside this map: the 403 refusal with a reason in
+ * DESKTOP_SIGN_IN_REFUSAL_REASONS, control-api's limiter 429 and its session deferral 503.
  */
 const RELAYED_FAILURES: ReadonlyMap<number, string> = new Map([
   [400, 'invalid_desktop_sign_in_code'],
@@ -74,7 +91,7 @@ function relayFailure(error: ControlApiError, res: Response): void {
     error.status === 403 &&
     code === 'desktop_sign_in_refused' &&
     typeof reason === 'string' &&
-    REFUSAL_REASONS.has(reason)
+    DESKTOP_SIGN_IN_REFUSAL_REASONS.has(reason)
   ) {
     res.status(403).json({ error: 'desktop_sign_in_refused', reason })
     return

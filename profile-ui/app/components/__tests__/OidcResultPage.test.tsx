@@ -55,6 +55,7 @@ describe('OIDC result page', () => {
     not_eligible: "Your account isn't allowed to sign in to Evenfire. Contact your administrator.",
     no_account: "There's no Evenfire account for this sign-in. Ask your administrator to add you.",
     provider_configuration: "Sign-in isn't configured correctly. Contact your administrator.",
+    invitation_email_mismatch: 'This invitation was sent to another address.',
   }
 
   it('covers every refusal reason', () => {

@@ -305,7 +305,7 @@ test('provider outage during completion preserves the browser cookie for retry',
   }
 })
 
-test('an unknown completion outcome keeps the browser cookie', async () => {
+test('a transport failure during completion keeps the browser cookie', async () => {
   const restore = mockExternalApi(url => {
     if (url.pathname.endsWith('/configuration')) return configurationResponse()
     throw new Error('upstream outcome unavailable')
@@ -644,6 +644,7 @@ const refusalReasons = [
   'not_eligible',
   'no_account',
   'provider_configuration',
+  'invitation_email_mismatch',
 ] as const
 
 test('each refusal redirects to /oidc/result?reason=<reason>', async () => {
@@ -1094,13 +1095,19 @@ test('clears the return cookie wherever the binding cookie is cleared, and keeps
   }
 })
 
-// /api/oidc/start is unauthenticated, so the form read has its own byte cap (1 KiB).
+// /api/oidc/start is unauthenticated, so the form read has its own byte cap
+// (OIDC_START_FORM_MAX_BYTES, 8 KiB).
+const FORM_CAP_BYTES = 8192
 const FORM_TYPE = { 'content-type': 'application/x-www-form-urlencoded' }
 const desktopSetupForm = new URLSearchParams([['returnTo', 'desktop-setup']]).toString()
-const oversizedForm = new URLSearchParams([
-  ['returnTo', 'desktop-setup'],
-  ['pad', 'x'.repeat(2048)],
-]).toString()
+
+/** `returnTo=desktop-setup` and a `pad` field, exactly `bytes` long. */
+function paddedDesktopSetupForm(bytes: number): string {
+  const prefix = `${desktopSetupForm}&pad=`
+  return `${prefix}${'x'.repeat(bytes - prefix.length)}`
+}
+const formAtCap = paddedDesktopSetupForm(FORM_CAP_BYTES)
+const formOverCap = paddedDesktopSetupForm(FORM_CAP_BYTES + 1)
 
 function assertBindingOnly(response: Response, label: string): void {
   const cookies = response.headers.getSetCookie()
@@ -1109,10 +1116,11 @@ function assertBindingOnly(response: Response, label: string): void {
   assert.equal(cookieParts(cookies[0] ?? '').name, browserCookieName(edgeState), label)
 }
 
-test('a start form within the length cap sets the return cookie', async () => {
+test('a start form at the length cap sets the return cookie', async () => {
+  assert.equal(Buffer.byteLength(formAtCap), FORM_CAP_BYTES)
   const response = await startWithBody(
-    { ...FORM_TYPE, 'content-length': String(Buffer.byteLength(desktopSetupForm)) },
-    desktopSetupForm
+    { ...FORM_TYPE, 'content-length': String(Buffer.byteLength(formAtCap)) },
+    formAtCap
   )
   const cookies = response.headers.getSetCookie()
   assert.equal(response.status, 303)
@@ -1122,10 +1130,11 @@ test('a start form within the length cap sets the return cookie', async () => {
 })
 
 test('a start form above the length cap sets only the binding cookie', async () => {
+  assert.equal(Buffer.byteLength(formOverCap), FORM_CAP_BYTES + 1)
   assertBindingOnly(
     await startWithBody(
-      { ...FORM_TYPE, 'content-length': String(Buffer.byteLength(oversizedForm)) },
-      oversizedForm
+      { ...FORM_TYPE, 'content-length': String(Buffer.byteLength(formOverCap)) },
+      formOverCap
     ),
     'declared above the cap'
   )
@@ -1133,7 +1142,7 @@ test('a start form above the length cap sets only the binding cookie', async () 
   assertBindingOnly(
     await startWithBody(
       { ...FORM_TYPE, 'content-length': String(Buffer.byteLength(desktopSetupForm)) },
-      oversizedForm
+      formOverCap
     ),
     'longer than declared'
   )

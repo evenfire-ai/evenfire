@@ -5,6 +5,7 @@ import {
   buildGfsResourceDeepLink,
   buildSandboxUiDeepLink,
   normalizeGfsResourceUri,
+  parseDesktopLoginLink,
   parseGfsResourceDeepLink,
 } from '@clerum/desktop-app-links'
 import type { DesktopEnvironmentResponse } from '@/app/types/api'
@@ -144,9 +145,61 @@ function buildDesktopHandoffDocument(
     throw new Error('Cannot redirect to an invalid desktop app link')
   }
 
-  const nonce = normalizeScriptNonce(scriptNonce)
   const escapedLink = escapeHtml(deepLink)
-  const scriptLink = JSON.stringify(deepLink).replaceAll('<', '\\u003c')
+  return buildDesktopHandoffShell(
+    scriptNonce,
+    copy,
+    `      <a class="open-button" href="${escapedLink}">Open in Evenfire</a>
+      <p class="body-copy">
+        If nothing happens, install or update to the latest Evenfire Desktop, then try again.
+      </p>`,
+    `window.location.replace(${scriptString(deepLink)})`
+  )
+}
+
+/**
+ * The page that hands a Desktop sign-in result to Evenfire Desktop. It fires `link` once on load,
+ * and its button fires it again by script, for a browser that asked first. A code link carries a
+ * one-time sign-in code, so the link is written once, inside the nonce script, and never as an
+ * anchor or as text. Throws unless the package parses `link` as a Desktop sign-in link.
+ */
+export function buildDesktopLoginHandoffDocument(
+  link: string,
+  scriptNonce: string,
+  copy: Readonly<{ title: string; message: string }>
+): string {
+  if (!parseDesktopLoginLink(link)) {
+    throw new Error('Cannot hand off an invalid Desktop sign-in link')
+  }
+  return buildDesktopHandoffShell(
+    scriptNonce,
+    { title: copy.title, description: copy.message },
+    '      <button type="button" id="open-evenfire-desktop" class="open-button">' +
+      'Open Evenfire Desktop</button>',
+    `const link = ${scriptString(link)}; ` +
+      "document.getElementById('open-evenfire-desktop')" +
+      ".addEventListener('click', () => { window.location.href = link }); " +
+      'window.location.replace(link)'
+  )
+}
+
+/** A string as a script literal that cannot close its `<script>` element. */
+function scriptString(value: string): string {
+  return JSON.stringify(value).replaceAll('<', '\\u003c')
+}
+
+/**
+ * The page every Desktop handoff document shares: the nonce style block, a card with the title
+ * and description, the caller's actions and one nonce script. `actionsHtml` and `script` go in
+ * as given, so the caller escapes every value it puts in them.
+ */
+function buildDesktopHandoffShell(
+  scriptNonce: string,
+  copy: Readonly<{ title: string; description: string }>,
+  actionsHtml: string,
+  script: string
+): string {
+  const nonce = normalizeScriptNonce(scriptNonce)
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -245,13 +298,10 @@ function buildDesktopHandoffDocument(
         <h1>${escapeHtml(copy.title)}</h1>
         <p class="body-copy">${escapeHtml(copy.description)}</p>
       </div>
-      <a class="open-button" href="${escapedLink}">Open in Evenfire</a>
-      <p class="body-copy">
-        If nothing happens, install or update to the latest Evenfire Desktop, then try again.
-      </p>
+${actionsHtml}
     </section>
   </main>
-  <script nonce="${nonce}">window.location.replace(${scriptLink})</script>
+  <script nonce="${nonce}">${script}</script>
 </body>
 </html>`
 }

@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict'
+import { createHash, randomBytes } from 'node:crypto'
 import test from 'node:test'
+import { buildDesktopLoginCodeLink, parseDesktopLoginLink } from '@clerum/desktop-app-links'
+import { DESKTOP_SIGN_IN_COPY } from '../app/constants/oidc'
 import {
   buildDesktopEnvironmentLink,
+  buildDesktopLoginHandoffDocument,
   buildEvenfireDesktopAppContentSecurityPolicy,
   buildEvenfireDesktopAppLink,
   buildEvenfireDesktopAppRedirectDocument,
+  buildEvenfireDesktopGfsResourceRedirectDocument,
   navigateToDesktopApp,
 } from '../lib/desktopAppLinks'
+import { edgeRecord } from './edgeFixtures'
 
 function withDesktopHandoffEnabled<T>(run: () => T): T {
   const original = process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED
@@ -174,4 +180,145 @@ test('buildEvenfireDesktopAppRedirectDocument rejects an invalid script nonce', 
       ),
     /invalid script nonce/
   )
+})
+
+test('the app and resource handoff documents keep their bytes on the shared shell', () => {
+  // sha256 of each document as e9ba60538 rendered it, before the shell was shared. A change to
+  // the handoff page changes these on purpose.
+  const sha256 = (value: string) => createHash('sha256').update(value).digest('hex')
+  const scriptNonce = 'dGVzdC1ub25jZQ=='
+  assert.equal(
+    sha256(
+      buildEvenfireDesktopAppRedirectDocument(
+        'evenfire://app/sandbox-recipes/agentic-task-board?path=%2Ftasks%2Ftask-42&team=team-123',
+        scriptNonce
+      )
+    ),
+    '6f8d3ab6624138e875b70cd01b09cfdb3d65c7a564a0e79501584744fce39548'
+  )
+  assert.equal(
+    sha256(
+      buildEvenfireDesktopGfsResourceRedirectDocument(
+        'gfs://main/0123456789abcdef0123456789abcdef',
+        scriptNonce
+      )
+    ),
+    'd73af696264c9f9001be835fe537c1d5a1ce8eb4537952a1b51566ccd42d34f3'
+  )
+})
+
+const HANDOFF_COPY = {
+  title: DESKTOP_SIGN_IN_COPY.handoffTitle,
+  message: DESKTOP_SIGN_IN_COPY.handoffMessage,
+}
+
+/**
+ * A code link built by the package from External REST's recorded desktop_code_issued answer
+ * (external-rest-api/test/fixtures/oidc-desktop-sign-in/edge.json), for a fresh Desktop state.
+ */
+function desktopCodeLink(): Readonly<{ link: string; code: string }> {
+  const { code, environment } = edgeRecord(
+    'POST /api/v1/oidc/profile-flow/complete desktop-code-issued'
+  ).body as { code: string; environment: string }
+  const state = randomBytes(32).toString('base64url')
+  return { link: buildDesktopLoginCodeLink({ state, code, environment }), code }
+}
+
+test('the Desktop handoff document has no anchor, a scripted button and the link once', () => {
+  const { link, code } = desktopCodeLink()
+  const scriptNonce = 'dGVzdC1ub25jZQ=='
+  const body = buildDesktopLoginHandoffDocument(link, scriptNonce, HANDOFF_COPY)
+  const scripts = [...body.matchAll(/<script nonce="([^"]+)">([^<]*)<\/script>/g)]
+  const cspNonce = buildEvenfireDesktopAppContentSecurityPolicy(scriptNonce).match(
+    /script-src 'nonce-([^']+)'/
+  )?.[1]
+
+  assert.equal(body.split(code).length - 1, 1)
+  assert.ok(!/<a\b/i.test(body))
+  assert.match(
+    body,
+    /<button type="button" id="open-evenfire-desktop"[^>]*>Open Evenfire Desktop<\/button>/
+  )
+  assert.ok(body.includes(`<h1>${HANDOFF_COPY.title}</h1>`))
+  assert.ok(body.includes(`<p class="body-copy">${HANDOFF_COPY.message}</p>`))
+  assert.equal((body.match(/<script\b/g) ?? []).length, 1)
+  assert.equal(scripts.length, 1)
+  assert.equal(scripts[0][1], cspNonce)
+
+  // Runs the one script against a stand-in window and button.
+  const replaced: string[] = []
+  const location = { href: 'about:blank', replace: (url: string) => void replaced.push(url) }
+  const clickListeners: Array<() => void> = []
+  const button = {
+    addEventListener: (type: string, listener: () => void) => {
+      if (type === 'click') clickListeners.push(listener)
+    },
+  }
+  const getElementById = (id: string) => (id === 'open-evenfire-desktop' ? button : null)
+  new Function('window', 'document', scripts[0][2])({ location }, { getElementById })
+  assert.deepEqual(replaced, [link])
+  assert.equal(location.href, 'about:blank')
+  assert.equal(clickListeners.length, 1)
+  clickListeners[0]()
+  assert.equal(location.href, link)
+  assert.deepEqual(replaced, [link])
+})
+
+test('the Desktop handoff document refuses https and evenfire://app links', () => {
+  const { link } = desktopCodeLink()
+  const query = link.slice(link.indexOf('?'))
+  for (const [label, refused] of [
+    ['an https link with the same query', `https://profile.example.test/desktop-login${query}`],
+    ['an evenfire://app link', 'evenfire://app/sandbox-recipes/agentic-task-board'],
+    ['a code link with an extra parameter', `${link}&extra=1`],
+  ] as const) {
+    assert.throws(
+      () => buildDesktopLoginHandoffDocument(refused, 'dGVzdC1ub25jZQ==', HANDOFF_COPY),
+      /invalid Desktop sign-in link/,
+      label
+    )
+  }
+})
+
+test('a script-closing environment stays inside the Desktop handoff script', () => {
+  const { code, environment } = edgeRecord(
+    'POST /api/v1/oidc/profile-flow/complete desktop-code-issued'
+  ).body as { code: string; environment: string }
+  const state = randomBytes(32).toString('base64url')
+  // Derived from the recorded environment with a hostile path. The link is written by hand: the
+  // package's builder percent-encodes `<`, so only a hand-written link carries a literal one.
+  const hostileEnvironment = `${environment}/</script><script>alert(1)</script>`
+  const link = `evenfire://desktop-login?state=${state}&code=${code}&environment=${hostileEnvironment}`
+  assert.deepEqual(parseDesktopLoginLink(link), {
+    kind: 'code',
+    state,
+    code,
+    environment: hostileEnvironment,
+  })
+
+  const body = buildDesktopLoginHandoffDocument(link, 'dGVzdC1ub25jZQ==', HANDOFF_COPY)
+  const scripts = [...body.matchAll(/<script nonce="[^"]+">([^<]*)<\/script>/g)]
+
+  assert.equal((body.match(/<script\b/g) ?? []).length, 1)
+  assert.equal(body.includes('</script><script>'), false)
+  assert.equal(scripts.length, 1)
+  // The escaped script still fires the link exactly as given.
+  const replaced: string[] = []
+  const location = { href: 'about:blank', replace: (url: string) => void replaced.push(url) }
+  const button = { addEventListener: () => undefined }
+  new Function('window', 'document', scripts[0][1])({ location }, { getElementById: () => button })
+  assert.deepEqual(replaced, [link])
+})
+
+test('the Desktop handoff document escapes its title and message', () => {
+  const { link } = desktopCodeLink()
+  const body = buildDesktopLoginHandoffDocument(link, 'dGVzdC1ub25jZQ==', {
+    title: "Evenfire's <b>Desktop</b>",
+    message: "It isn't <img src=x> here",
+  })
+
+  assert.ok(body.includes('<title>Evenfire&#39;s &lt;b&gt;Desktop&lt;/b&gt;</title>'))
+  assert.ok(body.includes('<h1>Evenfire&#39;s &lt;b&gt;Desktop&lt;/b&gt;</h1>'))
+  assert.ok(body.includes('<p class="body-copy">It isn&#39;t &lt;img src=x&gt; here</p>'))
+  assert.equal(/<b>|<img\b/.test(body), false)
 })

@@ -36,7 +36,13 @@ GET /api/v1/invitations/token/:token` before it renders.
    Profile UI then shows a password-updated screen with no session and a link to
    the ordinary login. Password reset (`POST
 /api/v1/invitations/password-reset`) follows the same post-password
-   contract.
+   contract. With member sign-in (OIDC) on, the page also offers "Continue with
+   …", never beside the password form or on a password reset whose preview
+   loaded. When the preview could not load, the link's purpose is unknown, so a
+   reset link shows the button too; control-api then starts that sign-in without
+   the invitation, because only a pending member invitation is carried into a
+   sign-in. The button posts the invitation token to `/api/oidc/start`, which
+   starts the provider sign-in with it, or without it if it is malformed.
 5. **The person signs in with the new password** and lands on the profile home.
    Profile UI offers a Download Evenfire link — not an automatic handoff. The
    member installs the [Desktop App](desktop-app.md) themselves and completes
@@ -49,6 +55,14 @@ GET /api/v1/invitations/token/:token` before it renders.
    (`external-rest-api POST /api/v1/invitations/desktop-authorization`, which
    takes no password) and hands it back to the installed app through the
    `evenfire://desktop-setup` deep link.
+7. **With member sign-in (OIDC) on, the Desktop App can sign in through the
+   browser instead.** It opens Profile UI's
+   `/desktop-login#challenge=…&state=…`; the values stay in the URL fragment,
+   which the browser never sends to a server. The member presses the page's
+   "Continue with …" button and signs in at the configured provider, and
+   Profile UI returns the result to the app through the
+   `evenfire://desktop-login` deep link. This sign-in neither uses an existing
+   Profile UI session nor creates one.
 
 Steps 1–4 above don't need a deployed sibling service for this: self-hosted
 control-api can send the invitation email and validate the token itself via
@@ -76,6 +90,8 @@ for what breaks without it.
 - `/invitations/[token]` and `/forgot-password` — reachable without a
   session.
 - `/desktop-setup` — the Desktop App handoff, above.
+- `/desktop-login` — the Desktop App's browser sign-in (step 7 above),
+  reachable without a session.
 
 ## Sign-out
 

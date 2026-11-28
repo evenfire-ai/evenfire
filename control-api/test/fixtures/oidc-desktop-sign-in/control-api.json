@@ -88,6 +88,14 @@
     },
     "status": 200
   },
+  "POST /external/oidc/profile-flow/complete refused-invitation-email-mismatch": {
+    "body": {
+      "memberAuthenticationActivated": true,
+      "outcome": "refused",
+      "reason": "invitation_email_mismatch"
+    },
+    "status": 200
+  },
   "POST /external/oidc/profile-flow/complete storage-unavailable": {
     "body": {
       "error": "oidc_storage_unavailable",

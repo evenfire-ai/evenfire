@@ -15,6 +15,8 @@ import {
   issueExternalUserSession,
 } from './externalSessionIssuance.js'
 import {
+  type OidcCreatedRecords,
+  OidcInvitationWithdrawnError,
   type OidcRefusal,
   type OidcResolvedAccount,
   resolveOidcAccount,
@@ -27,7 +29,7 @@ export type OidcMemberSignInResult =
       userId: string
       token: string
       contract: ExternalSessionContract
-      created: { account: boolean; link: boolean }
+      created: OidcCreatedRecords
       invitationsApplied: number
     }>
   | Readonly<{
@@ -37,7 +39,7 @@ export type OidcMemberSignInResult =
       expiresInSeconds: number
       /** True when the sign-in chose no team; the code then records none. */
       teamless: boolean
-      created: { account: boolean; link: boolean }
+      created: OidcCreatedRecords
       invitationsApplied: number
     }>
   | OidcRefusal
@@ -69,6 +71,8 @@ type SessionTeam = { team_id: string | null; role: TeamRole }
 const TEAMLESS_MEMBER: SessionTeam = Object.freeze({ team_id: null, role: 'member' })
 
 const UNIQUE_VIOLATION = '23505'
+
+const WITHDRAWN_INVITATION: OidcRefusal = Object.freeze({ status: 'refused', reason: 'no_account' })
 
 function isUniqueViolation(error: unknown): boolean {
   return (
@@ -140,8 +144,9 @@ async function acceptIntoNewTeamsOnly(
  * team_members row in any status stays pending and adds no membership: it
  * never changes an existing role and never restores a removed membership. An
  * account created by this sign-in has no memberships but the new-member team
- * row this sign-in wrote, so its invitations are applied as an acceptance
- * applies them, and one to the new-member team sets its role.
+ * row this sign-in wrote, if any (an account an invitation created has none),
+ * so its invitations are applied as an acceptance applies them, and one to
+ * the new-member team sets its role.
  *
  * Either way, of two invitations to one team the latest created sets the
  * role: an existing member's are applied newest created first, so the newest
@@ -245,10 +250,15 @@ async function signInResolvedMember(
   db: DbTransactionClient,
   input: OidcMemberSignInInput
 ): Promise<OidcMemberSignInResult> {
+  const context = input.proof.signInContext
   const resolution = await resolveOidcAccount(db, {
     proof: input.proof,
     provider: input.provider,
     policy: input.policy,
+    invitation:
+      context?.kind === 'invitation'
+        ? { invitationId: context.invitationId, invitedEmail: context.invitedEmail }
+        : null,
   })
   if (resolution.status === 'refused') return resolution
   const { account } = resolution
@@ -261,13 +271,14 @@ async function signInResolvedMember(
   // read again afterwards. Invitations never change an existing membership
   // here, but a concurrent removal may have ended it meanwhile; it then counts
   // as no team. A teamless member, and an account created by this sign-in
-  // (whose only team so far is the new-member team), land in the team of the
-  // most recently created applied invitation; otherwise in their first active
-  // team, which for a new account is the new-member team; otherwise they are
-  // teamless. A later sign-in finds the member with a team, so the shared
-  // default-team rule picks it, as password login would. That rule ranks the
-  // team with the most recently accepted invitation first, so it can differ
-  // from the team this sign-in chose.
+  // (whose only team so far is the new-member team, or none for an account an
+  // invitation created), land in the team of the most recently created
+  // applied invitation; otherwise in their first active team, which for a new
+  // account is the new-member team; otherwise they are teamless. A later
+  // sign-in finds the member with a team, so the shared default-team rule
+  // picks it, as password login would. That rule ranks the team with the most
+  // recently accepted invitation first, so it can differ from the team this
+  // sign-in chose.
   // currentMemberMembership's email-keyed healing is deliberately not used:
   // OIDC sign-in never restores teams from accepted invitations by email.
   const before = account.created.account
@@ -339,7 +350,10 @@ async function signInResolvedMember(
  * resolution (resolveOidcAccount), pending invitations for the account's
  * stored email, the team, then the completion: a session, or a one-use Desktop
  * code. A refusal issues no session, mints no code and writes nothing except
- * the connection record.
+ * the connection record. The one exception is an invitation withdrawn while
+ * the sign-in waited on it (OidcInvitationWithdrawnError): its transaction
+ * rolls back whole, so the connection record is undone too, and the answer is
+ * `no_account`. It is never retried.
  *
  * A unique-key conflict means a parallel sign-in committed the same link or
  * account first. PostgreSQL has aborted that transaction, so the whole sign-in
@@ -353,7 +367,17 @@ export async function signInOidcMember(
   const transaction: MemberTransaction =
     deps.transaction ??
     (<T>(work: (db: DbTransactionClient) => Promise<T>) => withTransaction(work))
-  const attempt = () => transaction(db => signInResolvedMember(db, input))
+  const attempt = async (): Promise<OidcMemberSignInResult> => {
+    try {
+      return await transaction(db => signInResolvedMember(db, input))
+    } catch (error) {
+      // The invitation that was creating the account no longer qualifies, and
+      // the transaction has rolled back. That is the refusal the unlocked read
+      // would have given, not a failure; a rerun would refuse the same way.
+      if (error instanceof OidcInvitationWithdrawnError) return WITHDRAWN_INVITATION
+      throw error
+    }
+  }
   try {
     return await attempt()
   } catch (error) {

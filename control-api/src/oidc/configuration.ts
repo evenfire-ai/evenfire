@@ -71,7 +71,8 @@ const MAX_REQUIRED_CLAIM_VALUE_LENGTH = 256
  * issuer creates an account for each person eligibility admits, which is the
  * holders of the required claim (`ACCOUNT_CREATION=enabled`) or, when the
  * operator set `ACCOUNT_CREATION=any_issuer_account`, everyone the issuer
- * signs in. `disabled`: only existing accounts sign in.
+ * signs in. `disabled`: only existing accounts sign in, except that a pending
+ * member invitation creates the one account it was sent to.
  */
 export type OidcAccountCreation = 'entra' | 'enabled' | 'disabled'
 

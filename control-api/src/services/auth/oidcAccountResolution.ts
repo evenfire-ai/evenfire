@@ -12,6 +12,14 @@ export type OidcRefusalReason =
   | 'not_eligible'
   | 'no_account'
   | 'provider_configuration'
+  | 'invitation_email_mismatch'
+
+/**
+ * The invitation an attempt was started from: its id and the invited address,
+ * lower-cased. Only these two values reach account resolution, never the
+ * invitation token.
+ */
+export type OidcInvitationContext = Readonly<{ invitationId: string; invitedEmail: string }>
 
 /**
  * Why a `provider_configuration` refusal happened. It is for the operator's log
@@ -28,6 +36,12 @@ export type OidcRefusal = Readonly<{
   cause?: OidcRefusalCause
 }>
 
+/**
+ * What a sign-in created. `byInvitation` is present, and true, only on an
+ * account the invitation created while account creation is off.
+ */
+export type OidcCreatedRecords = { account: boolean; link: boolean; byInvitation?: true }
+
 export type OidcResolvedAccount = Readonly<{
   userId: string
   /** The stored `users.email`, not the provider's claim. */
@@ -35,8 +49,21 @@ export type OidcResolvedAccount = Readonly<{
   lifecycleState: 'active'
   /** The locked row's `lifecycle_version`, as PostgreSQL returned it. */
   lifecycleVersion: unknown
-  created: { account: boolean; link: boolean }
+  created: OidcCreatedRecords
 }>
+
+/**
+ * The invitation that allowed an account to be created was revoked, accepted
+ * or expired while the sign-in waited on its lock. Thrown inside the sign-in
+ * transaction only, so the transaction rolls back whole: the user row, and the
+ * connection record with it. `signInOidcMember` answers `no_account`.
+ */
+export class OidcInvitationWithdrawnError extends Error {
+  constructor() {
+    super('The invitation was withdrawn while the OIDC sign-in waited on it')
+    this.name = 'OidcInvitationWithdrawnError'
+  }
+}
 
 export type OidcResolution =
   | Readonly<{ status: 'resolved'; account: OidcResolvedAccount; guest: boolean }>
@@ -65,11 +92,7 @@ function refused(reason: OidcRefusalReason, cause?: OidcRefusalCause): OidcResol
   )
 }
 
-function resolved(
-  user: LockedUser,
-  created: { account: boolean; link: boolean },
-  guest: boolean
-): OidcResolution {
+function resolved(user: LockedUser, created: OidcCreatedRecords, guest: boolean): OidcResolution {
   return Object.freeze({
     status: 'resolved',
     account: Object.freeze({
@@ -168,9 +191,39 @@ function accountCreationAllowed(policy: OidcMemberSignInPolicy): boolean {
   }
 }
 
+/** An invitation applies by address, compared case-insensitively. */
+function differsFromInvitation(invitation: OidcInvitationContext | null, email: string): boolean {
+  return invitation !== null && email.toLowerCase() !== invitation.invitedEmail.toLowerCase()
+}
+
 async function newMemberTeamExists(db: Query, teamId: string): Promise<boolean> {
   // KEY SHARE keeps the team from being deleted before the membership insert.
   const result = await db.query(`SELECT 1 FROM teams WHERE id = $1 FOR KEY SHARE`, [teamId])
+  return (result.rowCount ?? 0) > 0
+}
+
+const QUALIFYING_INVITATION = `SELECT id FROM invitations
+      WHERE id = $1
+        AND purpose = 'member_invitation'
+        AND status = 'pending'
+        AND expires_at > now()
+        AND lower(email) = $2`
+
+/**
+ * Whether the invitation still lets its account be created: a pending,
+ * unexpired member invitation to this address. The first read takes no lock;
+ * the second locks the row, after the user row, which is the order
+ * `acceptInvitationInTransaction` takes, so the two cannot deadlock.
+ */
+async function invitationQualifies(
+  db: Query,
+  invitation: OidcInvitationContext,
+  lock: 'unlocked' | 'for_update'
+): Promise<boolean> {
+  const result = await db.query(
+    lock === 'for_update' ? `${QUALIFYING_INVITATION}\n      FOR UPDATE` : QUALIFYING_INVITATION,
+    [invitation.invitationId, invitation.invitedEmail]
+  )
   return (result.rowCount ?? 0) > 0
 }
 
@@ -178,6 +231,22 @@ async function newMemberTeamExists(db: Query, teamId: string): Promise<boolean> 
  * Maps a verified OIDC identity to a member account (v5 §4, rows 1–7).
  * Runs inside the caller's transaction; locks the user row before deciding.
  * Refusals write nothing except the `oidc_connections` record.
+ *
+ * A sign-in started from an invitation link passes the invitation. After the
+ * earlier refusals, and before any account, link or membership is written,
+ * the invited address is compared with the account's: a linked account's
+ * stored email, otherwise the verified email claim. A different address is
+ * refused with `invitation_email_mismatch`.
+ *
+ * With account creation off, a matching invitation that is pending creates
+ * the one account it was sent to. The account gets neither the new-member
+ * team nor its check: only the teams of the person's pending invitations,
+ * which the sign-in applies afterwards. Whether the invitation qualifies is
+ * read before the email lookup, so a password acceptance of it that commits
+ * during the sign-in leads to the account that acceptance created, never to
+ * `no_account`. If the invitation stops qualifying while the sign-in waits on
+ * its lock, this throws OidcInvitationWithdrawnError, so the caller's
+ * transaction rolls back whole.
  */
 export async function resolveOidcAccount(
   db: DbTransactionClient,
@@ -185,9 +254,10 @@ export async function resolveOidcAccount(
     proof: VerifiedOidcIdentityProof
     provider: OidcProviderConfiguration
     policy: OidcMemberSignInPolicy
+    invitation: OidcInvitationContext | null
   }>
 ): Promise<OidcResolution> {
-  const { proof, provider, policy } = input
+  const { proof, provider, policy, invitation } = input
   if (
     proof.registrationId !== provider.registrationId ||
     proof.issuer !== provider.issuer ||
@@ -222,6 +292,8 @@ export async function resolveOidcAccount(
     // The link's foreign key is ON DELETE RESTRICT, so its user always exists.
     if (!user) throw new Error('OIDC link references a missing user')
     if (user.lifecycle_state !== 'active') return refused('account_disabled')
+    // A linked account resolves without the claim, so its stored email is compared.
+    if (differsFromInvitation(invitation, user.email)) return refused('invitation_email_mismatch')
     return resolved(user, { account: false, link: false }, guest)
   }
 
@@ -233,6 +305,21 @@ export async function resolveOidcAccount(
   if (emailState === 'domain_claim_missing') {
     return refused('provider_configuration', 'email_domain_claim_missing')
   }
+  // Before the email lookup, so a different address writes no link and no account.
+  if (differsFromInvitation(invitation, claimEmail)) return refused('invitation_email_mismatch')
+
+  // With creation off, only the invitation the attempt came from may create
+  // the account: decided from this unlocked read, so an invitation that
+  // doesn't qualify writes no user, and checked again under its lock below.
+  // It runs before the email lookup. A password acceptance of this invitation
+  // that commits after it is then found by the lookup, or makes the insert
+  // below lose, so the person signs in to the account it created.
+  const creatingInvitation =
+    invitation !== null &&
+    !accountCreationAllowed(policy) &&
+    (await invitationQualifies(db, invitation, 'unlocked'))
+      ? invitation
+      : null
 
   // Rows 3, 5 and 6: email finds an existing member the first time only.
   const matches = await db.query(
@@ -248,10 +335,18 @@ export async function resolveOidcAccount(
   if (candidates.length > 1) return refused('account_needs_attention')
   if (candidates.length === 1) return resolveExistingAccount(db, candidates[0]!, identity, guest)
 
-  // Row 4: create the account.
-  if (!accountCreationAllowed(policy)) return refused('no_account')
-  if (policy.newMemberTeamId !== null && !(await newMemberTeamExists(db, policy.newMemberTeamId))) {
-    return refused('provider_configuration', 'unknown_new_member_team')
+  // Row 4: create the account. With creation off, only the invitation the
+  // attempt came from may create it: the one account it was sent to.
+  if (accountCreationAllowed(policy)) {
+    if (
+      policy.newMemberTeamId !== null &&
+      !(await newMemberTeamExists(db, policy.newMemberTeamId))
+    ) {
+      return refused('provider_configuration', 'unknown_new_member_team')
+    }
+  } else if (creatingInvitation === null) {
+    // No invitation, or none that qualified at the read before the lookup.
+    return refused('no_account')
   }
 
   const name = proof.attributes.name || null
@@ -271,8 +366,16 @@ export async function resolveOidcAccount(
   )
   const user = reselected.rows[0] as LockedUser | undefined
   if (!user) throw new Error('OIDC account row is missing after insert')
-  // A parallel transaction created this address first: decide as for an existing account.
+  // A parallel transaction created this address first: decide as for an
+  // existing account. That includes a password acceptance of this very
+  // invitation, so the invitation no longer creates anything.
   if ((inserted.rowCount ?? 0) === 0) return resolveExistingAccount(db, user, identity, guest)
+  if (
+    creatingInvitation !== null &&
+    !(await invitationQualifies(db, creatingInvitation, 'for_update'))
+  ) {
+    throw new OidcInvitationWithdrawnError()
+  }
 
   await db.query(
     `INSERT INTO profiles (user_id, display_name)
@@ -281,6 +384,11 @@ export async function resolveOidcAccount(
     [user.id, name]
   )
   await insertLink(db, identity, user.id)
+  if (creatingInvitation !== null) {
+    // Only the teams of the person's pending invitations, which the sign-in
+    // applies next, so an inviter grants no other team.
+    return resolved(user, { account: true, link: true, byInvitation: true }, guest)
+  }
   if (policy.newMemberTeamId !== null) {
     await db.query(
       `INSERT INTO team_members (team_id, user_id, role, status)

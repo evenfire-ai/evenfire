@@ -51,6 +51,7 @@ const REASONS = [
   'not_eligible',
   'no_account',
   'provider_configuration',
+  'invitation_email_mismatch',
 ] as const
 const CONFIG_URI = 'https://profile.example.test/api/oidc/callback'
 

@@ -335,3 +335,498 @@ test('web handoffs require a root-mounted HTTP(S) Profile UI', () => {
     )
   }
 })
+
+const EDGE_FIXTURE_PATH = path.join(
+  __dirname,
+  '../../external-rest-api/test/fixtures/oidc-desktop-sign-in/edge.json'
+)
+const SIGN_IN_URL = 'https://profile.example.test/desktop-login'
+const CHALLENGE = 'c'.repeat(43)
+const STATE = 's'.repeat(43)
+const CODE = 'k'.repeat(43)
+const ENVIRONMENT = 'https://edge-fixture.example.test'
+const EXPECTED_ERRORS = ['refused', 'cancelled', 'unavailable', 'failed']
+const EXPECTED_REFUSAL_REASONS = [
+  'account_disabled',
+  'identity_conflict',
+  'account_needs_attention',
+  'email_claim_missing',
+  'email_unverified',
+  'not_eligible',
+  'no_account',
+  'provider_configuration',
+]
+const BASE64URL_ALPHABET = [...'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_']
+const desktopLoginValueArbitrary = fc.string({
+  unit: fc.constantFrom(...BASE64URL_ALPHABET),
+  minLength: 43,
+  maxLength: 43,
+})
+const hostArbitrary = fc
+  .array(
+    fc.string({
+      unit: fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789'),
+      minLength: 1,
+      maxLength: 20,
+    }),
+    { minLength: 1, maxLength: 3 }
+  )
+  .map(labels => `${labels.join('.')}.example.test`)
+const portSuffixArbitrary = fc.option(
+  fc
+    .integer({ min: 1, max: 65535 })
+    .filter(port => port !== 80 && port !== 443)
+    .map(port => `:${port}`),
+  { nil: '' }
+)
+// A canonical signInUrl: the parser returns origin + path, so no default port.
+const signInUrlArbitrary = fc
+  .tuple(hostArbitrary, portSuffixArbitrary)
+  .map(([host, port]) => `https://${host}${port}/desktop-login`)
+// An environment comes back unchanged, so its path may hold characters the
+// link has to percent-encode.
+const environmentArbitrary = fc
+  .tuple(
+    fc.constantFrom('http', 'https'),
+    hostArbitrary,
+    portSuffixArbitrary,
+    fc.option(
+      fc
+        .string({ unit: fc.constantFrom(...'az09-._~/+&=% é中'), maxLength: 30 })
+        .map(pathValue => `/${pathValue}`),
+      { nil: '' }
+    )
+  )
+  .map(([scheme, host, port, pathValue]) => `${scheme}://${host}${port}${pathValue}`)
+
+function readEdgeFixture(key) {
+  const records = JSON.parse(fs.readFileSync(EDGE_FIXTURE_PATH, 'utf8'))
+  assert.ok(records[key], `edge fixture record ${key}`)
+  return records[key]
+}
+
+function desktopLoginLink(query) {
+  return `evenfire://desktop-login?${query}`
+}
+
+test('the Desktop sign-in constants hold the contract values', () => {
+  assert.equal(links.DESKTOP_LOGIN_PATH, '/desktop-login')
+  assert.equal(links.DESKTOP_LOGIN_DEEP_LINK_HOST, 'desktop-login')
+  assert.deepEqual([...links.DESKTOP_LOGIN_ERRORS], EXPECTED_ERRORS)
+  assert.deepEqual([...links.DESKTOP_LOGIN_REFUSAL_REASONS], EXPECTED_REFUSAL_REASONS)
+  assert.equal(Object.isFrozen(links.DESKTOP_LOGIN_ERRORS), true)
+  assert.equal(Object.isFrozen(links.DESKTOP_LOGIN_REFUSAL_REASONS), true)
+  assert.equal(links.DESKTOP_LOGIN_REFUSAL_REASONS.includes('invitation_email_mismatch'), false)
+})
+
+test('every Desktop sign-in builder round-trips through its parser', () => {
+  fc.assert(
+    fc.property(
+      signInUrlArbitrary,
+      desktopLoginValueArbitrary,
+      desktopLoginValueArbitrary,
+      (signInUrl, challenge, state) => {
+        assert.equal(links.parseDesktopLoginSignInUrl(signInUrl), signInUrl)
+        const pageUrl = links.buildDesktopLoginPageUrl(signInUrl, { challenge, state })
+        assert.deepEqual(links.parseDesktopLoginPageUrl(pageUrl), { signInUrl, challenge, state })
+        assert.deepEqual(links.parseDesktopLoginFragment(new URL(pageUrl).hash), {
+          valid: true,
+          challenge,
+          state,
+        })
+      }
+    ),
+    { numRuns: 500 }
+  )
+
+  fc.assert(
+    fc.property(
+      desktopLoginValueArbitrary,
+      desktopLoginValueArbitrary,
+      environmentArbitrary,
+      (state, code, environment) => {
+        const link = links.buildDesktopLoginCodeLink({ state, code, environment })
+        assert.deepEqual(links.parseDesktopLoginLink(link), {
+          kind: 'code',
+          state,
+          code,
+          environment,
+        })
+      }
+    ),
+    { numRuns: 500 }
+  )
+
+  fc.assert(
+    fc.property(
+      desktopLoginValueArbitrary,
+      fc.constantFrom(...EXPECTED_ERRORS),
+      fc.option(fc.oneof(fc.constantFrom(...EXPECTED_REFUSAL_REASONS), fc.string()), {
+        nil: undefined,
+      }),
+      (state, error, reason) => {
+        const link = links.buildDesktopLoginErrorLink({
+          state,
+          error,
+          ...(reason === undefined ? {} : { reason }),
+        })
+        let expected = { kind: 'error', state, error }
+        if (error === 'refused') {
+          expected = EXPECTED_REFUSAL_REASONS.includes(reason)
+            ? { kind: 'error', state, error: 'refused', reason }
+            : { kind: 'error', state, error: 'failed' }
+        }
+        assert.deepEqual(links.parseDesktopLoginLink(link), expected)
+      }
+    ),
+    { numRuns: 500 }
+  )
+})
+
+test('the page URL carries the values in the fragment and none in the query', () => {
+  const built = links.buildDesktopLoginPageUrl(SIGN_IN_URL, { challenge: CHALLENGE, state: STATE })
+
+  assert.equal(built, `${SIGN_IN_URL}#challenge=${CHALLENGE}&state=${STATE}`)
+  const url = new URL(built)
+  assert.equal(url.search, '')
+  assert.equal(built.includes('?'), false)
+  assert.equal(url.pathname, '/desktop-login')
+  assert.equal(url.hash, `#challenge=${CHALLENGE}&state=${STATE}`)
+  assert.equal(
+    links.parseDesktopLoginPageUrl(`${SIGN_IN_URL}?challenge=${CHALLENGE}&state=${STATE}`),
+    null
+  )
+  assert.equal(
+    links.parseDesktopLoginPageUrl(`${SIGN_IN_URL}?#challenge=${CHALLENGE}&state=${STATE}`),
+    null
+  )
+  assert.equal(links.parseDesktopLoginPageUrl(SIGN_IN_URL), null)
+
+  for (const [signInUrl, values] of [
+    ['http://profile.example.test/desktop-login', { challenge: CHALLENGE, state: STATE }],
+    [`${SIGN_IN_URL}?`, { challenge: CHALLENGE, state: STATE }],
+    [SIGN_IN_URL, { challenge: CHALLENGE.slice(1), state: STATE }],
+    [SIGN_IN_URL, { challenge: CHALLENGE, state: `${STATE.slice(1)}=` }],
+  ]) {
+    assert.throws(
+      () => links.buildDesktopLoginPageUrl(signInUrl, values),
+      /Cannot create a Desktop sign-in page URL/
+    )
+  }
+})
+
+test('the fragment parser rejects duplicates, extra keys and bad values, and keeps a well-formed state', () => {
+  const valid = { valid: true, challenge: CHALLENGE, state: STATE }
+  assert.deepEqual(links.parseDesktopLoginFragment(`#challenge=${CHALLENGE}&state=${STATE}`), valid)
+  assert.deepEqual(links.parseDesktopLoginFragment(`challenge=${CHALLENGE}&state=${STATE}`), valid)
+  assert.deepEqual(links.parseDesktopLoginFragment(`#state=${STATE}&challenge=${CHALLENGE}`), valid)
+
+  for (const hash of [
+    `#challenge=${CHALLENGE}&challenge=${CHALLENGE}&state=${STATE}`,
+    `#challenge=${CHALLENGE}&state=${STATE}&extra=1`,
+    `#challenge=${CHALLENGE}&state=${STATE}&`,
+    `#challenge=${CHALLENGE.slice(1)}&state=${STATE}`,
+    `#challenge=${CHALLENGE}!&state=${STATE}`,
+    `#challenge=${CHALLENGE.slice(3)}%41%41%41&state=${STATE}`,
+    `#challenge&state=${STATE}`,
+    `#state=${STATE}`,
+    `##challenge=${CHALLENGE}&state=${STATE}`,
+  ]) {
+    assert.deepEqual(links.parseDesktopLoginFragment(hash), { valid: false, state: STATE }, hash)
+  }
+
+  for (const hash of [
+    `#challenge=${CHALLENGE}&state=${STATE}&state=${STATE}`,
+    `#challenge=${CHALLENGE}&state=${STATE.slice(1)}`,
+    `#challenge=${CHALLENGE}&state=${STATE}+`,
+    `#challenge=${CHALLENGE}&state`,
+    `#challenge=${CHALLENGE}`,
+    '#',
+    '',
+  ]) {
+    assert.deepEqual(links.parseDesktopLoginFragment(hash), { valid: false, state: null }, hash)
+  }
+  for (const hash of [undefined, null, 42, {}, [`challenge=${CHALLENGE}&state=${STATE}`]]) {
+    assert.deepEqual(links.parseDesktopLoginFragment(hash), { valid: false, state: null })
+  }
+})
+
+test('the error builder maps an unknown or missing refusal reason to failed', () => {
+  const failed = desktopLoginLink(`state=${STATE}&error=failed`)
+
+  assert.equal(
+    links.buildDesktopLoginErrorLink({
+      state: STATE,
+      error: 'refused',
+      reason: 'invitation_email_mismatch',
+    }),
+    failed
+  )
+  assert.equal(links.buildDesktopLoginErrorLink({ state: STATE, error: 'refused' }), failed)
+  assert.equal(
+    links.buildDesktopLoginErrorLink({ state: STATE, error: 'refused', reason: '' }),
+    failed
+  )
+  assert.equal(
+    links.buildDesktopLoginErrorLink({ state: STATE, error: 'refused', reason: 'no_account' }),
+    desktopLoginLink(`state=${STATE}&error=refused&reason=no_account`)
+  )
+})
+
+test('the link parser reads a refused link with an unknown or missing reason as failed', () => {
+  const failed = { kind: 'error', state: STATE, error: 'failed' }
+
+  assert.deepEqual(
+    links.parseDesktopLoginLink(
+      desktopLoginLink(`state=${STATE}&error=refused&reason=invitation_email_mismatch`)
+    ),
+    failed
+  )
+  assert.deepEqual(
+    links.parseDesktopLoginLink(desktopLoginLink(`state=${STATE}&error=refused`)),
+    failed
+  )
+  assert.deepEqual(
+    links.parseDesktopLoginLink(desktopLoginLink(`state=${STATE}&error=refused&reason=`)),
+    failed
+  )
+  assert.deepEqual(
+    links.parseDesktopLoginLink(desktopLoginLink(`state=${STATE}&error=refused&reason=no_account`)),
+    { kind: 'error', state: STATE, error: 'refused', reason: 'no_account' }
+  )
+  for (const error of ['cancelled', 'unavailable', 'failed']) {
+    assert.deepEqual(
+      links.parseDesktopLoginLink(desktopLoginLink(`state=${STATE}&error=${error}`)),
+      { kind: 'error', state: STATE, error }
+    )
+  }
+})
+
+test('the link parser rejects unknown errors, extra or duplicate parameters, a reason on a non-refused error, and mixed code and error links', () => {
+  const environment = encodeURIComponent(ENVIRONMENT)
+  const codeQuery = `state=${STATE}&code=${CODE}&environment=${environment}`
+  assert.deepEqual(links.parseDesktopLoginLink(desktopLoginLink(codeQuery)), {
+    kind: 'code',
+    state: STATE,
+    code: CODE,
+    environment: ENVIRONMENT,
+  })
+
+  for (const rawUrl of [
+    desktopLoginLink(`state=${STATE}&error=denied`),
+    desktopLoginLink(`state=${STATE}&error=failed&extra=1`),
+    desktopLoginLink(`${codeQuery}&extra=1`),
+    desktopLoginLink(`state=${STATE}&state=${STATE}&error=failed`),
+    desktopLoginLink(`${codeQuery}&code=${CODE}`),
+    desktopLoginLink(`state=${STATE}&error=refused&reason=no_account&reason=no_account`),
+    desktopLoginLink(`state=${STATE}&error=cancelled&reason=no_account`),
+    desktopLoginLink(`state=${STATE}&error=failed&reason=`),
+    desktopLoginLink(`state=${STATE}&code=${CODE}&error=failed`),
+    desktopLoginLink(`${codeQuery}&error=failed`),
+    desktopLoginLink(`${codeQuery}&reason=no_account`),
+    desktopLoginLink(`state=${STATE}&code=${CODE}`),
+    desktopLoginLink(`state=${STATE}&environment=${environment}`),
+    desktopLoginLink(`state=${STATE}`),
+    desktopLoginLink(`error=failed`),
+    desktopLoginLink(`state=${STATE.slice(1)}&error=failed`),
+    desktopLoginLink(`state=${STATE}&code=${CODE.slice(1)}&environment=${environment}`),
+    desktopLoginLink(`state=${STATE}&code=${CODE}&environment=ftp%3A%2F%2Fedge.example.test`),
+    `evenfire://desktop-login?${codeQuery}#`,
+    `evenfire://desktop-login?${codeQuery}#fragment`,
+    `evenfire://desktop-login/?state=${STATE}&error=failed`,
+    `evenfire://desktop-login/extra?state=${STATE}&error=failed`,
+    `evenfire://desktop-login:444?state=${STATE}&error=failed`,
+    `evenfire://fixture-user@desktop-login?state=${STATE}&error=failed`,
+    `evenfire://DESKTOP-LOGIN?state=${STATE}&error=failed`,
+    `evenfire://desktop-setup?state=${STATE}&error=failed`,
+    `clerum://desktop-login?state=${STATE}&error=failed`,
+    `https://desktop-login/?state=${STATE}&error=failed`,
+    'not a link',
+    undefined,
+    42,
+    {},
+  ]) {
+    assert.equal(links.parseDesktopLoginLink(rawUrl), null, String(rawUrl))
+  }
+})
+
+test('the link builders refuse a bad state, code, environment or error', () => {
+  for (const values of [
+    { state: STATE.slice(1), code: CODE, environment: ENVIRONMENT },
+    { state: STATE, code: `${CODE.slice(1)}/`, environment: ENVIRONMENT },
+    { state: STATE, code: CODE, environment: 'ftp://edge-fixture.example.test' },
+    { state: STATE, code: CODE, environment: 'https://fixture-user@edge-fixture.example.test' },
+    { state: STATE, code: CODE, environment: 'https://:fixture@edge-fixture.example.test' },
+    { state: STATE, code: CODE, environment: `${ENVIRONMENT}?` },
+    { state: STATE, code: CODE, environment: `${ENVIRONMENT}#` },
+    { state: STATE, code: CODE, environment: 'not a url' },
+    { state: STATE, code: CODE },
+  ]) {
+    assert.throws(
+      () => links.buildDesktopLoginCodeLink(values),
+      /Cannot create a Desktop sign-in link/
+    )
+  }
+  for (const values of [
+    { state: STATE.slice(1), error: 'failed' },
+    { state: undefined, error: 'cancelled' },
+    { state: STATE, error: 'denied' },
+    { state: STATE },
+  ]) {
+    assert.throws(
+      () => links.buildDesktopLoginErrorLink(values),
+      /Cannot create a Desktop sign-in link/
+    )
+  }
+  // A reason belongs only to a refusal, so another error's link carries none.
+  assert.equal(
+    links.buildDesktopLoginErrorLink({ state: STATE, error: 'cancelled', reason: 'no_account' }),
+    desktopLoginLink(`state=${STATE}&error=cancelled`)
+  )
+})
+
+test('a link environment is http or https with no user info, query or fragment, and comes back unchanged', () => {
+  const roundTrip = environment =>
+    links.parseDesktopLoginLink(
+      links.buildDesktopLoginCodeLink({ state: STATE, code: CODE, environment })
+    )
+  const pathPrefix = 'https://edge-fixture.example.test/'
+
+  for (const environment of [
+    ENVIRONMENT,
+    'http://edge-fixture.example.test',
+    'https://edge-fixture.example.test:8443/rest',
+    // 2048 characters whose percent-encoding is the longest a link can carry.
+    `${pathPrefix}${'中'.repeat(2048 - pathPrefix.length)}`,
+    `${pathPrefix}${'/'.repeat(2048 - pathPrefix.length)}`,
+  ]) {
+    assert.deepEqual(roundTrip(environment), {
+      kind: 'code',
+      state: STATE,
+      code: CODE,
+      environment,
+    })
+  }
+
+  const tooLong = `${pathPrefix}${'a'.repeat(2049 - pathPrefix.length)}`
+  assert.equal(tooLong.length, 2049)
+  assert.throws(
+    () => links.buildDesktopLoginCodeLink({ state: STATE, code: CODE, environment: tooLong }),
+    /Cannot create a Desktop sign-in link/
+  )
+  for (const environment of [
+    tooLong,
+    'ftp://edge-fixture.example.test',
+    'https://fixture-user@edge-fixture.example.test',
+    'https://:fixture@edge-fixture.example.test',
+    `${ENVIRONMENT}?`,
+    `${ENVIRONMENT}?a=1`,
+    `${ENVIRONMENT}#`,
+    `${ENVIRONMENT}#a`,
+    'edge-fixture.example.test',
+  ]) {
+    assert.equal(
+      links.parseDesktopLoginLink(
+        desktopLoginLink(
+          `state=${STATE}&code=${CODE}&environment=${encodeURIComponent(environment)}`
+        )
+      ),
+      null,
+      environment
+    )
+  }
+})
+
+test('signInUrl parsing refuses http, user info, a query, a fragment and another path', () => {
+  assert.equal(links.parseDesktopLoginSignInUrl(SIGN_IN_URL), SIGN_IN_URL)
+  assert.equal(
+    links.parseDesktopLoginSignInUrl('https://profile.example.test:8443/desktop-login'),
+    'https://profile.example.test:8443/desktop-login'
+  )
+  for (const rawUrl of [
+    'http://profile.example.test/desktop-login',
+    'ftp://profile.example.test/desktop-login',
+    'https://fixture-user@profile.example.test/desktop-login',
+    'https://fixture-user:pass@profile.example.test/desktop-login',
+    'https://:fixture@profile.example.test/desktop-login',
+    'https://profile.example.test/desktop-login?next=1',
+    'https://profile.example.test/desktop-login#challenge=1',
+    'https://profile.example.test/',
+    'https://profile.example.test',
+    'https://profile.example.test/login',
+    'https://profile.example.test/desktop-login/extra',
+    'https://profile.example.test/prefix/desktop-login',
+    'https://profile.example.test/desktop-login-extra',
+    'not a url',
+  ]) {
+    assert.equal(links.parseDesktopLoginSignInUrl(rawUrl), null, rawUrl)
+  }
+})
+
+test('signInUrl parsing refuses the near misses Desktop relies on it for', () => {
+  assert.equal(
+    links.parseDesktopLoginSignInUrl('https://profile.example.test/desktop-login'),
+    'https://profile.example.test/desktop-login'
+  )
+
+  // Dot segments normalise to /desktop-login, so these two differ only in length.
+  const origin = 'https://profile.example.test'
+  const pathValue = '/desktop-login'
+  const atLimit = `${origin}${'/.'.repeat((2048 - origin.length - pathValue.length) / 2)}${pathValue}`
+  const overLimit = `${origin}${'/..'.repeat((2049 - origin.length - pathValue.length) / 3)}${pathValue}`
+  assert.equal(atLimit.length, 2048)
+  assert.equal(overLimit.length, 2049)
+  assert.equal(new URL(overLimit).pathname, pathValue)
+  assert.equal(links.parseDesktopLoginSignInUrl(atLimit), SIGN_IN_URL)
+
+  for (const rawUrl of [
+    'https://profile.example.test/desktop-login?',
+    'https://profile.example.test/desktop-login#',
+    'https://profile.example.test/desktop-login/',
+    'https://profile.example.test/Desktop-Login',
+    'https://profile.example.test/DESKTOP-LOGIN',
+    overLimit,
+    undefined,
+    42,
+    {},
+    // Stringifies to a valid signInUrl, so only the type guard refuses it.
+    ['https://profile.example.test/desktop-login'],
+  ]) {
+    assert.equal(links.parseDesktopLoginSignInUrl(rawUrl), null, String(rawUrl))
+  }
+})
+
+test('the signInUrl in the edge methods fixture parses with the page-URL parser', () => {
+  const { body } = readEdgeFixture('GET /api/v1/auth/methods password-and-oidc')
+  const signInUrl = links.parseDesktopLoginSignInUrl(body.oidc.signInUrl)
+
+  assert.notEqual(signInUrl, null)
+  assert.equal(signInUrl, body.oidc.signInUrl)
+  const pageUrl = links.buildDesktopLoginPageUrl(body.oidc.signInUrl, {
+    challenge: CHALLENGE,
+    state: STATE,
+  })
+  assert.deepEqual(links.parseDesktopLoginPageUrl(pageUrl), {
+    signInUrl: body.oidc.signInUrl,
+    challenge: CHALLENGE,
+    state: STATE,
+  })
+})
+
+test('the desktop-code-issued answer in the edge fixture round-trips through a code link', () => {
+  const { body } = readEdgeFixture('POST /api/v1/oidc/profile-flow/complete desktop-code-issued')
+  assert.equal(body.outcome, 'desktop_code_issued')
+
+  const link = links.buildDesktopLoginCodeLink({
+    state: STATE,
+    code: body.code,
+    environment: body.environment,
+  })
+
+  assert.deepEqual(links.parseDesktopLoginLink(link), {
+    kind: 'code',
+    state: STATE,
+    code: body.code,
+    environment: body.environment,
+  })
+})

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { deleteManagedUser } from '../lib/api'
+import { EXTERNAL_REST_API_BASE_URL } from '../app/constants/api'
+import { createDesktopAuthorization, deleteManagedUser } from '../lib/api'
 
 const USER_ID = '11111111-1111-4111-8111-111111111111'
 const CORRELATION_ID = '22222222-2222-4222-8222-222222222222'
@@ -61,6 +62,38 @@ test('deleteManagedUser default caller path supplies generated idempotency and c
     assert.deepEqual(JSON.parse(String(request.init?.body)), {
       reason: 'profile_ui_user_retirement',
     })
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('createDesktopAuthorization posts an empty body to the desktop authorization route', async () => {
+  const previousFetch = globalThis.fetch
+  let request: { url: string; init?: RequestInit } | undefined
+  // Only the request is asserted. The answer has DesktopAuthorizationResponse's shape with the
+  // synthetic token DesktopSetupPanel.test.tsx uses.
+  const authorization = {
+    authorizationToken: 'fixture-desktop-auth-token-00000',
+    expiresInSeconds: 120,
+  }
+  globalThis.fetch = (async (input, init) => {
+    request = { url: String(input), init }
+    return new Response(JSON.stringify(authorization), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }) as typeof fetch
+  try {
+    assert.deepEqual(await createDesktopAuthorization(), authorization)
+    const capturedRequest = request
+    assert.ok(capturedRequest)
+    assert.equal(capturedRequest.init?.method, 'POST')
+    assert.equal(
+      capturedRequest.url,
+      `${EXTERNAL_REST_API_BASE_URL}/api/v1/invitations/desktop-authorization`
+    )
+    // The signed-in session is the only authority, so the body names nothing.
+    assert.equal(capturedRequest.init?.body, '{}')
   } finally {
     globalThis.fetch = previousFetch
   }

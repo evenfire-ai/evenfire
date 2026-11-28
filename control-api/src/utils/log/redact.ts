@@ -49,6 +49,13 @@ export const TOKEN_LEAK_REDACT_PATHS: readonly string[] = [
   '*.access_token',
   '*.refresh_token',
   '*.id_token',
+  // The invitation link's bearer token, which an OIDC sign-in started from
+  // that link posts in its request body. `*.` reaches one level only, so a
+  // logged request's body needs its own path.
+  'invitationToken',
+  '*.invitationToken',
+  'body.invitationToken',
+  'req.body.invitationToken',
 ]
 
 /** Asserted by unit tests so redactions can grow but never shrink. */
@@ -92,4 +99,8 @@ export const REQUIRED_REDACT_PATHS: readonly string[] = [
   '*.access_token',
   '*.refresh_token',
   '*.id_token',
+  'invitationToken',
+  '*.invitationToken',
+  'body.invitationToken',
+  'req.body.invitationToken',
 ]

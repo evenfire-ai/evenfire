@@ -8,6 +8,7 @@ import {
 
 test('public profile routes stay outside the authenticated application frame', () => {
   for (const pathname of [
+    '/desktop-login',
     '/desktop-setup',
     '/forgot-password',
     '/invitations/token',
