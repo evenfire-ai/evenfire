@@ -4004,5 +4004,249 @@
   {
     "suite": "gitRead.corpus.integration.test.ts",
     "fullName": "git_read corpus on real git output past the cap is cut with a fixed line and is not an error"
+  },
+  {
+    "suite": "main.gitReadProbe.test.ts",
+    "fullName": "main.ts git_read probe wiring probes once at startup and the native tool registry registers git_read"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect no redirect for a command in a directory git_read cannot take"
+  },
+  {
+    "suite": "gitRedirect.integration.test.ts",
+    "fullName": "typed-git redirect no redirect for a names-only command with a flag git_read lacks"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log --oneline -5 is expressible as git_read: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log -n 3 --author me --stat is expressible as git_read: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log --since=2026-01-01 --format=%h --all is expressible as git_read: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git status -sb is expressible as git_read: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git status --porcelain -- src is expressible as git_read: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git branch -a -vv is expressible as git_read: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git tag -l --sort=-creatordate is expressible as git_read: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git for-each-ref --sort=-committerdate --format=%(refname) is expressible as git_read: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git rev-list --count HEAD is expressible as git_read: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git describe --tags --always is expressible as git_read: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git shortlog -sn is expressible as git_read: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git ls-tree -r --name-only HEAD is expressible as git_read: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git reflog -10 is expressible as git_read: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git remote -v is expressible as git_read: true"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log --merges is expressible as git_read: false"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log --decorate --oneline is expressible as git_read: false"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git status --ignored is expressible as git_read: false"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git ls-files --others is expressible as git_read: false"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git rev-parse --short HEAD is expressible as git_read: false"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git branch --no-merged main is expressible as git_read: false"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git log -n is expressible as git_read: false"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git status runs in git_read directory ."
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git -C service log -3 runs in git_read directory service"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead cd service && git status runs in git_read directory service"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead cd apps && git -C api log -3 runs in git_read directory apps/api"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git -C /etc status runs in git_read directory null"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead cd /tmp && git log runs in git_read directory null"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git -C .. status runs in git_read directory null"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead cd a/../b && git status runs in git_read directory null"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead cd ~ && git status runs in git_read directory null"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git -C ~/repo status runs in git_read directory null"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git -C \"repo\" status runs in git_read directory null"
+  },
+  {
+    "suite": "gitRedirect.test.ts",
+    "fullName": "matchTypedGitRead git -C -x status runs in git_read directory null"
+  },
+  {
+    "suite": "gitRead.definition.test.ts",
+    "fullName": "git_read definition says refusals are fixed text and git errors pass through"
+  },
+  {
+    "suite": "gitRead.definition.test.ts",
+    "fullName": "git_read definition says protected paths are excluded by name, not that their content is never returned"
+  },
+  {
+    "suite": "gitRead.existenceOracle.integration.test.ts",
+    "fullName": "git_read answers an outside path the same whether it exists or not an alternates entry"
+  },
+  {
+    "suite": "gitRead.existenceOracle.integration.test.ts",
+    "fullName": "git_read answers an outside path the same whether it exists or not a link inside .git"
+  },
+  {
+    "suite": "gitRead.existenceOracle.integration.test.ts",
+    "fullName": "git_read answers an outside path the same whether it exists or not a gitdir file"
+  },
+  {
+    "suite": "gitRead.existenceOracle.integration.test.ts",
+    "fullName": "git_read answers an outside path the same whether it exists or not core.worktree"
+  },
+  {
+    "suite": "gitRead.existenceOracle.integration.test.ts",
+    "fullName": "git_read answers an outside path the same whether it exists or not a directory with no repository is still not a repository"
+  },
+  {
+    "suite": "gitRead.kernelPaths.integration.test.ts",
+    "fullName": "git_read confines on the path the kernel opens an absolute alternates entry through a workspace link and .. is refused"
+  },
+  {
+    "suite": "gitRead.kernelPaths.integration.test.ts",
+    "fullName": "git_read confines on the path the kernel opens a relative alternates entry through a link inside objects/ and .. is refused"
+  },
+  {
+    "suite": "gitRead.kernelPaths.integration.test.ts",
+    "fullName": "git_read confines on the path the kernel opens objects/pack replaced by a link whose target holds lnk/.. is refused"
+  },
+  {
+    "suite": "gitRead.kernelPaths.integration.test.ts",
+    "fullName": "git_read confines on the path the kernel opens a directory reached through a link and .. is confined after it is resolved"
+  },
+  {
+    "suite": "gitRead.kernelPaths.integration.test.ts",
+    "fullName": "git_read confines on the path the kernel opens a recorded worktree path that is not normalized is refused for worktree_list"
+  },
+  {
+    "suite": "gitRead.kernelPaths.integration.test.ts",
+    "fullName": "git_read confines on the path the kernel opens an ordinary repository with a link inside the workspace still runs"
+  },
+  {
+    "suite": "gitRead.notesListing.integration.test.ts",
+    "fullName": "the notes listing fails closed a content call is refused when the listing exits non-zero"
+  },
+  {
+    "suite": "gitRead.notesListing.integration.test.ts",
+    "fullName": "the notes listing fails closed a content call is refused when the listing fails to start"
+  },
+  {
+    "suite": "gitRead.notesListing.integration.test.ts",
+    "fullName": "the notes listing fails closed a content call is refused when the listing ends abnormally"
+  },
+  {
+    "suite": "gitRead.notesListing.integration.test.ts",
+    "fullName": "the notes listing fails closed witness: with a working listing the same call passes the check"
+  },
+  {
+    "suite": "gitRead.pinnedRepository.integration.test.ts",
+    "fullName": "git_read runs the call on the checked repository a .git that appears after the checks is not used"
+  },
+  {
+    "suite": "gitRead.registration.test.ts",
+    "fullName": "git_read registration registers git_read only when the shell and the file tools share one defined root"
+  },
+  {
+    "suite": "gitRead.remoteCredentials.integration.test.ts",
+    "fullName": "git_read remote strips URL credentials remote -v lists every remote with its userinfo replaced"
+  },
+  {
+    "suite": "gitRead.remoteCredentials.integration.test.ts",
+    "fullName": "git_read remote strips URL credentials remote get_url strips it too"
+  },
+  {
+    "suite": "gitRead.remoteCredentials.integration.test.ts",
+    "fullName": "git_read remote strips URL credentials withoutUrlCredentials leaves a URL with no userinfo unchanged"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) a core.worktree elsewhere in the workspace is refused for a call from the repository directory"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) the link walk yields to the event loop between directory reads"
+  },
+  {
+    "suite": "gitRead.repositoryLinks.integration.test.ts",
+    "fullName": "git_read repository links (P2–P4) the link walk stops with timeout past its deadline"
   }
 ]
