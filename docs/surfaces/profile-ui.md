@@ -37,9 +37,12 @@ GET /api/v1/invitations/token/:token` before it renders.
    the ordinary login. Password reset (`POST
 /api/v1/invitations/password-reset`) follows the same post-password
    contract. With member sign-in (OIDC) on, the page also offers "Continue with
-   …" (even when the preview could not load, never beside the password form or
-   for a password reset); it posts the invitation token to `/api/oidc/start`,
-   which starts the provider sign-in with it, or without it if it is malformed.
+   …", never beside the password form or on a password reset whose preview
+   loaded. When the preview could not load, the link's purpose is unknown, so a
+   reset link shows the button too; control-api then starts that sign-in without
+   the invitation, because only a pending member invitation is carried into a
+   sign-in. The button posts the invitation token to `/api/oidc/start`, which
+   starts the provider sign-in with it, or without it if it is malformed.
 5. **The person signs in with the new password** and lands on the profile home.
    Profile UI offers a Download Evenfire link — not an automatic handoff. The
    member installs the [Desktop App](desktop-app.md) themselves and completes

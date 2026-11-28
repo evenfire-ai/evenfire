@@ -161,7 +161,7 @@ describe('InvitationClient provider sign-in', () => {
     }
   })
 
-  it('offers no provider button and makes no configuration fetch for a password reset or during password setup', async () => {
+  it('offers no provider button and makes no configuration fetch for a password reset whose preview loaded, or during password setup', async () => {
     for (const [label, preview, panelControl] of [
       [
         'a password reset',

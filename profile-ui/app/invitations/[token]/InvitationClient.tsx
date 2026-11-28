@@ -36,7 +36,10 @@ type PasswordPhase = 'editing' | 'submitting' | 'updated' | 'outcome_unknown' | 
 
 /**
  * The panels below which the page offers "Continue with <label>" (plan decision 4). The password
- * panel does not: its invitation is already accepted, or it is a password reset.
+ * panel does not: its invitation is already accepted, or it is a password reset. On `link-error`
+ * the preview did not load, so the link's purpose is unknown and a reset link gets the button too;
+ * control-api then starts that sign-in without the invitation, because only a pending member
+ * invitation is carried into a sign-in.
  */
 const PROVIDER_SIGN_IN_MODES: ReadonlySet<InvitationPanelMode> = new Set([
   'link-error',
@@ -210,7 +213,8 @@ export function InvitationClient({
                 : 'accept'
   const providerSignInOffered = offersProviderSignIn(panelMode, isPasswordReset)
   // Kept from the first render: only a page that opens on one of those panels asks for the
-  // configuration, so a password reset or the password panel makes no request.
+  // configuration, so a password reset whose preview loaded, or the password panel, makes no
+  // request.
   const [providerSignInAtOpen] = useState(providerSignInOffered)
 
   useEffect(() => {
