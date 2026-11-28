@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { CONTROL_API_MIGRATIONS, initDb } from '../src/db.js'
 import type { PinnedFetchOptions } from '../src/http/pinnedFetch.js'
+import { applyOidcDesktopSignInSchema } from '../src/oidc/desktopSignInSchema.js'
 import {
   type OidcProtocolAttemptBinding,
   applyOidcProtocolAttemptBrowserBindingSchema,
@@ -387,6 +388,9 @@ describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
   })
 
   it('stores and claims an attempt on the 0141 table before the browser-binding upgrade', async () => {
+    // The contexts from 0160_oidc_desktop_sign_in reference the attempts
+    // table, so they go first and come back with it.
+    await pool!.query('DROP TABLE IF EXISTS oidc_attempt_sign_in_contexts')
     await pool!.query('DROP TABLE IF EXISTS oidc_protocol_attempts')
     await pool!.query(`DELETE FROM schema_migrations WHERE version = ANY($1::text[])`, [
       [
@@ -396,6 +400,7 @@ describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
       ],
     ])
     await applyOidcProtocolAttemptSchema(pool!)
+    await applyOidcDesktopSignInSchema(pool!)
 
     const state = `state-${randomBytes(32).toString('base64url')}`
     const created = await insertOidcProtocolAttempt(pool!, ENCRYPTION_KEY, {
@@ -428,6 +433,7 @@ describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
   })
 
   it('upgrades legacy attempt rows and requires browser binding for new pending attempts', async () => {
+    await pool!.query('DROP TABLE IF EXISTS oidc_attempt_sign_in_contexts')
     await pool!.query('DROP TABLE IF EXISTS oidc_protocol_attempts')
     await pool!.query(`DELETE FROM schema_migrations WHERE version = ANY($1::text[])`, [
       [
@@ -437,6 +443,7 @@ describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
       ],
     ])
     await applyOidcProtocolAttemptSchema(pool!)
+    await applyOidcDesktopSignInSchema(pool!)
     await applyOidcProtocolAttemptExpiryIndexMigration(pool!)
 
     const pendingId = randomUUID()
@@ -592,6 +599,7 @@ describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
       const migration = CONTROL_API_MIGRATIONS.find(
         candidate => candidate.version === '0148_oidc_protocol_attempts'
       )
+      await pool!.query('DROP TABLE IF EXISTS oidc_attempt_sign_in_contexts')
       await pool!.query('DROP TABLE IF EXISTS oidc_protocol_attempts')
       await pool!.query('DELETE FROM schema_migrations WHERE version = $1', [migration!.version])
       await pool!.query(
@@ -616,6 +624,7 @@ describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
 
   it('adopts the earlier expiry-index receipt without rebuilding its missing index', async () => {
     await applyOidcProtocolAttemptSchema(pool!)
+    await applyOidcDesktopSignInSchema(pool!)
     await applyOidcProtocolAttemptExpiryIndexMigration(pool!)
     await applyOidcProtocolAttemptBrowserBindingSchema(pool!)
     await pool!.query('DELETE FROM schema_migrations WHERE version = $1', [
@@ -642,6 +651,7 @@ describeRealPostgres('OIDC protocol attempts on real PostgreSQL', () => {
 
   it('adopts the earlier browser-binding receipt without reapplying its ALTER', async () => {
     await applyOidcProtocolAttemptSchema(pool!)
+    await applyOidcDesktopSignInSchema(pool!)
     await applyOidcProtocolAttemptExpiryIndexMigration(pool!)
     await applyOidcProtocolAttemptBrowserBindingSchema(pool!)
     await pool!.query(`

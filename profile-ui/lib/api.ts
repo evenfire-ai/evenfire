@@ -550,12 +550,13 @@ export async function updateNotificationPreferences(
   ) as Promise<NotificationPreferences>
 }
 
-export async function createDesktopAuthorization(
-  password: string
-): Promise<DesktopAuthorizationResponse> {
-  return apiSend('POST', '/api/v1/invitations/desktop-authorization', {
-    password,
-  }) as Promise<DesktopAuthorizationResponse>
+// The signed-in session is the only authority, so the body names nothing.
+export async function createDesktopAuthorization(): Promise<DesktopAuthorizationResponse> {
+  return apiSend(
+    'POST',
+    '/api/v1/invitations/desktop-authorization',
+    {}
+  ) as Promise<DesktopAuthorizationResponse>
 }
 
 export async function getDesktopEnvironment(): Promise<DesktopEnvironmentResponse> {

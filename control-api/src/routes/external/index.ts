@@ -2,6 +2,7 @@ import { Router } from 'express'
 import type { K8sGateway } from '../../k8s.js'
 import { createExternalAccessRouter } from './access.js'
 import { createExternalAuthRouter } from './auth.js'
+import { createExternalAuthMethodsRouter } from './authMethods.js'
 import { createExternalUserApprovalDecisionsRouter } from './decisions.routes.js'
 import { createExternalDirectoryRouter } from './directory.js'
 import { createExternalGfsRouter } from './gfs.js'
@@ -10,6 +11,7 @@ import { createExternalInvitationsRouter } from './invitations.js'
 import { createExternalMembersRouter } from './members.js'
 import { createExternalNotificationsRouter } from './notifications.routes.js'
 import { createExternalOauthGrantsRouter } from './oauthGrants.js'
+import { createExternalOidcDesktopSignInRouter } from './oidcDesktopSignIn.js'
 import { createExternalOidcProfileFlowRouter } from './oidcProfileFlow.js'
 import { createExternalRpcDelegationsRouter } from './rpcDelegations.js'
 import { createExternalSharedFilesystemsRouter } from './sharedFilesystems.js'
@@ -22,6 +24,7 @@ export function createExternalRouter(gateway: K8sGateway): Router {
   const router = Router()
   router.use(createExternalAccessRouter())
   router.use(createExternalAuthRouter(gateway))
+  router.use(createExternalAuthMethodsRouter())
   router.use(createExternalRpcDelegationsRouter(gateway))
   router.use(createExternalUsersRouter(gateway))
   router.use(createExternalTeamsRouter(gateway))
@@ -39,5 +42,6 @@ export function createExternalRouter(gateway: K8sGateway): Router {
   router.use(createExternalWorkflowsRouter(gateway))
   router.use(createExternalOauthGrantsRouter())
   router.use(createExternalOidcProfileFlowRouter())
+  router.use(createExternalOidcDesktopSignInRouter())
   return router
 }

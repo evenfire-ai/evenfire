@@ -2,6 +2,7 @@ import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { LoginPanel } from '@components/LoginPanel'
+import { edgeRecord, edgeResponse } from '@/test/edgeFixtures'
 
 vi.mock('@components/AuthContext', () => ({
   useAuth: () => ({
@@ -132,5 +133,31 @@ describe('LoginPanel OIDC sign-in button', () => {
     await expectConfigurationFetched()
     expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Continue with/ })).toBeNull()
+  })
+
+  it('adds the hidden returnTo field only when given', async () => {
+    const configurationKey = 'GET /api/v1/oidc/profile-flow/configuration activated'
+    const label = (edgeRecord(configurationKey).body as { displayLabel: string }).displayLabel
+    fetchMock.mockImplementation(async () => edgeResponse(configurationKey))
+
+    render(<LoginPanel returnTo="desktop-setup" />)
+    const withReturn = (
+      await screen.findByRole('button', { name: `Continue with ${label}` })
+    ).closest('form')
+    await expectConfigurationFetched()
+    const fields = withReturn?.querySelectorAll<HTMLInputElement>('input[name="returnTo"]')
+    expect(fields).toHaveLength(1)
+    expect(fields?.[0]?.type).toBe('hidden')
+    expect(fields?.[0]?.value).toBe('desktop-setup')
+
+    cleanup()
+    fetchMock.mockClear()
+    render(<LoginPanel />)
+    const withoutReturn = (
+      await screen.findByRole('button', { name: `Continue with ${label}` })
+    ).closest('form')
+    await expectConfigurationFetched()
+    expect(withoutReturn?.getAttribute('action')).toBe('/api/oidc/start')
+    expect(withoutReturn?.querySelector('input[name="returnTo"]')).toBeNull()
   })
 })

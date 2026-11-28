@@ -14,6 +14,7 @@ import type { LoginPanelProps } from './types'
 
 export function LoginPanel({
   description = 'Sign in with your Evenfire account credentials.',
+  returnTo,
 }: LoginPanelProps) {
   const { login, signOutIncomplete, signOutPending, retrySignOut } = useAuth()
   const [email, setEmail] = useState('')
@@ -106,6 +107,7 @@ export function LoginPanel({
           </form>
           {oidcMethod ? (
             <form className="cu-auth-oidc-form" method="post" action={PROFILE_ROUTES.oidcStart}>
+              {returnTo ? <input type="hidden" name="returnTo" value={returnTo} /> : null}
               <Button type="submit" variant="secondary" className="cu-btn--block">
                 Continue with {oidcMethod.label}
               </Button>

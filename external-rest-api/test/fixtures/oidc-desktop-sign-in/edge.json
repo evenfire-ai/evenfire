@@ -1,0 +1,224 @@
+{
+  "GET /api/v1/auth/methods not-found": {
+    "body": {
+      "error": "Not Found"
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 404
+  },
+  "GET /api/v1/auth/methods password": {
+    "body": {
+      "methods": [
+        "password"
+      ]
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 200
+  },
+  "GET /api/v1/auth/methods password-and-oidc": {
+    "body": {
+      "methods": [
+        "password",
+        "oidc"
+      ],
+      "oidc": {
+        "label": "Fake member sign-in provider",
+        "signInUrl": "https://profile.example.test/desktop-login"
+      }
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 200
+  },
+  "GET /api/v1/auth/methods unavailable": {
+    "body": {
+      "error": "methods_unavailable"
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 503
+  },
+  "GET /api/v1/oidc/profile-flow/configuration activated": {
+    "body": {
+      "displayLabel": "Fake member sign-in provider",
+      "memberAuthenticationActivated": true,
+      "redirectUri": "https://profile.example.test/api/oidc/callback"
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 200
+  },
+  "POST /api/v1/oidc/desktop-sign-in/redeem invalid": {
+    "body": {
+      "error": "invalid_desktop_sign_in_code"
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 400
+  },
+  "POST /api/v1/oidc/desktop-sign-in/redeem issuance-unavailable": {
+    "body": {
+      "error": "session_issuance_temporarily_unavailable"
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 503
+  },
+  "POST /api/v1/oidc/desktop-sign-in/redeem rate-limited": {
+    "body": {
+      "error": "rate_limited",
+      "retryAfterSeconds": 60
+    },
+    "retryAfter": "60",
+    "setCookie": [],
+    "status": 429
+  },
+  "POST /api/v1/oidc/desktop-sign-in/redeem refused-account-disabled": {
+    "body": {
+      "error": "desktop_sign_in_refused",
+      "reason": "account_disabled"
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 403
+  },
+  "POST /api/v1/oidc/desktop-sign-in/redeem signed-in": {
+    "body": {
+      "me": {
+        "email": "member@example.test",
+        "id": "00000000-0000-4000-8000-000000000001",
+        "name": "Fixture Member",
+        "picture": null,
+        "role": "member",
+        "teamId": "00000000-0000-4000-8000-000000000002",
+        "teamName": "Fixture Team"
+      },
+      "token": "fixture-session-token"
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 200
+  },
+  "POST /api/v1/oidc/desktop-sign-in/redeem unavailable": {
+    "body": {
+      "error": "desktop_sign_in_unavailable"
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 409
+  },
+  "POST /api/v1/oidc/desktop-sign-in/redeem upgrade-required": {
+    "body": {
+      "error": "upgrade_required"
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 426
+  },
+  "POST /api/v1/oidc/profile-flow/attempts desktop-echo": {
+    "body": {
+      "authorizationUrl": "https://member-sign-in.example.test/tenant/authorize?client_id=fake-member-sign-in-client&redirect_uri=https%3A%2F%2Fprofile.example.test%2Fapi%2Foidc%2Fcallback&response_type=code&response_mode=query&scope=openid+profile+email&state=fixture-state-sssssssssssssssssssssssssssss&nonce=fixture-nonce-nnnnnnnnnnnnnnnnnnnnnnnnnnnnn&code_challenge=fixture-code-challenge-cccccccccccccccccccc&code_challenge_method=S256",
+      "expiresAt": "FIXTURE_EXPIRES_AT",
+      "signInContext": "desktop_sign_in"
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 200
+  },
+  "POST /api/v1/oidc/profile-flow/attempts desktop-unavailable": {
+    "body": {
+      "error": "desktop_sign_in_unavailable"
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 409
+  },
+  "POST /api/v1/oidc/profile-flow/attempts invalid": {
+    "body": {
+      "error": "invalid_oidc_attempt"
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 400
+  },
+  "POST /api/v1/oidc/profile-flow/attempts plain": {
+    "body": {
+      "authorizationUrl": "https://member-sign-in.example.test/tenant/authorize?client_id=fake-member-sign-in-client&redirect_uri=https%3A%2F%2Fprofile.example.test%2Fapi%2Foidc%2Fcallback&response_type=code&response_mode=query&scope=openid+profile+email&state=fixture-state-sssssssssssssssssssssssssssss&nonce=fixture-nonce-nnnnnnnnnnnnnnnnnnnnnnnnnnnnn&code_challenge=fixture-code-challenge-cccccccccccccccccccc&code_challenge_method=S256",
+      "expiresAt": "FIXTURE_EXPIRES_AT"
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 200
+  },
+  "POST /api/v1/oidc/profile-flow/cancel cancelled": {
+    "body": {
+      "outcome": "attempt_cancelled"
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 200
+  },
+  "POST /api/v1/oidc/profile-flow/complete desktop-code-issued": {
+    "body": {
+      "code": "fffffffffffffffffffffffffffffffffffffffffff",
+      "environment": "https://edge-fixture.example.test",
+      "expiresInSeconds": 90,
+      "memberAuthenticationActivated": true,
+      "outcome": "desktop_code_issued"
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 200
+  },
+  "POST /api/v1/oidc/profile-flow/complete identity-proof-verified": {
+    "body": {
+      "memberAuthenticationActivated": false,
+      "outcome": "identity_proof_verified"
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 200
+  },
+  "POST /api/v1/oidc/profile-flow/complete member-signed-in": {
+    "body": {
+      "memberAuthenticationActivated": true,
+      "outcome": "member_signed_in"
+    },
+    "retryAfter": null,
+    "setCookie": [
+      {
+        "attributes": [
+          "Max-Age=604800",
+          "Path=/",
+          "Expires=Wed, 02 Dec 2026 12:00:00 GMT",
+          "HttpOnly",
+          "Secure",
+          "SameSite=Lax"
+        ],
+        "name": "profile_session"
+      }
+    ],
+    "status": 200
+  },
+  "POST /api/v1/oidc/profile-flow/complete refused": {
+    "body": {
+      "memberAuthenticationActivated": true,
+      "outcome": "refused",
+      "reason": "not_eligible"
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 200
+  },
+  "POST /api/v1/oidc/profile-flow/complete storage-unavailable": {
+    "body": {
+      "error": "oidc_storage_unavailable",
+      "retrySameAttempt": false
+    },
+    "retryAfter": null,
+    "setCookie": [],
+    "status": 503
+  }
+}

@@ -535,7 +535,7 @@ describe('generic OIDC protocol foundation', () => {
 
   it('uses code + PKCE S256, verifies an issuer-bound ID token, and returns only a proof', async () => {
     const f = fixture()
-    const { params } = await begin(f)
+    const { attempt, params } = await begin(f)
     expect(params.get('response_type')).toBe('code')
     expect(params.get('response_mode')).toBe('query')
     expect(params.get('scope')).toBe('openid profile email')
@@ -565,6 +565,11 @@ describe('generic OIDC protocol foundation', () => {
     expect(JSON.stringify(proof)).not.toContain(CLIENT_SECRET)
     expect(f.db.statements.every(sql => sql.includes('oidc_protocol_attempts'))).toBe(true)
     expect([...f.db.rows.values()][0]?.status).toBe('completed')
+    // Begin names the attempt it stored. This fake's claim row has no context
+    // columns, which is a plain attempt: the proof carries a null context.
+    expect(attempt.attemptId).toBe([...f.db.rows.values()][0]?.id)
+    expect(proof.attemptId).toBe(attempt.attemptId)
+    expect(proof.signInContext).toBeNull()
     expect(f.requestedUrls).toContain(`${GENERIC_ISSUER}/keys`)
   })
 

@@ -324,7 +324,7 @@ export function createOidcR5ProtocolFixture(options: OidcR5FixtureOptions = {}) 
       const params = new URL(attempt.authorizationUrl).searchParams
       const state = params.get('state')!
       browserBindings.set(state, browserBinding)
-      return { state, browserBinding }
+      return { state, browserBinding, attemptId: attempt.attemptId }
     },
     async complete(state: string) {
       return engine.completeIdentityProofAttempt({

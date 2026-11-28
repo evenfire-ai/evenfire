@@ -40,7 +40,8 @@ function upstream(status: number): ControlApiError {
 // The body control-api sends with every bare 401: requireValidExternalSessionToken for a
 // missing or ended session (control-api/src/middleware/externalSessionAuth.ts) and
 // its service-credential guard (control-api/src/middleware/internalServiceAuth.ts) when it
-// refuses this edge's credential. The two cannot be told apart.
+// refuses this edge's credential. No body tells the two apart; only the guard adds a
+// refusal header.
 const BARE_UNAUTHORIZED_BODY = { error: 'Unauthorized' }
 const BARE_UNAUTHORIZED_REJECTION = { status: 401, body: BARE_UNAUTHORIZED_BODY }
 
@@ -305,17 +306,46 @@ describe('legacy authority adapters', () => {
     })
   }
 
-  it('does not convert desktop-authorization authority outages into bad passwords', async () => {
-    clientMock.controlApiRequest.mockRejectedValueOnce(
-      new ControlApiError('Control API rejected the password', 401, { error: 'invalid_password' })
-    )
-    await expect(createDesktopAuthorization(auth, 'wrong-password')).resolves.toEqual({
-      error: 'invalid_password',
-    })
-
+  it('keeps a desktop-authorization authority outage an outage', async () => {
     clientMock.controlApiRequest.mockRejectedValueOnce(upstream(503))
-    await expect(createDesktopAuthorization(auth, 'correct-password')).rejects.toMatchObject({
+    await expect(createDesktopAuthorization(auth)).rejects.toMatchObject({
       status: 503,
     })
+    expect(clientMock.controlApiRequest).toHaveBeenCalledOnce()
+    expect(clientMock.controlApiRequest).toHaveBeenCalledWith(
+      'POST',
+      '/external/invitations/desktop-authorization',
+      { body: {}, userSessionToken: auth.sessionToken }
+    )
+  })
+
+  it.each([429, 503])(
+    "rethrows control-api's own desktop-authorization %s with its Retry-After",
+    async status => {
+      // Retry-After 23 is one the service's own fallback (a 503 with 2) never
+      // sends, so only the rethrow of this exact error passes.
+      const answer = new ControlApiError('control api failure', status, null, {
+        'retry-after': '23',
+      })
+      clientMock.controlApiRequest.mockRejectedValueOnce(answer)
+
+      await expect(createDesktopAuthorization(auth)).rejects.toBe(answer)
+      expect(clientMock.controlApiRequest).toHaveBeenCalledOnce()
+    }
+  )
+
+  it('sends an empty body upstream', async () => {
+    // The service relays control-api's answer untouched. An opaque value stands
+    // in for it, so no hand-written control-api body enters this test.
+    const relayed = Symbol('control-api answer')
+    clientMock.controlApiRequest.mockResolvedValueOnce(relayed)
+
+    await expect(createDesktopAuthorization(auth)).resolves.toEqual({ data: relayed })
+    expect(clientMock.controlApiRequest).toHaveBeenCalledOnce()
+    expect(clientMock.controlApiRequest).toHaveBeenCalledWith(
+      'POST',
+      '/external/invitations/desktop-authorization',
+      { body: {}, userSessionToken: auth.sessionToken }
+    )
   })
 })

@@ -59,4 +59,42 @@ describe('OidcSignedIn', () => {
     expect(replace).toHaveBeenCalledTimes(1)
     expect(replace).toHaveBeenCalledWith('/')
   })
+
+  it('returns to /desktop-setup for next=desktop-setup', () => {
+    cookieHeader = '__Host-ef_oidc_signed_in=1'
+    vi.stubGlobal('location', { ...window.location, search: '?next=desktop-setup', replace })
+
+    render(<OidcSignedIn />)
+
+    expect(api.clearUnconfirmedLogout).toHaveBeenCalledTimes(1)
+    expect(replace).toHaveBeenCalledTimes(1)
+    expect(replace).toHaveBeenCalledWith('/desktop-setup')
+  })
+
+  it('falls back to / for an unknown next', () => {
+    cookieHeader = '__Host-ef_oidc_signed_in=1'
+    // Control: the same render does read next, so each fallback below is a rejection.
+    vi.stubGlobal('location', { ...window.location, search: '?next=desktop-setup', replace })
+    render(<OidcSignedIn />)
+    expect(replace).toHaveBeenCalledWith('/desktop-setup')
+    cleanup()
+
+    for (const search of [
+      '?next=https%3A%2F%2Fevil.example',
+      '?next=https://evil.example',
+      '?next=%2Fsettings',
+      '?next=settings',
+      '?next=constructor',
+      '?next=',
+    ]) {
+      replace.mockReset()
+      vi.stubGlobal('location', { ...window.location, search, replace })
+
+      render(<OidcSignedIn />)
+
+      expect(replace, search).toHaveBeenCalledTimes(1)
+      expect(replace, search).toHaveBeenCalledWith('/')
+      cleanup()
+    }
+  })
 })

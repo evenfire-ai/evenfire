@@ -404,21 +404,18 @@ export function createInvitationsRouter(): Router {
     requireAuth,
     async (req: AuthedRequest, res, next) => {
       try {
+        // The signed-in session authorizes /desktop-setup. A password field an
+        // older Profile UI still sends is not read.
         const auth = req.auth!
         const sessionToken = extractAuthToken(req)
-        const password = String(req.body?.password || '')
-        if (!password) {
-          res.status(400).json({ error: 'password is required' })
-          return
-        }
-
-        const result = await createDesktopAuthorization({ ...auth, sessionToken }, password)
+        const result = await createDesktopAuthorization({ ...auth, sessionToken })
         if (result.error === 'not_found') {
           res.status(404).json({ error: 'Invitation setup not found' })
           return
         }
-        if (result.error === 'invalid_password') {
-          res.status(401).json({ error: 'Invalid password' })
+        if (result.error === 'unauthorized') {
+          // Profile UI answers any 401 by sending the member to sign in again.
+          res.status(401).json({ error: 'Unauthorized' })
           return
         }
         res.status(200).json(result.data)

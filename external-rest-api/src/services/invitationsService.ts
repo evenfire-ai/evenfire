@@ -1,4 +1,8 @@
-import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
+import {
+  ControlApiError,
+  controlApiRequest,
+  isControlApiServiceCredentialRejection,
+} from '../controlApiClient.js'
 
 type AuthContext = {
   userId: string
@@ -98,11 +102,10 @@ export async function acceptInvitation(
   }
 }
 
-export async function createDesktopAuthorization(
-  auth: AuthContext,
-  password: string
-): Promise<{
-  error?: 'invalid_password' | 'not_found'
+// control-api reads the member from the session token alone, so the body is
+// empty.
+export async function createDesktopAuthorization(auth: AuthContext): Promise<{
+  error?: 'not_found' | 'unauthorized'
   data?: {
     authorizationToken: string
     expiresInSeconds: number
@@ -113,23 +116,24 @@ export async function createDesktopAuthorization(
       authorizationToken: string
       expiresInSeconds: number
     }>('POST', '/external/invitations/desktop-authorization', {
-      body: {
-        userId: auth.userId,
-        email: auth.email,
-        password,
-      },
+      body: {},
       userSessionToken: auth.sessionToken,
     })
     return { data }
   } catch (error) {
     if (error instanceof ControlApiError && [429, 503].includes(error.status)) throw error
-    if (error instanceof ControlApiError) {
-      if (error.status === 404 && error.code === 'not_found') {
-        return { error: 'not_found' }
-      }
-      if (error.status === 401 && error.code === 'invalid_password') {
-        return { error: 'invalid_password' }
-      }
+    if (error instanceof ControlApiError && error.status === 404 && error.code === 'not_found') {
+      return { error: 'not_found' }
+    }
+    // control-api's 401 for an ended session, or for a session whose account row is missing
+    // or not active: signing in again is the remedy. A refusal of this edge's own service
+    // credential is an outage instead, which signing in cannot fix.
+    if (
+      error instanceof ControlApiError &&
+      error.status === 401 &&
+      !isControlApiServiceCredentialRejection(error)
+    ) {
+      return { error: 'unauthorized' }
     }
     throw passwordAuthorityUnavailable()
   }

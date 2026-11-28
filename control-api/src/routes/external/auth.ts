@@ -53,10 +53,20 @@ import {
   normalizeRequestedScopes,
 } from '../../utils/auth/rpcAuthToken.js'
 import { userHasUiBearingRecipeAccess } from '../../utils/auth/sandboxUiScope.js'
+import { externalLoginResponseBody } from './loginResponse.js'
 
 const PASSWORD_RESET_RATE_LIMIT_PER_MINUTE = 5
 
-function externalSessionClient(req: { body?: unknown; header(name: string): string | undefined }): {
+/**
+ * What an external client says about its session format: its version (header
+ * or body) and its requested contract. Session authentication reads it, and
+ * password login, Google login and Desktop sign-in redeem select the session
+ * representation they issue from it.
+ */
+export function externalSessionClient(req: {
+  body?: unknown
+  header(name: string): string | undefined
+}): {
   version?: string
   requestedContract?: 'v1' | 'v2'
 } {
@@ -261,21 +271,9 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
           return sendExternalLoginError(res, login.error)
         }
 
-        const role = login.membership.role
-        const issued = login.issued
-        return res.status(200).json({
-          token: issued.token,
-          sessionContract: issued.contract,
-          me: {
-            id: login.user.id,
-            email: login.user.email,
-            name: login.user.name,
-            picture: login.user.picture,
-            teamId: login.membership.team_id || null,
-            teamName: login.membership.team_name,
-            role,
-          },
-        })
+        return res
+          .status(200)
+          .json(externalLoginResponseBody(login.issued, login.user, login.membership))
       } catch (error) {
         if (sendPasswordAdmissionError(error, res)) return
         return next(error)

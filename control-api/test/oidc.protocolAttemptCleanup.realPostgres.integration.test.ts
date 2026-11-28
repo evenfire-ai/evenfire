@@ -5,6 +5,7 @@ import { initDb } from '../src/db.js'
 import { insertOidcProtocolAttempt } from '../src/oidc/protocolAttemptStore.js'
 import { endPoolAndWaitForClients } from './helpers/realPostgresTeardown.js'
 import './realPostgres.requirement.js'
+import { waitForDatabaseConnectionsToClose } from './realPostgresCleanup.ts'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -26,6 +27,7 @@ describeRealPostgres('OIDC attempt expiry cleanup on real PostgreSQL', () => {
   const database = `oidc_attempt_cleanup_${randomBytes(6).toString('hex')}`
   let adminPool: Pool | undefined
   let pool: Pool | undefined
+  let runtimePool: Pool | undefined
 
   beforeAll(async () => {
     if (!adminUrl) throw new Error('CONTROL_API_REAL_PG_ADMIN_URL is required')
@@ -33,12 +35,26 @@ describeRealPostgres('OIDC attempt expiry cleanup on real PostgreSQL', () => {
     await adminPool.query(`CREATE DATABASE ${quoteIdent(database)}`)
     pool = new Pool({ connectionString: databaseUrl(adminUrl, database) })
     await initDb({ connect: () => pool!.connect() })
+
+    // The role is a startup parameter, so it is set before the first query on
+    // each connection.
+    runtimePool = new Pool({
+      connectionString: databaseUrl(adminUrl, database),
+      options: '-c role=control_api_runtime',
+    })
+    const role = await runtimePool.query<{ current_user: string }>('SELECT current_user')
+    expect(role.rows).toEqual([{ current_user: 'control_api_runtime' }])
+    await expect(
+      runtimePool.query('UPDATE oidc_desktop_sign_in_codes SET team_id = NULL')
+    ).rejects.toMatchObject({ code: '42501' })
   }, 60_000)
 
   afterAll(async () => {
     try {
+      await endPoolAndWaitForClients(runtimePool)
       await endPoolAndWaitForClients(pool)
       if (adminPool) {
+        await waitForDatabaseConnectionsToClose(adminPool, database)
         await adminPool
           .query(`DROP DATABASE IF EXISTS ${quoteIdent(database)}`)
           .catch(() => undefined)
@@ -233,5 +249,98 @@ describeRealPostgres('OIDC attempt expiry cleanup on real PostgreSQL', () => {
         WHERE expires_at > now()`
     )
     expect(liveRows.rows[0]?.count).toBe(3)
+  })
+
+  it('cleans up expired attempts that have contexts, as the runtime role', async () => {
+    const expiredAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000)
+    const claimedAt = new Date(Date.now() - 90 * 60 * 1000)
+    const finishedAt = new Date(Date.now() - 60 * 60 * 1000)
+    const seedAttempt = async (
+      status: (typeof ATTEMPT_STATUSES)[number],
+      expiresAt: Date
+    ): Promise<string> => {
+      const id = randomUUID()
+      const pending = status === 'pending'
+      const claimed = status === 'redeeming' || status === 'completed' || status === 'failed'
+      const finished = status === 'completed' || status === 'failed' || status === 'cancelled'
+      await pool!.query(
+        `INSERT INTO oidc_protocol_attempts (
+           id, state_hash, registration_id, configuration_generation, issuer, client_id,
+           redirect_uri, response_mode, purpose, browser_binding_hash,
+           pkce_verifier_encrypted, nonce_encrypted,
+           status, expires_at, claimed_at, finished_at
+         ) VALUES (
+           $1, $2, 'company-login', 'g1', 'https://issuer.example.test', 'test-client',
+           'https://api.example.test/oidc/callback', 'query', 'identity-proof-v1',
+           $3, $4, $5, $6, $7, $8, $9
+         )`,
+        [
+          id,
+          createHash('sha256').update(id).digest('hex'),
+          pending ? createHash('sha256').update('x'.repeat(43)).digest('hex') : null,
+          pending ? 'encrypted-pkce' : null,
+          pending ? 'encrypted-nonce' : null,
+          status,
+          expiresAt,
+          claimed ? claimedAt : null,
+          finished ? finishedAt : null,
+        ]
+      )
+      return id
+    }
+    const seedDesktopContext = (attemptId: string) =>
+      pool!.query(
+        `INSERT INTO oidc_attempt_sign_in_contexts (attempt_id, context_kind, desktop_code_challenge)
+         VALUES ($1, 'desktop_sign_in', $2)`,
+        [attemptId, randomBytes(32).toString('base64url')]
+      )
+    const seedInvitationContext = (attemptId: string) =>
+      pool!.query(
+        `INSERT INTO oidc_attempt_sign_in_contexts
+           (attempt_id, context_kind, invitation_id, invited_email)
+         VALUES ($1, 'invitation', $2, $3)`,
+        [attemptId, randomUUID(), `invitee-${randomUUID()}@fixture.test`]
+      )
+
+    const expiredIds: string[] = []
+    for (const [index, status] of ATTEMPT_STATUSES.entries()) {
+      const id = await seedAttempt(status, expiredAt)
+      await (index % 2 === 0 ? seedDesktopContext(id) : seedInvitationContext(id))
+      expiredIds.push(id)
+    }
+    const liveId = await seedAttempt('pending', new Date(Date.now() + 60 * 60 * 1000))
+    await seedDesktopContext(liveId)
+    const contextsFor = async (ids: string[]) =>
+      (
+        await pool!.query<{ count: number }>(
+          `SELECT COUNT(*)::int AS count FROM oidc_attempt_sign_in_contexts
+            WHERE attempt_id = ANY($1::uuid[])`,
+          [ids]
+        )
+      ).rows[0]?.count
+    expect(await contextsFor(expiredIds)).toBe(ATTEMPT_STATUSES.length)
+
+    const inserted = await insertOidcProtocolAttempt(runtimePool!, ENCRYPTION_KEY, {
+      registrationId: 'company-login',
+      configurationGeneration: 'g1',
+      issuer: 'https://issuer.example.test',
+      clientId: 'test-client',
+      redirectUri: 'https://api.example.test/oidc/callback',
+      responseMode: 'query',
+      state: `live-${randomBytes(12).toString('hex')}`,
+      browserBinding: randomBytes(32).toString('base64url'),
+      pkceVerifier: 'test-pkce-verifier',
+      nonce: 'test-nonce',
+      expiresAt: new Date(Date.now() + 60_000),
+    })
+
+    expect(inserted.id).toEqual(expect.any(String))
+    const remainingAttempts = await pool!.query<{ id: string }>(
+      `SELECT id FROM oidc_protocol_attempts WHERE id = ANY($1::uuid[])`,
+      [[...expiredIds, liveId]]
+    )
+    expect(remainingAttempts.rows).toEqual([{ id: liveId }])
+    expect(await contextsFor(expiredIds)).toBe(0)
+    expect(await contextsFor([liveId])).toBe(1)
   })
 })

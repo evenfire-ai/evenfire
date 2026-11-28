@@ -3,10 +3,12 @@ import express from 'express'
 import { readFileSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
 import type { IncomingHttpHeaders, Server } from 'node:http'
+import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import { requireInternalToken } from '../src/middleware/internalServiceAuth.js'
 import { createExternalInvitationsRouter } from '../src/routes/external/invitations.js'
 import { createExternalUsersRouter } from '../src/routes/external/users.js'
 import { PasswordAdmissionError } from '../src/services/auth/passwordCredentialVerification.js'
+import { MemberRegistrationUnavailableError } from '../src/services/memberRegistrationErrors.js'
 import { signExternalSessionToken } from '../src/utils/auth/externalSessionAuthToken.js'
 import {
   type ExternalRestHttpProcess,
@@ -67,6 +69,31 @@ vi.mock('../src/services/invitationFlowRegistrationService.js', () => ({
   ...flow,
   ...desktopFlow,
 }))
+// The session member's live account row. Desktop authorization reads it with
+// the real lockUserById inside a transaction; only the transaction is replaced.
+const liveAccount = vi.hoisted(() => ({
+  id: 'r6-user',
+  email: 'r6-member@example.invalid',
+  name: null,
+  picture: null,
+  lifecycle_state: 'active',
+  lifecycle_version: 1,
+}))
+vi.mock('../src/db.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/db.js')>()
+  return {
+    ...actual,
+    withTransaction: async (work: (db: { query: unknown }) => unknown) =>
+      work({
+        query: async (sql: string, params: unknown[]) => {
+          if (!/FROM users\s+WHERE id = \$1/.test(sql) || params[0] !== liveAccount.id) {
+            throw new Error('unexpected transaction query in the composed contract')
+          }
+          return { rows: [liveAccount], rowCount: 1 }
+        },
+      }),
+  }
+})
 vi.mock('../src/middleware/rateLimitMiddleware.js', async importOriginal => {
   const real = await importOriginal<typeof import('../src/middleware/rateLimitMiddleware.js')>()
   return {
@@ -409,6 +436,9 @@ function producerResponseApp() {
     createExternalInvitationsRouter(),
     createExternalUsersRouter({} as never)
   )
+  // control-api's own error handler, so a typed failure a route passes on
+  // reaches the edge as control-api answers it.
+  app.use(clerumErrorHandler)
   return app
 }
 
@@ -931,46 +961,92 @@ describe('invitation/password producer response mappings', () => {
     expect(droppedResetResponsesForTest()).toBe(1)
   })
 
-  it('maps a real producer password mismatch for desktop authorization', async () => {
-    directory.verifyUserPassword.mockResolvedValueOnce(false)
-
+  it('authorizes desktop setup without a password', async () => {
     const response = await request(await publicApp())
       .post('/api/v1/invitations/desktop-authorization')
       .set('authorization', `Bearer ${sessionToken}`)
-      .send({ password: 'R6-synthetic-current-password' })
+      .send({})
 
-    expect(response.status).toBe(401)
-    expect(response.body).toEqual({ error: 'Invalid password' })
-    expect(response.headers['set-cookie']).toBeUndefined()
-    expect(JSON.stringify(response.body)).not.toMatch(/invalid_password|r6-|sql|stack/i)
-    expect(directory.verifyUserPassword).toHaveBeenCalledWith({
-      userId: 'r6-user',
-      email: 'r6-member@example.invalid',
-      password: 'R6-synthetic-current-password',
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      authorizationToken: expect.stringMatching(/^[A-Za-z0-9_-]{32}$/),
+      expiresInSeconds: 120,
     })
-    expect(desktopFlow.storeDesktopAuthorizationToken).not.toHaveBeenCalled()
+    expect(response.headers['set-cookie']).toBeUndefined()
+    // The session the edge forwarded names the member; the hub stores the
+    // token the member receives.
+    expect(desktopFlow.storeDesktopAuthorizationToken).toHaveBeenCalledOnce()
+    expect(desktopFlow.storeDesktopAuthorizationToken).toHaveBeenCalledWith(
+      'r6-member@example.invalid',
+      response.body.authorizationToken
+    )
+    expect(directory.verifyUserPassword).not.toHaveBeenCalled()
   })
 
-  it('maps an unavailable desktop-authorization producer to bounded public retry guidance', async () => {
-    directory.verifyUserPassword.mockRejectedValueOnce(
-      new PasswordAdmissionError(503, 23, 'authority_failure')
-    )
+  it('maps a hub outage to bounded public retry guidance', async () => {
+    // One outage for the direct producer probe, one for the composed request.
+    desktopFlow.storeDesktopAuthorizationToken
+      .mockRejectedValueOnce(new MemberRegistrationUnavailableError())
+      .mockRejectedValueOnce(new MemberRegistrationUnavailableError())
+
+    // control-api's own answer: the typed hub outage reaches its error handler.
+    const producerResponse = await request(producerServer)
+      .post('/api/v1/external/invitations/desktop-authorization')
+      .set('authorization', `Bearer ${internalServiceToken}`)
+      .set('x-service-token', 'external-rest-api')
+      .set('x-user-session-token', 'r6-synthetic-session')
+      .send({})
+    expect(producerResponse.status).toBe(503)
+    expect(producerResponse.body).toEqual({
+      error: 'member_registration_unavailable',
+      correlationId: expect.any(String),
+    })
 
     const response = await request(await publicApp())
       .post('/api/v1/invitations/desktop-authorization')
       .set('authorization', `Bearer ${sessionToken}`)
-      .send({ password: 'R6-synthetic-current-password' })
+      .send({})
 
     expect(response.status).toBe(503)
-    expect(response.body).toEqual({ error: 'authority_unavailable', retryAfterSeconds: 23 })
-    expect(response.headers['retry-after']).toBe('23')
+    expect(response.body).toEqual({ error: 'authority_unavailable', retryAfterSeconds: 2 })
+    expect(response.headers['retry-after']).toBe('2')
+    expect(response.headers['cache-control']).toBe('no-store')
     expect(response.headers['set-cookie']).toBeUndefined()
-    expect(JSON.stringify(response.body)).not.toMatch(/authority_failure|r6-|sql|stack/i)
-    expect(desktopFlow.storeDesktopAuthorizationToken).not.toHaveBeenCalled()
+    expect(JSON.stringify(response.body)).not.toMatch(/member_registration|r6-|sql|stack/i)
+    expect(desktopFlow.storeDesktopAuthorizationToken).toHaveBeenCalledTimes(2)
+    expect(directory.verifyUserPassword).not.toHaveBeenCalled()
+  })
+
+  it('sends a session whose account is not active to sign in, not to a retryable outage', async () => {
+    liveAccount.lifecycle_state = 'retired'
+    try {
+      // control-api's own answer: the route finds no active account row for the session.
+      const producerResponse = await request(producerServer)
+        .post('/api/v1/external/invitations/desktop-authorization')
+        .set('authorization', `Bearer ${internalServiceToken}`)
+        .set('x-service-token', 'external-rest-api')
+        .set('x-user-session-token', 'r6-synthetic-session')
+        .send({})
+      expect(producerResponse.status).toBe(401)
+      expect(producerResponse.body).toEqual({ error: 'Unauthorized' })
+      expect(producerResponse.headers['x-internal-service-auth-refusal']).toBeUndefined()
+
+      const response = await request(await publicApp())
+        .post('/api/v1/invitations/desktop-authorization')
+        .set('authorization', `Bearer ${sessionToken}`)
+        .send({})
+
+      expect(response.status).toBe(401)
+      expect(response.body).toEqual({ error: 'Unauthorized' })
+      expect(response.headers['retry-after']).toBeUndefined()
+      expect(response.headers['set-cookie']).toBeUndefined()
+      expect(desktopFlow.storeDesktopAuthorizationToken).not.toHaveBeenCalled()
+    } finally {
+      liveAccount.lifecycle_state = 'active'
+    }
   })
 
   it('maps the producer desktop-registration not-found code without leaking details', async () => {
-    directory.verifyUserPassword.mockResolvedValueOnce(true)
     desktopFlow.storeDesktopAuthorizationToken.mockRejectedValueOnce(
       new Error(
         'Member registration service POST /invitations-flow/desktop-authorizations failed (404): private'
@@ -980,7 +1056,7 @@ describe('invitation/password producer response mappings', () => {
     const response = await request(await publicApp())
       .post('/api/v1/invitations/desktop-authorization')
       .set('authorization', `Bearer ${sessionToken}`)
-      .send({ password: 'R6-synthetic-current-password' })
+      .send({})
 
     expect(response.status).toBe(404)
     expect(response.body).toEqual({ error: 'Invitation setup not found' })
@@ -1015,7 +1091,7 @@ describe('invitation/password producer response mappings', () => {
                   invitationId: 'r6-accepted-member-row',
                   password: 'R6-synthetic-valid-password',
                 }
-              : { password: 'R6-synthetic-valid-password' }
+              : {}
         const response = await request(await publicApp())
           .post(`/api/v1/invitations/${endpoint}`)
           .set('authorization', `Bearer ${sessionToken}`)

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import test from 'node:test'
 import {
   type OidcProfileConfiguration,
@@ -7,6 +8,8 @@ import {
 } from '../app/api/oidc/_flow'
 import { GET } from '../app/api/oidc/callback/route'
 import { POST } from '../app/api/oidc/start/route'
+import { PROFILE_ROUTES } from '../app/constants/routes'
+import { edgeRecord, edgeResponse, edgeSetCookies } from './edgeFixtures'
 
 const callbackUri = 'https://profile.example.test/api/oidc/callback'
 const configuration: OidcProfileConfiguration = {
@@ -839,4 +842,323 @@ test('no x-forwarded-for is sent when the request carries no valid browser IP', 
   } finally {
     restore()
   }
+})
+
+// Return-to round trip. Every upstream body below is External REST's recorded answer
+// (external-rest-api/test/fixtures/oidc-desktop-sign-in/edge.json).
+const EDGE_CONFIGURATION = 'GET /api/v1/oidc/profile-flow/configuration activated'
+const EDGE_ATTEMPT = 'POST /api/v1/oidc/profile-flow/attempts plain'
+const EDGE_SIGNED_IN = 'POST /api/v1/oidc/profile-flow/complete member-signed-in'
+const EDGE_REFUSED = 'POST /api/v1/oidc/profile-flow/complete refused'
+
+const edgeCallbackUri = (edgeRecord(EDGE_CONFIGURATION).body as { redirectUri: string }).redirectUri
+const edgeState =
+  new URL(
+    (edgeRecord(EDGE_ATTEMPT).body as { authorizationUrl: string }).authorizationUrl
+  ).searchParams.get('state') ?? ''
+/**
+ * The return cookie is named from this attempt's state (the first 24 hex digits of its SHA-256),
+ * so two attempts in one browser never share one. Computed here, not with the route's own helper.
+ */
+const RETURN_COOKIE_NAME = `__Host-ef_oidc_return_${createHash('sha256')
+  .update(edgeState)
+  .digest('hex')
+  .slice(0, 24)}`
+const RETURN_COOKIE = new RegExp(`^(${RETURN_COOKIE_NAME})=([^;]*); (.*)$`)
+const signedInMarker = '__Host-ef_oidc_signed_in=1; Path=/; Max-Age=60; Secure; SameSite=Lax'
+
+function cookieParts(setCookie: string): { name: string; value: string; attributes: string } {
+  const separator = setCookie.indexOf('=')
+  const end = setCookie.indexOf('; ')
+  return {
+    name: setCookie.slice(0, separator),
+    value: setCookie.slice(separator + 1, end),
+    attributes: setCookie.slice(end + 2),
+  }
+}
+
+/** The `name=value` pair a browser sends back for a Set-Cookie header. */
+function cookiePair(setCookie: string): string {
+  const { name, value } = cookieParts(setCookie)
+  return `${name}=${value}`
+}
+
+function clearCookie(name: string): string {
+  return `${name}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax`
+}
+
+/** Runs /api/oidc/start as LoginPanel's form posts it, with the edge's recorded answers. */
+async function startWithBody(
+  headers: Record<string, string>,
+  body: string | ReadableStream<Uint8Array>
+): Promise<Response> {
+  const paths: string[] = []
+  const restore = mockExternalApi(url => {
+    paths.push(url.pathname)
+    if (url.pathname.endsWith('/configuration')) return edgeResponse(EDGE_CONFIGURATION)
+    if (url.pathname.endsWith('/attempts')) return edgeResponse(EDGE_ATTEMPT)
+    return Response.json({ error: 'unexpected_route' }, { status: 404 })
+  })
+  try {
+    const origin = new URL(edgeCallbackUri).origin
+    const init: RequestInit & { duplex?: 'half' } = {
+      method: 'POST',
+      headers: { origin, ...headers },
+      body,
+      // A stream body carries no Content-Length, like a chunked upload.
+      ...(typeof body === 'string' ? {} : { duplex: 'half' }),
+    }
+    const response = await POST(new Request(new URL(PROFILE_ROUTES.oidcStart, origin), init))
+    // Whatever the body, the attempt itself always starts.
+    assert.deepEqual(paths, [
+      '/api/v1/oidc/profile-flow/configuration',
+      '/api/v1/oidc/profile-flow/attempts',
+    ])
+    return response
+  } finally {
+    restore()
+  }
+}
+
+/** Posts the form as a browser does, with its Content-Length. */
+async function startFromForm(fields: Array<[string, string]>): Promise<Response> {
+  const body = new URLSearchParams(fields).toString()
+  return startWithBody(
+    {
+      'content-type': 'application/x-www-form-urlencoded',
+      'content-length': String(Buffer.byteLength(body)),
+    },
+    body
+  )
+}
+
+/** The binding and return cookies a desktop-setup start sets, as the browser stores them. */
+async function startForDesktopSetup(): Promise<{ binding: string; returnName: string }> {
+  const started = await startFromForm([['returnTo', 'desktop-setup']])
+  const [binding = '', returnCookie = ''] = started.headers.getSetCookie()
+  assert.equal(cookieParts(binding).name, browserCookieName(edgeState))
+  assert.match(returnCookie, RETURN_COOKIE)
+  return { binding, returnName: cookieParts(returnCookie).name }
+}
+
+function edgeCallback(cookie: string, search = `?state=${edgeState}&code=provider-code`): Request {
+  return new Request(`${edgeCallbackUri}${search}`, { headers: { cookie } })
+}
+
+test('keeps only closed-set returnTo values', async () => {
+  const accepted = await startFromForm([['returnTo', 'desktop-setup']])
+  const acceptedCookies = accepted.headers.getSetCookie()
+  assert.equal(accepted.status, 303)
+  assert.equal(acceptedCookies.length, 2)
+  const binding = cookieParts(acceptedCookies[0] ?? '')
+  const returnTo = cookieParts(acceptedCookies[1] ?? '')
+  assert.equal(binding.name, browserCookieName(edgeState))
+  assert.match(acceptedCookies[1] ?? '', RETURN_COOKIE)
+  assert.equal(returnTo.name, RETURN_COOKIE_NAME)
+  assert.equal(returnTo.value, 'desktop-setup')
+  assert.match(returnTo.attributes, /^Path=\/; Max-Age=\d+; Secure; HttpOnly; SameSite=Lax$/)
+  // Same Max-Age as the binding: both expire with the attempt.
+  assert.equal(returnTo.attributes, binding.attributes)
+
+  for (const fields of [
+    [['returnTo', 'https://evil.example']],
+    [['returnTo', '/settings']],
+    [['returnTo', '']],
+    [['returnTo', 'constructor']],
+    [
+      ['returnTo', 'desktop-setup'],
+      ['returnTo', 'desktop-setup'],
+    ],
+  ] as Array<Array<[string, string]>>) {
+    const rejected = await startFromForm(fields)
+    const cookies = rejected.headers.getSetCookie()
+    assert.equal(rejected.status, 303, JSON.stringify(fields))
+    assert.equal(cookies.length, 1, JSON.stringify(fields))
+    assert.equal(cookieParts(cookies[0] ?? '').name, browserCookieName(edgeState))
+  }
+})
+
+test('redirects a signed-in member to the return route and clears the cookie', async () => {
+  const { binding, returnName } = await startForDesktopSetup()
+
+  for (const [returnValue, location] of [
+    ['desktop-setup', '/oidc/signed-in?next=desktop-setup'],
+    // A tampered value is not a destination; the cookie is still cleared.
+    ['https://evil.example', '/oidc/signed-in'],
+  ] as const) {
+    const paths: string[] = []
+    const restore = mockExternalApi(url => {
+      paths.push(url.pathname)
+      if (url.pathname.endsWith('/configuration')) return edgeResponse(EDGE_CONFIGURATION)
+      if (url.pathname.endsWith('/complete')) return edgeResponse(EDGE_SIGNED_IN)
+      return Response.json({ error: 'unexpected_route' }, { status: 404 })
+    })
+    try {
+      const response = await GET(
+        edgeCallback(`${cookiePair(binding)}; ${returnName}=${returnValue}`)
+      )
+      assert.equal(response.status, 303, returnValue)
+      assert.equal(response.headers.get('location'), location, returnValue)
+      assert.deepEqual(
+        response.headers.getSetCookie(),
+        [
+          ...edgeSetCookies(EDGE_SIGNED_IN),
+          clearCookie(browserCookieName(edgeState)),
+          clearCookie(returnName),
+          signedInMarker,
+        ],
+        returnValue
+      )
+      assert.deepEqual(paths, [
+        '/api/v1/oidc/profile-flow/configuration',
+        '/api/v1/oidc/profile-flow/complete',
+      ])
+    } finally {
+      restore()
+    }
+  }
+})
+
+test('clears the return cookie on a refusal', async () => {
+  const { binding, returnName } = await startForDesktopSetup()
+  const reason = (edgeRecord(EDGE_REFUSED).body as { reason: string }).reason
+  const restore = mockExternalApi(url => {
+    if (url.pathname.endsWith('/configuration')) return edgeResponse(EDGE_CONFIGURATION)
+    if (url.pathname.endsWith('/complete')) return edgeResponse(EDGE_REFUSED)
+    return Response.json({ error: 'unexpected_route' }, { status: 404 })
+  })
+  try {
+    const response = await GET(edgeCallback(`${cookiePair(binding)}; ${returnName}=desktop-setup`))
+    assert.equal(response.status, 303)
+    assert.equal(response.headers.get('location'), `/oidc/result?reason=${reason}`)
+    assert.deepEqual(response.headers.getSetCookie(), [
+      clearCookie(browserCookieName(edgeState)),
+      clearCookie(returnName),
+    ])
+  } finally {
+    restore()
+  }
+})
+
+test('clears the return cookie wherever the binding cookie is cleared, and keeps it for a retry', async () => {
+  const { binding, returnName } = await startForDesktopSetup()
+  const cookie = `${cookiePair(binding)}; ${returnName}=desktop-setup`
+  const cleared = [clearCookie(browserCookieName(edgeState)), clearCookie(returnName)]
+  const cases: Array<
+    Readonly<{ label: string; search?: string; edgeKey?: string; status: number; kept: boolean }>
+  > = [
+    {
+      label: 'a cancellation',
+      search: `?state=${edgeState}&error=access_denied`,
+      edgeKey: 'POST /api/v1/oidc/profile-flow/cancel cancelled',
+      status: 400,
+      kept: false,
+    },
+    {
+      label: 'a consumed failure',
+      edgeKey: 'POST /api/v1/oidc/profile-flow/complete storage-unavailable',
+      status: 503,
+      kept: false,
+    },
+    {
+      label: 'an identity proof without member sign-in',
+      edgeKey: 'POST /api/v1/oidc/profile-flow/complete identity-proof-verified',
+      status: 200,
+      kept: false,
+    },
+    // The attempt stays usable, so the browser keeps both cookies.
+    {
+      label: 'a retryable provider error',
+      search: `?state=${edgeState}&error=temporarily_unavailable`,
+      status: 503,
+      kept: true,
+    },
+  ]
+
+  for (const { label, search, edgeKey, status, kept } of cases) {
+    const paths: string[] = []
+    const restore = mockExternalApi(url => {
+      paths.push(url.pathname)
+      if (url.pathname.endsWith('/configuration')) return edgeResponse(EDGE_CONFIGURATION)
+      if (edgeKey) return edgeResponse(edgeKey)
+      return Response.json({ error: 'unexpected_route' }, { status: 404 })
+    })
+    try {
+      const response = await GET(edgeCallback(cookie, search))
+      assert.equal(response.status, status, label)
+      assert.deepEqual(response.headers.getSetCookie(), kept ? [] : cleared, label)
+      assert.equal(paths.length, edgeKey ? 2 : 1, label)
+    } finally {
+      restore()
+    }
+  }
+})
+
+// /api/oidc/start is unauthenticated, so the form read has its own byte cap (1 KiB).
+const FORM_TYPE = { 'content-type': 'application/x-www-form-urlencoded' }
+const desktopSetupForm = new URLSearchParams([['returnTo', 'desktop-setup']]).toString()
+const oversizedForm = new URLSearchParams([
+  ['returnTo', 'desktop-setup'],
+  ['pad', 'x'.repeat(2048)],
+]).toString()
+
+function assertBindingOnly(response: Response, label: string): void {
+  const cookies = response.headers.getSetCookie()
+  assert.equal(response.status, 303, label)
+  assert.equal(cookies.length, 1, label)
+  assert.equal(cookieParts(cookies[0] ?? '').name, browserCookieName(edgeState), label)
+}
+
+test('a start form within the length cap sets the return cookie', async () => {
+  const response = await startWithBody(
+    { ...FORM_TYPE, 'content-length': String(Buffer.byteLength(desktopSetupForm)) },
+    desktopSetupForm
+  )
+  const cookies = response.headers.getSetCookie()
+  assert.equal(response.status, 303)
+  assert.equal(cookies.length, 2)
+  assert.match(cookies[1] ?? '', RETURN_COOKIE)
+  assert.equal(cookieParts(cookies[1] ?? '').value, 'desktop-setup')
+})
+
+test('a start form above the length cap sets only the binding cookie', async () => {
+  assertBindingOnly(
+    await startWithBody(
+      { ...FORM_TYPE, 'content-length': String(Buffer.byteLength(oversizedForm)) },
+      oversizedForm
+    ),
+    'declared above the cap'
+  )
+  // The read itself stops at the cap, whatever Content-Length claims.
+  assertBindingOnly(
+    await startWithBody(
+      { ...FORM_TYPE, 'content-length': String(Buffer.byteLength(desktopSetupForm)) },
+      oversizedForm
+    ),
+    'longer than declared'
+  )
+})
+
+test('a start form without Content-Length sets only the binding cookie', async () => {
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(desktopSetupForm))
+      controller.close()
+    },
+  })
+  assertBindingOnly(await startWithBody(FORM_TYPE, stream), 'no Content-Length')
+})
+
+test('a urlencoded start body sent as text/plain sets only the binding cookie', async () => {
+  // The form's own bytes, so only the content type keeps returnTo from being read.
+  assertBindingOnly(
+    await startWithBody(
+      {
+        'content-type': 'text/plain',
+        'content-length': String(Buffer.byteLength(desktopSetupForm)),
+      },
+      desktopSetupForm
+    ),
+    'text/plain body'
+  )
 })

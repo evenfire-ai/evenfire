@@ -1,0 +1,66 @@
+{
+  "GET /external/oidc/profile-flow/configuration activated": {
+    "body": {
+      "displayLabel": "Fake member sign-in provider",
+      "memberAuthenticationActivated": true,
+      "redirectUri": "https://profile.example.test/api/oidc/callback"
+    },
+    "status": 200
+  },
+  "POST /external/oidc/desktop-sign-in/redeem refused-account-disabled": {
+    "body": {
+      "error": "desktop_sign_in_refused",
+      "reason": "account_disabled"
+    },
+    "status": 403
+  },
+  "POST /external/oidc/desktop-sign-in/redeem signed-in": {
+    "body": {
+      "me": {
+        "email": "member@example.test",
+        "id": "00000000-0000-4000-8000-000000000001",
+        "name": "Fixture Member",
+        "picture": null,
+        "role": "member",
+        "teamId": "00000000-0000-4000-8000-000000000002",
+        "teamName": "Fixture Team"
+      },
+      "sessionContract": "v1",
+      "token": "fixture-session-token"
+    },
+    "status": 200
+  },
+  "POST /external/oidc/profile-flow/attempts desktop-echo": {
+    "body": {
+      "authorizationUrl": "https://member-sign-in.example.test/tenant/authorize?client_id=fake-member-sign-in-client&redirect_uri=https%3A%2F%2Fprofile.example.test%2Fapi%2Foidc%2Fcallback&response_type=code&response_mode=query&scope=openid+profile+email&state=fixture-state-sssssssssssssssssssssssssssss&nonce=fixture-nonce-nnnnnnnnnnnnnnnnnnnnnnnnnnnnn&code_challenge=fixture-code-challenge-cccccccccccccccccccc&code_challenge_method=S256",
+      "expiresAt": "FIXTURE_EXPIRES_AT",
+      "signInContext": "desktop_sign_in"
+    },
+    "status": 200
+  },
+  "POST /external/oidc/profile-flow/attempts plain": {
+    "body": {
+      "authorizationUrl": "https://member-sign-in.example.test/tenant/authorize?client_id=fake-member-sign-in-client&redirect_uri=https%3A%2F%2Fprofile.example.test%2Fapi%2Foidc%2Fcallback&response_type=code&response_mode=query&scope=openid+profile+email&state=fixture-state-sssssssssssssssssssssssssssss&nonce=fixture-nonce-nnnnnnnnnnnnnnnnnnnnnnnnnnnnn&code_challenge=fixture-code-challenge-cccccccccccccccccccc&code_challenge_method=S256",
+      "expiresAt": "FIXTURE_EXPIRES_AT"
+    },
+    "status": 200
+  },
+  "POST /external/oidc/profile-flow/complete desktop-code-issued": {
+    "body": {
+      "code": "fffffffffffffffffffffffffffffffffffffffffff",
+      "expiresInSeconds": 90,
+      "memberAuthenticationActivated": true,
+      "outcome": "desktop_code_issued"
+    },
+    "status": 200
+  },
+  "POST /external/oidc/profile-flow/complete member-signed-in": {
+    "body": {
+      "memberAuthenticationActivated": true,
+      "outcome": "member_signed_in",
+      "sessionContract": "v1",
+      "token": "fixture-session-token"
+    },
+    "status": 200
+  }
+}

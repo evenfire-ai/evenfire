@@ -3,22 +3,28 @@ import {
   type OidcProfileConfiguration,
   OidcProfileFlowError,
   browserCookieName,
-  clearBrowserCookie,
   completeOidcProfileFlow,
+  finishedAttemptCookies,
   getOidcProfileConfiguration,
   memberSignedInRedirect,
   noStoreResult,
   noStoreText,
   parseCallbackParameters,
   postOidcProfileFlow,
+  readReturnToCookie,
   readSingleCookie,
   refusedRedirect,
   requestPathMatchesCallback,
   responseForFlowError,
 } from '../_flow'
 
-function terminalFailure(message: string, status: number, state: string): Response {
-  return noStoreResult(message, status, clearBrowserCookie(browserCookieName(state)))
+/** A finished attempt: the browser drops its binding and return cookies. */
+function terminalFailure(
+  message: string,
+  status: number,
+  finishedCookies: readonly string[]
+): Response {
+  return noStoreResult(message, status, finishedCookies)
 }
 
 export async function GET(request: Request): Promise<Response> {
@@ -45,6 +51,7 @@ export async function GET(request: Request): Promise<Response> {
   if (!browserBinding) {
     return noStoreText('Identity proof could not be verified.', 400)
   }
+  const finishedCookies = finishedAttemptCookies(request, callback.state)
 
   if (callback.kind === 'retryable-error') {
     return noStoreText('The identity provider is temporarily unavailable. Retry this attempt.', 503)
@@ -63,7 +70,7 @@ export async function GET(request: Request): Promise<Response> {
       if (result?.outcome !== 'attempt_cancelled') {
         throw new OidcProfileFlowError(503, 'oidc_unavailable', false)
       }
-      return terminalFailure('Sign-in was cancelled.', 400, callback.state)
+      return terminalFailure('Sign-in was cancelled.', 400, finishedCookies)
     } catch (error) {
       if (error instanceof OidcProfileFlowError && error.retryable) {
         return noStoreText(
@@ -82,13 +89,13 @@ export async function GET(request: Request): Promise<Response> {
         return terminalFailure(
           'This sign-in attempt cannot be reused. Start a new sign-in attempt.',
           error.status,
-          callback.state
+          finishedCookies
         )
       }
       return terminalFailure(
         'Identity proof could not be verified.',
         error instanceof OidcProfileFlowError ? error.status : 503,
-        callback.state
+        finishedCookies
       )
     }
   }
@@ -104,22 +111,20 @@ export async function GET(request: Request): Promise<Response> {
       request
     )
     if (result.kind === 'member_signed_in') {
+      const returnTo = readReturnToCookie(request, callback.state)
       return memberSignedInRedirect(
-        PROFILE_ROUTES.oidcSignedIn,
+        returnTo ? PROFILE_ROUTES.oidcSignedInWithReturn(returnTo) : PROFILE_ROUTES.oidcSignedIn,
         result.sessionCookie,
-        clearBrowserCookie(browserCookieName(callback.state))
+        finishedCookies
       )
     }
     if (result.kind === 'refused') {
-      return refusedRedirect(
-        PROFILE_ROUTES.oidcResult(result.reason),
-        clearBrowserCookie(browserCookieName(callback.state))
-      )
+      return refusedRedirect(PROFILE_ROUTES.oidcResult(result.reason), finishedCookies)
     }
     return terminalFailure(
       'Identity proof was verified. Member sign-in is not enabled.',
       200,
-      callback.state
+      finishedCookies
     )
   } catch (error) {
     if (error instanceof OidcProfileFlowError && error.retryable) {
@@ -141,13 +146,13 @@ export async function GET(request: Request): Promise<Response> {
       return terminalFailure(
         'This sign-in attempt cannot be reused. Start a new sign-in attempt.',
         error.status,
-        callback.state
+        finishedCookies
       )
     }
     return terminalFailure(
       'Identity proof could not be verified.',
       error instanceof OidcProfileFlowError ? error.status : 503,
-      callback.state
+      finishedCookies
     )
   }
 }

@@ -19,13 +19,13 @@ import {
   issueExternalUserSession,
   selectExternalSessionRepresentation,
 } from '../../services/auth/externalSessionIssuance.js'
+import { lockUserById } from '../../services/auth/oidcAccountResolution.js'
 import {
   acceptInvitationForEmailInTransaction,
   getInvitationByToken,
   listPendingInvitations,
   setInvitationPasswordForEmail,
   setInvitationPasswordForUser,
-  verifyUserPassword,
 } from '../../services/directory/index.js'
 import {
   storeDesktopAuthorizationToken,
@@ -51,6 +51,23 @@ function withoutSessionResponseFields<T extends object>(
     token?: unknown
   }
   return response
+}
+
+/**
+ * The signed-in session's email, read from its live, active account row and
+ * lowercased, or '' when the session names no user or the row is missing or
+ * not active. The claim is not read: a v1 session keeps the email it was
+ * issued with after an admin changes the account's address.
+ */
+async function liveSessionAccountEmail(req: ExternalAuthedRequest): Promise<string> {
+  const userId = String(req.externalAuth?.userId || '').trim()
+  if (!userId) return ''
+  const account = await withTransaction(db => lockUserById(db, userId))
+  return account?.lifecycle_state === 'active'
+    ? String(account.email || '')
+        .trim()
+        .toLowerCase()
+    : ''
 }
 
 export function createExternalInvitationsRouter(): Router {
@@ -244,21 +261,15 @@ export function createExternalInvitationsRouter(): Router {
     rejectBodyUserTeamMismatch,
     requireAuthenticatedExternalUserRateLimitContext,
 
-    async (req, res, next) => {
+    async (req: ExternalAuthedRequest, res, next) => {
       try {
-        const userId = String(req.body?.userId || '').trim()
-        const email = String(req.body?.email || '')
-          .trim()
-          .toLowerCase()
-        const password = String(req.body?.password || '')
-        if (!userId || !email || !password) {
-          return res.status(400).json({ error: 'invalid payload' })
-        }
-
-        const passwordValid = await verifyUserPassword({ userId, email, password })
-        if (!passwordValid) {
-          return res.status(401).json({ error: 'invalid_password' })
-        }
+        // The signed-in session is the only authority for /desktop-setup: no
+        // body field is read, so a request cannot name another member, and no
+        // password is asked for, so a member without one can authorize too.
+        // The email comes from the session's live, active account row, not
+        // its claim (liveSessionAccountEmail).
+        const email = await liveSessionAccountEmail(req)
+        if (!email) return res.status(401).json({ error: 'Unauthorized' })
 
         const authorizationToken = randomBytes(24).toString('base64url')
         try {
@@ -276,7 +287,6 @@ export function createExternalInvitationsRouter(): Router {
           expiresInSeconds: 120,
         })
       } catch (error) {
-        if (sendPasswordAdmissionError(error, res)) return
         return next(error)
       }
     }
@@ -287,11 +297,11 @@ export function createExternalInvitationsRouter(): Router {
     ...externalInvitationsEdgeRateLimits,
     requireValidExternalSessionToken,
     requireAuthenticatedExternalUserRateLimitContext,
-    async (req, res, next) => {
+    async (req: ExternalAuthedRequest, res, next) => {
       try {
-        const email = String((req as ExternalAuthedRequest).externalAuth?.email || '')
-          .trim()
-          .toLowerCase()
+        // The live account row's email, as /desktop-authorization reads it:
+        // a v1 session's claim can name an address the account no longer has.
+        const email = await liveSessionAccountEmail(req)
         if (!email) return res.status(401).json({ error: 'Unauthorized' })
         return res.status(200).json({ items: await listPendingInvitations(email) })
       } catch (error) {

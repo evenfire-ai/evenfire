@@ -3,12 +3,14 @@ import cors from 'cors'
 import { STATUS_CODES } from 'node:http'
 import { config } from './config.js'
 import { ControlApiError, ControlApiPathError } from './controlApiClient.js'
+import { controlApiRetryAfterSeconds, unsignedIntegerHeader } from './http/controlApiRetry.js'
 import { invitationPasswordErrorHandler } from './http/passwordAdmissionError.js'
 import { sendPublicApiError } from './http/publicApiError.js'
 import { requireTrustedBrowserMutation } from './middleware/browserMutationGuard.js'
 import { withExternalRequestContext } from './requestContext.js'
 import { createAccessRouter } from './routes/access.js'
 import { createAuthRouter } from './routes/auth.js'
+import { createAuthMethodsRouter } from './routes/authMethods.js'
 import { createContextSharedFilesystemsRouter } from './routes/contextSharedFilesystems.js'
 import { createDesktopRouter } from './routes/desktop.js'
 import { createDirectoryRouter } from './routes/directory.js'
@@ -21,6 +23,7 @@ import { createMembersRouter } from './routes/members.js'
 import { createNotificationsRouter } from './routes/notifications.js'
 import { createOauthCallbackRouter } from './routes/oauthCallback.js'
 import { createOauthGrantsRouter } from './routes/oauthGrants.js'
+import { createOidcDesktopSignInRouter } from './routes/oidcDesktopSignIn.js'
 import { createOidcProfileFlowRouter } from './routes/oidcProfileFlow.js'
 import { createRpcRouter } from './routes/rpc.js'
 import { createRpcDelegationsRouter } from './routes/rpcDelegations.js'
@@ -50,22 +53,12 @@ const RATE_LIMIT_NUMERIC_HEADERS = [
 // The IETF RateLimit fields are structured (`limit=30, remaining=0, reset=17`,
 // `30;w=60`), so they are relayed as control-api wrote them, like routes/gfs.ts.
 const RATE_LIMIT_STRUCTURED_HEADERS = ['ratelimit', 'ratelimit-policy'] as const
-const UNSIGNED_INTEGER_HEADER = /^\d{1,10}$/
-const MAX_RETRY_AFTER_SECONDS = 86_400
-
-function unsignedIntegerHeader(raw: string | undefined): number | undefined {
-  if (!raw || !UNSIGNED_INTEGER_HEADER.test(raw)) return undefined
-  const value = Number(raw)
-  return Number.isSafeInteger(value) ? value : undefined
-}
 
 function relayControlApiRetryHeaders(err: ControlApiError, res: Response): void {
   const headers = err.headers
   if (RETRY_AFTER_STATUSES.has(err.status)) {
-    const retryAfter = unsignedIntegerHeader(headers['retry-after'])
-    if (retryAfter !== undefined && retryAfter >= 1 && retryAfter <= MAX_RETRY_AFTER_SECONDS) {
-      res.setHeader('retry-after', String(retryAfter))
-    }
+    const retryAfter = controlApiRetryAfterSeconds(err)
+    if (retryAfter !== undefined) res.setHeader('retry-after', String(retryAfter))
   }
   if (err.status === 429) {
     for (const name of RATE_LIMIT_NUMERIC_HEADERS) {
@@ -117,6 +110,8 @@ export function createApp() {
   const api = express.Router()
   api.use(createAuthRouter())
   api.use(createOidcProfileFlowRouter())
+  api.use(createOidcDesktopSignInRouter())
+  api.use(createAuthMethodsRouter())
   api.use(createAccessRouter())
   api.use(createDesktopRouter())
   api.use(createMeRouter())

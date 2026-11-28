@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import { config } from '../src/config.js'
 import { type DbClient, type DbTransactionClient, initDb, withTransaction } from '../src/db.js'
@@ -171,8 +171,19 @@ function valueOf<T>(outcome: PromiseSettledResult<T>): T {
 }
 
 function signedIn(result: OidcMemberSignInResult) {
-  if (result.status !== 'signed_in') {
+  if (result.status === 'refused') {
     throw new Error(`expected signed_in, got refused: ${result.reason}`)
+  }
+  if (result.status !== 'signed_in') throw new Error(`expected signed_in, got ${result.status}`)
+  return result
+}
+
+function desktopCodeIssued(result: OidcMemberSignInResult) {
+  if (result.status === 'refused') {
+    throw new Error(`expected desktop_code_issued, got refused: ${result.reason}`)
+  }
+  if (result.status !== 'desktop_code_issued') {
+    throw new Error(`expected desktop_code_issued, got ${result.status}`)
   }
   return result
 }
@@ -216,8 +227,7 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
         proof,
         provider: fake.provider,
         policy: policyOf(fake),
-        contract: options.contract ?? 'v2',
-        sessionPolicy,
+        completion: { kind: 'session', contract: options.contract ?? 'v2', sessionPolicy },
       },
       { transaction: options.transaction ?? committed }
     )
@@ -2077,8 +2087,7 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
       proof,
       provider: defaultFake.provider,
       policy: policyOf(defaultFake),
-      contract: 'v2',
-      sessionPolicy,
+      completion: { kind: 'session', contract: 'v2', sessionPolicy },
     })
 
     expect(result).toMatchObject({
@@ -2153,5 +2162,224 @@ describeRealPostgres('OIDC member sign-in on real PostgreSQL', () => {
       serialization
     )
     expect(otherAttempts).toBe(1)
+  })
+
+  describe('Desktop code minting', () => {
+    const CHALLENGE = 'fixture-mint-challenge-'.padEnd(43, 'm')
+
+    function mintCode(
+      fake: OidcMemberSignInFakeProvider,
+      proof: VerifiedOidcIdentityProof,
+      codeChallenge = CHALLENGE
+    ): Promise<OidcMemberSignInResult> {
+      return signInOidcMember(
+        {
+          proof,
+          provider: fake.provider,
+          policy: policyOf(fake),
+          completion: { kind: 'desktop_code', codeChallenge },
+        },
+        { transaction: committed }
+      )
+    }
+
+    function sha256Hex(value: string): string {
+      return createHash('sha256').update(value).digest('hex')
+    }
+
+    type CodeRow = {
+      code_hash: string
+      user_id: string
+      team_id: string | null
+      code_challenge: string
+      registration_id: string
+      configuration_generation: string
+      lifetime_seconds: number
+      live: boolean
+    }
+
+    /** The stored row of a minted code, found by the hash the test computes itself. */
+    async function storedCode(code: string): Promise<CodeRow | undefined> {
+      const result = await testPool.query<CodeRow>(
+        `SELECT code_hash, user_id::text AS user_id, team_id::text AS team_id, code_challenge,
+                registration_id, configuration_generation,
+                extract(epoch FROM expires_at - created_at)::float8 AS lifetime_seconds,
+                expires_at > now() AS live
+           FROM oidc_desktop_sign_in_codes
+          WHERE code_hash = $1`,
+        [sha256Hex(code)]
+      )
+      return result.rows[0]
+    }
+
+    async function memberProof(label: string, email: string) {
+      return defaultFake.signIn({
+        sub: uniqueLabel(`${label}-subject`),
+        email,
+        email_verified: true,
+      })
+    }
+
+    it('stores only the hash: no column equals the code', async () => {
+      const email = `${uniqueLabel('desktop-hash')}@fixture.test`
+      const userId = await seedUser(email)
+
+      const minted = desktopCodeIssued(
+        await mintCode(defaultFake, await memberProof('desktop-hash', email))
+      )
+
+      expect(minted).toMatchObject({
+        status: 'desktop_code_issued',
+        userId,
+        expiresInSeconds: 90,
+        created: { account: false, link: true },
+        invitationsApplied: 0,
+      })
+      expect(minted.code).toMatch(/^[A-Za-z0-9_-]{43}$/)
+      const rows = await testPool.query<{ code_hash: string; row: Record<string, unknown> }>(
+        `SELECT code_hash, row_to_json(c) AS row FROM oidc_desktop_sign_in_codes c
+          WHERE user_id = $1::uuid`,
+        [userId]
+      )
+      // The positive control: the sign-in wrote exactly one code row, keyed by the hash.
+      expect(rows.rows).toHaveLength(1)
+      expect(rows.rows[0]!.code_hash).toBe(sha256Hex(minted.code))
+      expect(Object.values(rows.rows[0]!.row)).not.toContain(minted.code)
+      expect(JSON.stringify(rows.rows[0]!.row)).not.toContain(minted.code)
+      // A Desktop sign-in mints a code instead of issuing a session.
+      expect(await sessionCount(userId)).toBe(0)
+    })
+
+    it('records the team member sign-in chose, or null for a teamless member', async () => {
+      // An existing member keeps their team; an invitation to a new team is still applied.
+      const keptEmail = `${uniqueLabel('desktop-kept')}@fixture.test`
+      const keptUser = await seedUser(keptEmail)
+      const keptTeam = await seedTeam('desktop-kept-team')
+      await seedMembership(keptTeam, keptUser, 'admin')
+      const otherTeam = await seedTeam('desktop-other-invited-team')
+      await seedInvitation({ email: keptEmail, teamId: otherTeam })
+      const kept = desktopCodeIssued(
+        await mintCode(defaultFake, await memberProof('desktop-kept', keptEmail))
+      )
+      expect(kept).toMatchObject({ userId: keptUser, teamless: false, invitationsApplied: 1 })
+      expect(await storedCode(kept.code)).toMatchObject({ user_id: keptUser, team_id: keptTeam })
+
+      // A teamless member lands in the team of the invitation the sign-in applied.
+      const invitedEmail = `${uniqueLabel('desktop-invited')}@fixture.test`
+      const invitedUser = await seedUser(invitedEmail)
+      const invitedTeam = await seedTeam('desktop-invited-team')
+      await seedInvitation({ email: invitedEmail, teamId: invitedTeam, role: 'inviter' })
+      const invited = desktopCodeIssued(
+        await mintCode(defaultFake, await memberProof('desktop-invited', invitedEmail))
+      )
+      expect(invited).toMatchObject({ userId: invitedUser, teamless: false, invitationsApplied: 1 })
+      expect(await storedCode(invited.code)).toMatchObject({
+        user_id: invitedUser,
+        team_id: invitedTeam,
+      })
+      expect(await membershipsOf(invitedUser)).toEqual([{ team_id: invitedTeam, role: 'inviter' }])
+
+      // A member with no team and no invitation stays teamless: the code records no team.
+      const teamlessEmail = `${uniqueLabel('desktop-teamless')}@fixture.test`
+      const teamlessUser = await seedUser(teamlessEmail)
+      const teamless = desktopCodeIssued(
+        await mintCode(defaultFake, await memberProof('desktop-teamless', teamlessEmail))
+      )
+      expect(teamless).toMatchObject({
+        userId: teamlessUser,
+        teamless: true,
+        invitationsApplied: 0,
+      })
+      expect(await storedCode(teamless.code)).toMatchObject({
+        user_id: teamlessUser,
+        team_id: null,
+      })
+    })
+
+    it('records the registration and configuration generation of the proof', async () => {
+      const fake = createOidcMemberSignInFakeProvider({
+        memberSignInEnv: {
+          CONTROL_API_OIDC_REGISTRATION_ID: 'fake-desktop-code-registration',
+          CONTROL_API_OIDC_TRUST_GENERATION: 'fake-desktop-code-generation',
+        },
+      })
+      await seedConnection(fake.provider)
+      const email = `${uniqueLabel('desktop-connection')}@fixture.test`
+      const userId = await seedUser(email)
+      const proof = await fake.signIn({
+        sub: uniqueLabel('desktop-connection-subject'),
+        email,
+        email_verified: true,
+      })
+      const challenge = 'fixture-connection-challenge-'.padEnd(43, 'g')
+
+      const minted = desktopCodeIssued(await mintCode(fake, proof, challenge))
+
+      // Not the default provider's connection: these values come from this proof.
+      expect(proof.registrationId).toBe('fake-desktop-code-registration')
+      expect(proof.configurationGeneration).not.toBe(defaultFake.provider.configurationGeneration)
+      expect(await storedCode(minted.code)).toEqual({
+        code_hash: sha256Hex(minted.code),
+        user_id: userId,
+        team_id: null,
+        code_challenge: challenge,
+        registration_id: proof.registrationId,
+        configuration_generation: proof.configurationGeneration,
+        lifetime_seconds: 90,
+        live: true,
+      })
+    })
+
+    it('purges codes that expired more than a day ago and keeps newer ones', async () => {
+      const ownerId = await seedUser(`${uniqueLabel('desktop-purge-owner')}@fixture.test`)
+      const seedCodes = (label: string, count: number, expiresAt: string) =>
+        testPool.query(
+          `INSERT INTO oidc_desktop_sign_in_codes
+             (code_hash, user_id, code_challenge, registration_id, configuration_generation,
+              expires_at, created_at)
+           SELECT encode(sha256(convert_to($1 || g, 'UTF8')), 'hex'), $2::uuid, $3,
+                  'fixture-purge-registration', 'fixture-purge-generation',
+                  ${expiresAt}, ${expiresAt} - interval '90 seconds'
+             FROM generate_series(1, $4::int) g`,
+          [label, ownerId, CHALLENGE, count]
+        )
+      // One more than a single mint deletes, so the bound shows.
+      await seedCodes('fixture-purge-old-', 101, `now() - interval '25 hours'`)
+      await seedCodes('fixture-purge-recent-', 1, `now() - interval '23 hours'`)
+      await seedCodes('fixture-purge-live-', 1, `now() + interval '1 hour'`)
+      const seeded = async () => {
+        const result = await testPool.query<{ old: number; recent: number; live: number }>(
+          `SELECT count(*) FILTER (WHERE expires_at < now() - interval '1 day')::int AS old,
+                  count(*) FILTER (WHERE expires_at >= now() - interval '1 day'
+                                     AND expires_at <= now())::int AS recent,
+                  count(*) FILTER (WHERE expires_at > now())::int AS live
+             FROM oidc_desktop_sign_in_codes
+            WHERE registration_id = 'fixture-purge-registration'`
+        )
+        return result.rows[0]
+      }
+      expect(await seeded()).toEqual({ old: 101, recent: 1, live: 1 })
+
+      const email = `${uniqueLabel('desktop-purge')}@fixture.test`
+      await seedUser(email)
+      const subject = uniqueLabel('desktop-purge-subject')
+      const signInOnce = async () =>
+        desktopCodeIssued(
+          await mintCode(
+            defaultFake,
+            await defaultFake.signIn({ sub: subject, email, email_verified: true })
+          )
+        )
+
+      const first = await signInOnce()
+      expect(await storedCode(first.code)).toMatchObject({ live: true })
+      expect(await seeded()).toEqual({ old: 1, recent: 1, live: 1 })
+
+      const second = await signInOnce()
+      expect(await storedCode(second.code)).toMatchObject({ live: true })
+      expect(await seeded()).toEqual({ old: 0, recent: 1, live: 1 })
+      // The purge never takes an unexpired code, the first mint's included.
+      expect(await storedCode(first.code)).toMatchObject({ live: true })
+    })
   })
 })

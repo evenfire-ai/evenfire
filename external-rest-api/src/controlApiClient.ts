@@ -69,7 +69,8 @@ export class ControlApiNonJsonResponseError extends ControlApiError {
  * its `requireValidExternalSessionToken` (`/external/users/*` except `/me`,
  * `/external/teams/*`, `/external/members/*` and the other session-plane routes) answers
  * an ended session with a bare 401, the same body its service-credential guard sends when
- * it refuses this edge's credential; the two cannot be told apart.
+ * it refuses this edge's credential. Only the guard's refusal header tells the two apart
+ * (isControlApiServiceCredentialRejection).
  */
 export function isControlApiInvalidSession(error: unknown): error is ControlApiError {
   if (!(error instanceof ControlApiError) || error.status !== 401) return false
@@ -81,6 +82,26 @@ export function isControlApiInvalidSession(error: unknown): error is ControlApiE
     envelope !== null &&
     'code' in envelope &&
     envelope.code === 'invalid_session'
+  )
+}
+
+/**
+ * control-api's internal-service gate (control-api/src/middleware/internalServiceAuth.ts) marks
+ * every refusal of a caller's own service credential with this header and value, beside the bare
+ * `401 {"error":"Unauthorized"}` a route also sends for an ended session or a missing account.
+ */
+const INTERNAL_SERVICE_AUTH_REFUSAL_HEADER = 'x-internal-service-auth-refusal'
+const INTERNAL_SERVICE_CREDENTIAL_REJECTED = 'service_credential_rejected'
+
+/**
+ * A 401 in which control-api refused this edge's own service credential, not the member's
+ * session: an outage of the edge, which signing in again cannot fix.
+ */
+export function isControlApiServiceCredentialRejection(error: unknown): error is ControlApiError {
+  return (
+    error instanceof ControlApiError &&
+    error.status === 401 &&
+    error.headers[INTERNAL_SERVICE_AUTH_REFUSAL_HEADER] === INTERNAL_SERVICE_CREDENTIAL_REJECTED
   )
 }
 
@@ -115,6 +136,30 @@ export class ControlApiPathError extends ControlApiError {
     super('Control API request path is not allowed', 400, { error: 'invalid_request' })
     this.name = 'ControlApiPathError'
   }
+}
+
+export type ControlApiFailureLogFields = Readonly<{ error: string; upstreamStatus?: number }>
+
+/**
+ * The `error` a route logs for a control-api answer it could not use. Such an answer carries
+ * no error object, so it has no class to name.
+ */
+export const UNUSABLE_CONTROL_API_ANSWER = 'unusable_answer'
+
+/**
+ * What an edge route may log about a failed control-api call: the error's class and, when
+ * control-api answered, the status it answered (for a non-JSON body, the status that came back,
+ * not the 502 this client turns it into). Never the message, which embeds the control-api path
+ * and upstream error text, and never the body.
+ */
+export function controlApiFailureLogFields(error: unknown): ControlApiFailureLogFields {
+  // `constructor.name`, not `name`: ControlApiNonJsonResponseError inherits ControlApiError's.
+  const errorClass = error instanceof Error ? error.constructor.name : typeof error
+  if (error instanceof ControlApiNonJsonResponseError) {
+    return { error: errorClass, upstreamStatus: error.upstreamStatus }
+  }
+  if (error instanceof ControlApiError) return { error: errorClass, upstreamStatus: error.status }
+  return { error: errorClass }
 }
 
 const DOT_SEGMENT = /^(?:\.|\.\.)$/
@@ -189,6 +234,14 @@ function forwardableResponseHeaders(headers: Headers, status: number): Record<st
   // transient authority failure. Only that literal value is relayed.
   if (status === 503 && headers.get('cache-control')?.trim().toLowerCase() === 'no-store') {
     result['cache-control'] = 'no-store'
+  }
+  // Kept for isControlApiServiceCredentialRejection, and only as its one literal value. No
+  // relay allowlist names it, so it never reaches a public response.
+  if (
+    status === 401 &&
+    headers.get(INTERNAL_SERVICE_AUTH_REFUSAL_HEADER) === INTERNAL_SERVICE_CREDENTIAL_REJECTED
+  ) {
+    result[INTERNAL_SERVICE_AUTH_REFUSAL_HEADER] = INTERNAL_SERVICE_CREDENTIAL_REJECTED
   }
   return result
 }

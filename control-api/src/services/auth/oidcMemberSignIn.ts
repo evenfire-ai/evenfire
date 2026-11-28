@@ -19,6 +19,7 @@ import {
   type OidcResolvedAccount,
   resolveOidcAccount,
 } from './oidcAccountResolution.js'
+import { mintDesktopSignInCode } from './oidcDesktopSignInCode.js'
 
 export type OidcMemberSignInResult =
   | Readonly<{
@@ -29,17 +30,39 @@ export type OidcMemberSignInResult =
       created: { account: boolean; link: boolean }
       invitationsApplied: number
     }>
+  | Readonly<{
+      status: 'desktop_code_issued'
+      userId: string
+      code: string
+      expiresInSeconds: number
+      /** True when the sign-in chose no team; the code then records none. */
+      teamless: boolean
+      created: { account: boolean; link: boolean }
+      invitationsApplied: number
+    }>
   | OidcRefusal
+
+/**
+ * What the sign-in ends with: a session in the given format, or a one-use
+ * Desktop code bound to the Desktop's PKCE challenge, which redeem exchanges
+ * for a session.
+ */
+type OidcMemberSignInCompletion =
+  | Readonly<{
+      kind: 'session'
+      contract: ExternalSessionContract
+      sessionPolicy: EffectiveUserAccessPolicy
+    }>
+  | Readonly<{ kind: 'desktop_code'; codeChallenge: string }>
 
 type OidcMemberSignInInput = Readonly<{
   proof: VerifiedOidcIdentityProof
   provider: OidcProviderConfiguration
   policy: OidcMemberSignInPolicy
-  contract: ExternalSessionContract
-  sessionPolicy: EffectiveUserAccessPolicy
+  completion: OidcMemberSignInCompletion
 }>
 
-type MemberTransaction = <T>(work: (db: DbTransactionClient) => Promise<T>) => Promise<T>
+export type MemberTransaction = <T>(work: (db: DbTransactionClient) => Promise<T>) => Promise<T>
 
 type SessionTeam = { team_id: string | null; role: TeamRole }
 
@@ -174,12 +197,12 @@ async function applyPendingInvitations(
   return membershipWrite === 'insert_only' ? applied.reverse() : applied
 }
 
-/** The member's current, active membership in one team. */
-async function currentMembershipIn(
+/** The member's current, active membership in one team, with the team's name. */
+export async function currentMembershipIn(
   db: DbTransactionClient,
   userId: string,
   teamId: string
-): Promise<SessionTeam | undefined> {
+): Promise<(SessionTeam & { team_name: string }) | undefined> {
   const result = await db.query(
     `SELECT tm.team_id, tm.role, t.name AS team_name
        FROM team_members tm
@@ -189,7 +212,7 @@ async function currentMembershipIn(
         AND tm.status = 'active'`,
     [userId, teamId]
   )
-  return result.rows[0] as SessionTeam | undefined
+  return result.rows[0] as (SessionTeam & { team_name: string }) | undefined
 }
 
 /**
@@ -230,8 +253,9 @@ async function signInResolvedMember(
   if (resolution.status === 'refused') return resolution
   const { account } = resolution
 
-  // These rules pick the session's team for the sign-in that applies the
-  // invitations. An existing member's team is chosen before the invitations
+  // These rules pick the team for the sign-in that applies the
+  // invitations: the session's team, or the one a Desktop code records. An
+  // existing member's team is chosen before the invitations
   // are applied, by the shared default-team rule (findFirstActiveMembership,
   // the same as password login): the member keeps that team, with its role
   // read again afterwards. Invitations never change an existing membership
@@ -259,9 +283,31 @@ async function signInResolvedMember(
     ((await findFirstActiveMembership(db, account.userId)).rows[0] as SessionTeam | undefined) ??
     TEAMLESS_MEMBER
 
+  // Only this last step differs: a Desktop sign-in mints a code in this
+  // transaction instead of issuing a session. The code records the proof's
+  // connection, which redeem checks against the configuration it then runs.
+  const { completion } = input
+  if (completion.kind === 'desktop_code') {
+    const minted = await mintDesktopSignInCode(db, {
+      userId: account.userId,
+      teamId: team.team_id,
+      codeChallenge: completion.codeChallenge,
+      registrationId: input.proof.registrationId,
+      configurationGeneration: input.proof.configurationGeneration,
+    })
+    return Object.freeze({
+      status: 'desktop_code_issued',
+      userId: account.userId,
+      code: minted.code,
+      expiresInSeconds: minted.expiresInSeconds,
+      teamless: team.team_id === null,
+      created: Object.freeze({ ...account.created }),
+      invitationsApplied: applied.length,
+    })
+  }
   const issued = await issueExternalUserSession(
     {
-      contract: input.contract,
+      contract: completion.contract,
       userId: account.userId,
       email: account.email,
       teamId: team.team_id,
@@ -270,7 +316,7 @@ async function signInResolvedMember(
     },
     {
       db,
-      policy: input.sessionPolicy,
+      policy: completion.sessionPolicy,
       // resolveOidcAccount read these under the user row lock this transaction holds.
       lockedUser: {
         lifecycleState: account.lifecycleState,
@@ -290,9 +336,10 @@ async function signInResolvedMember(
 
 /**
  * Signs a verified OIDC identity in as a member, in one transaction: account
- * resolution (v5 §4), pending invitations for the account's stored email, then
- * the session. A refusal issues no session and writes nothing except the
- * connection record.
+ * resolution (resolveOidcAccount), pending invitations for the account's
+ * stored email, the team, then the completion: a session, or a one-use Desktop
+ * code. A refusal issues no session, mints no code and writes nothing except
+ * the connection record.
  *
  * A unique-key conflict means a parallel sign-in committed the same link or
  * account first. PostgreSQL has aborted that transaction, so the whole sign-in

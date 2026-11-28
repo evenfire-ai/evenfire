@@ -16,6 +16,7 @@ import {
   setJwksCache,
 } from 'openid-client'
 import type { DbClient } from '../db.js'
+import type { OidcAttemptSignInContext } from './attemptSignInContextStore.js'
 import { isAcceptableEvidenceClaimName } from './claimNames.js'
 import {
   type OidcProviderConfiguration,
@@ -134,6 +135,8 @@ export type VerifiedOidcIdentityProof = Readonly<{
   clientId: string
   configurationGeneration: string
   attemptId: string
+  /** What the attempt was started for, read by the claim; null for a plain sign-in. */
+  signInContext: OidcAttemptSignInContext | null
   issuedAt: number
   authenticationTime?: number
   attributes: OidcVerifiedAttributes
@@ -242,7 +245,7 @@ export class OidcProtocolEngine {
   async beginIdentityProofAttempt(options: {
     browserBinding: string
     signal?: AbortSignal
-  }): Promise<{ authorizationUrl: string; expiresAt: Date }> {
+  }): Promise<{ authorizationUrl: string; expiresAt: Date; attemptId: string }> {
     return this.operationContext.run({ signal: options.signal }, async () => {
       const trusted = await this.getTrustedConfiguration()
       const now = this.now()
@@ -280,7 +283,11 @@ export class OidcProtocolEngine {
         code_challenge: codeChallenge,
         code_challenge_method: trusted.profile.codeChallengeMethod,
       })
-      return { authorizationUrl: authorizationUrl.href, expiresAt: attempt.expiresAt }
+      return {
+        authorizationUrl: authorizationUrl.href,
+        expiresAt: attempt.expiresAt,
+        attemptId: attempt.id,
+      }
     })
   }
 
@@ -523,6 +530,7 @@ export class OidcProtocolEngine {
       clientId: this.provider.clientId,
       configurationGeneration: this.provider.configurationGeneration,
       attemptId: attempt.id,
+      signInContext: attempt.signInContext,
       issuedAt,
       ...(authenticationTime !== undefined ? { authenticationTime } : {}),
       attributes,

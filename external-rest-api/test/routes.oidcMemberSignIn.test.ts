@@ -156,7 +156,7 @@ describe('External REST OIDC member sign-in', () => {
     const response = await complete(data)
     expect(controlApi).toHaveBeenCalledTimes(1)
     expect(response.status).toBe(503)
-    expect(response.body).toEqual({ error: 'oidc_unavailable' })
+    expect(response.body).toEqual({ error: 'oidc_unavailable', retrySameAttempt: false })
     expect(response.headers['set-cookie']).toBeUndefined()
   })
 

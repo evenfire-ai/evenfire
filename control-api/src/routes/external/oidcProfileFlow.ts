@@ -4,6 +4,7 @@ import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import { rootLogger } from '../../observability/logger.js'
+import { insertDesktopSignInContext } from '../../oidc/attemptSignInContextStore.js'
 import { loadOidcProviderConfiguration } from '../../oidc/configuration.js'
 import { memberPolicyEvidenceClaimNames } from '../../oidc/memberEligibility.js'
 import { OidcProtocolEngine, type VerifiedOidcIdentityProof } from '../../oidc/protocolEngine.js'
@@ -30,6 +31,8 @@ const CODE_RE = /^[\x21-\x7e]{1,4096}$/
 const ISSUER_MAX_LENGTH = 2048
 const ERROR_CODE_RE = /^[A-Za-z0-9_]{1,64}$/
 const OIDC_SETTING_NAME_RE = /CONTROL_API_OIDC_[A-Z_]+/g
+/** A PKCE S256 code challenge: 43 base64url characters. */
+const DESKTOP_CODE_CHALLENGE_RE = /^[A-Za-z0-9_-]{43}$/
 
 type Provider = NonNullable<ReturnType<typeof loadOidcProviderConfiguration>>
 type Engine = Pick<
@@ -46,7 +49,15 @@ export type ExternalOidcProfileFlowDependencies = Readonly<{
   getProvider?: () => Provider | undefined
   createEngine?: (provider: Provider) => Engine
   signInMember?: SignInMember
+  /** Records a Desktop sign-in attempt's code challenge; defaults to the service pool. */
+  writeDesktopSignInContext?: (attemptId: string, codeChallenge: string) => Promise<void>
 }>
+
+/** The optional `desktopSignIn` field of an `/attempts` request. */
+type DesktopSignInField =
+  | Readonly<{ status: 'absent' }>
+  | Readonly<{ status: 'invalid' }>
+  | Readonly<{ status: 'present'; codeChallenge: string }>
 
 const logger = rootLogger.child({ component: 'oidc_profile_flow' })
 
@@ -67,7 +78,7 @@ const REFUSAL_CAUSE_LOG: Record<OidcRefusalCause, { message: string; action?: st
   },
 }
 
-function defaultProvider(): Provider | undefined {
+export function defaultProvider(): Provider | undefined {
   return loadOidcProviderConfiguration(process.env, config.oauthEncryptionKey)
 }
 
@@ -97,8 +108,14 @@ function defaultEngine(provider: Provider): OidcProtocolEngine {
 }
 
 /**
- * Issues the Profile UI session exactly as password login does: no requested contract
- * and no client version, so the same representation is selected.
+ * Completes an attempt by what it was started for. A plain attempt (no
+ * context) issues the Profile UI session exactly as password login does: no
+ * requested contract and no client version, so the same representation is
+ * selected. A Desktop sign-in attempt mints a one-use code bound to the
+ * Desktop's code challenge. It issues no session here, so no session format is
+ * selected: the Desktop's redeem selects one. An invitation attempt has no
+ * completion yet and throws, so it can never complete as an ordinary sign-in;
+ * the route answers that with the terminal 503.
  *
  * `signInOidcMember` runs in its own default transaction runner: it retries a
  * unique-key conflict only when the PostgreSQL error code reaches it unchanged.
@@ -109,6 +126,28 @@ async function defaultSignInMember(
 ): Promise<OidcMemberSignInResult> {
   const policy = provider.memberSignIn
   if (!policy) throw new Error('OIDC member sign-in is switched off')
+  const context = proof.signInContext
+  if (context !== null) {
+    switch (context.kind) {
+      case 'desktop_sign_in':
+        return signInOidcMember({
+          proof,
+          provider,
+          policy,
+          completion: { kind: 'desktop_code', codeChallenge: context.codeChallenge },
+        })
+      case 'invitation':
+        // Fails closed until invitation sign-in adds its own completion: an
+        // invitation attempt must not become an ordinary Profile session.
+        throw new Error('OIDC invitation sign-in has no completion')
+      default: {
+        const unhandled: never = context
+        throw new Error(
+          `OIDC sign-in context ${(unhandled as { kind: string }).kind} has no completion`
+        )
+      }
+    }
+  }
   const sessionPolicy = await resolveEffectiveUserAccessPolicy()
   const selection = selectExternalSessionRepresentation({}, sessionPolicy)
   if (selection.status !== 'selected') {
@@ -118,8 +157,7 @@ async function defaultSignInMember(
     proof,
     provider,
     policy,
-    contract: selection.contract,
-    sessionPolicy,
+    completion: { kind: 'session', contract: selection.contract, sessionPolicy },
   })
 }
 
@@ -132,7 +170,7 @@ function subjectFingerprint(proof: VerifiedOidcIdentityProof): string {
  * The only facts a failure log carries: the error class and, when it has one,
  * its code. A message or a database error's detail can hold an email or a row value.
  */
-function errorSummary(error: unknown): { errorClass: string; code?: string } {
+export function errorSummary(error: unknown): { errorClass: string; code?: string } {
   const errorClass =
     error instanceof Error ? error.constructor.name : error === null ? 'null' : typeof error
   const code =
@@ -143,16 +181,18 @@ function errorSummary(error: unknown): { errorClass: string; code?: string } {
 }
 
 /**
- * A provider configuration error answers 503 on every OIDC route. Its log names
- * the settings at fault (the member sign-in switch set without its release
- * guard names CONTROL_API_OIDC_UNRELEASED), never their values.
+ * A provider configuration error fails every OIDC route until it is fixed: the
+ * profile-flow routes answer 503, and Desktop sign-in redeem answers 409
+ * without spending the code. Its log names the settings at fault (the member
+ * sign-in switch set without its release guard names
+ * CONTROL_API_OIDC_UNRELEASED), never their values.
  */
-function logConfigurationFailure(error: unknown): void {
+export function logConfigurationFailure(error: unknown): void {
   const fields =
     error instanceof Error ? [...new Set(error.message.match(OIDC_SETTING_NAME_RE) ?? [])] : []
   logger.error(
     { event: 'oidc_configuration_unavailable', ...errorSummary(error), fields },
-    'OIDC provider configuration is unusable; OIDC routes answer 503 until it is fixed'
+    'OIDC provider configuration is unusable; OIDC routes fail until it is fixed'
   )
 }
 
@@ -210,12 +250,41 @@ function validState(value: unknown): value is string {
   return typeof value === 'string' && STATE_RE.test(value)
 }
 
+function defaultWriteDesktopSignInContext(attemptId: string, codeChallenge: string): Promise<void> {
+  return insertDesktopSignInContext(pool, attemptId, codeChallenge)
+}
+
+/**
+ * `desktopSignIn` is either absent or an object whose only key is a valid
+ * `codeChallenge`. Any other value, `null` included, is invalid, so a
+ * malformed Desktop request never starts a plain Profile attempt.
+ */
+function desktopSignInField(value: unknown): DesktopSignInField {
+  if (value === undefined) return { status: 'absent' }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return { status: 'invalid' }
+  }
+  const keys = Object.keys(value)
+  const codeChallenge = (value as { codeChallenge?: unknown }).codeChallenge
+  if (
+    keys.length !== 1 ||
+    keys[0] !== 'codeChallenge' ||
+    typeof codeChallenge !== 'string' ||
+    !DESKTOP_CODE_CHALLENGE_RE.test(codeChallenge)
+  ) {
+    return { status: 'invalid' }
+  }
+  return { status: 'present', codeChallenge }
+}
+
 export function createExternalOidcProfileFlowRouter(
   dependencies: ExternalOidcProfileFlowDependencies = {}
 ): Router {
   const getProvider = dependencies.getProvider ?? defaultProvider
   const createEngine = dependencies.createEngine ?? defaultEngine
   const signInMember = dependencies.signInMember ?? defaultSignInMember
+  const writeDesktopSignInContext =
+    dependencies.writeDesktopSignInContext ?? defaultWriteDesktopSignInContext
   const router = Router()
   const edgeRateLimits = createExternalClientRateLimiters(
     'oidc_profile_flow',
@@ -254,18 +323,44 @@ export function createExternalOidcProfileFlowRouter(
     if (!validBinding(req.body?.browserBinding)) {
       return res.status(400).json({ error: 'invalid_oidc_attempt' })
     }
+    const desktopSignIn = desktopSignInField(req.body.desktopSignIn)
+    if (desktopSignIn.status === 'invalid') {
+      return res.status(400).json({ error: 'invalid_oidc_attempt' })
+    }
+    if (desktopSignIn.status === 'present' && !provider.memberAuthenticationActivated) {
+      return res.status(409).json({ error: 'desktop_sign_in_unavailable' })
+    }
+    let result: Awaited<ReturnType<Engine['beginIdentityProofAttempt']>>
+    let attempt: Readonly<{ authorizationUrl: string; expiresAt: string }>
+    // The answer is built inside the try too: Express 4 does not catch an
+    // async handler's throw, so any failure must reach safeFailure.
     try {
-      const result = await createEngine(provider).beginIdentityProofAttempt({
+      result = await createEngine(provider).beginIdentityProofAttempt({
         browserBinding: req.body.browserBinding,
         signal: oidcOperationSignal(req),
       })
-      return res.status(200).json({
+      attempt = {
         authorizationUrl: result.authorizationUrl,
         expiresAt: result.expiresAt.toISOString(),
-      })
+      }
     } catch (error) {
-      safeFailure(error, res)
+      return safeFailure(error, res)
     }
+    if (desktopSignIn.status === 'absent') return res.status(200).json(attempt)
+    // The claim reads the context in its own statement, so an attempt whose
+    // context is missing would complete as a plain Profile sign-in. The
+    // authorization URL therefore leaves only after the context is stored.
+    try {
+      await writeDesktopSignInContext(result.attemptId, desktopSignIn.codeChallenge)
+    } catch (error) {
+      // A database error's detail can hold the challenge: class and code only.
+      logger.error(
+        { event: 'oidc_desktop_context_write_failed', ...errorSummary(error) },
+        'OIDC Desktop sign-in context was not stored; the authorization URL was withheld'
+      )
+      return res.status(503).json({ error: 'oidc_storage_unavailable' })
+    }
+    return res.status(200).json({ ...attempt, signInContext: 'desktop_sign_in' })
   })
 
   router.post('/external/oidc/profile-flow/complete', async (req, res) => {
@@ -372,6 +467,20 @@ export function createExternalOidcProfileFlowRouter(
         { event: 'oidc_member_invitation_applied', ...member, count: result.invitationsApplied },
         'OIDC member invitations applied'
       )
+    }
+    if (result.status === 'desktop_code_issued') {
+      // Never the code: with the Desktop's verifier it redeems for a session.
+      logger.info(
+        { event: 'oidc_desktop_code_minted', ...member, teamless: result.teamless },
+        'OIDC Desktop sign-in code minted'
+      )
+      res.status(200).json({
+        outcome: 'desktop_code_issued',
+        memberAuthenticationActivated: true,
+        code: result.code,
+        expiresInSeconds: result.expiresInSeconds,
+      })
+      return
     }
     logger.info(
       { event: 'oidc_member_signed_in', ...member, sessionContract: result.contract },
