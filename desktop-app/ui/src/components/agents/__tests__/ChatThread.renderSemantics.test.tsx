@@ -13,7 +13,7 @@ const composerStateValue = {
   requestComposerFocus: vi.fn(),
 }
 const chatListValue = {
-  chatList: [],
+  chatList: [] as Array<{ id: string; title: string; updatedAt: number }>,
   chatListLoading: false,
   sessionStateByChatId: {},
 }
@@ -26,6 +26,7 @@ const actionsValue = {
   }),
   handleDeleteChat: vi.fn(),
 }
+let activeChatId: string | null = 'chat-1'
 const runtimeValue = { cancelTask: vi.fn() }
 let messages: AgentChatMessage[] = []
 
@@ -55,7 +56,7 @@ vi.mock('@contexts/ChatThreadStateContext', () => ({
     hasOlderMessages: false,
     olderMessagesLoading: false,
     handleLoadOlderMessages: vi.fn(),
-    activeChatId: 'chat-1',
+    activeChatId,
     activityByMessageId: {},
     progressByMessageId: {},
     localSearchQuery: '',
@@ -72,6 +73,8 @@ vi.mock('@components/MessageArtifactActions', () => ({ MessageArtifactActions: (
 
 afterEach(() => {
   cleanup()
+  activeChatId = 'chat-1'
+  chatListValue.chatList = []
   messages = []
   vi.clearAllMocks()
   vi.restoreAllMocks()
@@ -244,4 +247,23 @@ it('keeps generated files visible and downloadable on an interrupted error messa
   )
   expect(revokeObjectURL).toHaveBeenCalledWith('blob:unit-download')
   expect(screen.getByTestId('agent-response').classList.contains('chat-bubble--error')).toBe(true)
+})
+
+describe('session rename focus', () => {
+  it.each(['Enter', 'Escape'])('returns focus to the edited session actions after %s', key => {
+    activeChatId = null
+    chatListValue.chatList = [
+      { id: 'one', title: 'First', updatedAt: 1 },
+      { id: 'two', title: 'Second', updatedAt: 2 },
+    ]
+    render(<ChatThread />)
+    fireEvent.click(screen.getByRole('button', { name: 'Session actions for First' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Rename' }))
+    const input = screen.getByRole('textbox', { name: 'Rename session' })
+    expect(document.activeElement).toBe(input)
+    fireEvent.keyDown(input, { key })
+    expect(document.activeElement).toBe(
+      screen.getByRole('button', { name: 'Session actions for First' })
+    )
+  })
 })

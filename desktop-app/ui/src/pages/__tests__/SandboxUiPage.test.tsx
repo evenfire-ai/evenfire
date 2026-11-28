@@ -845,6 +845,33 @@ describe('SandboxUiPage', () => {
     })
   })
 
+  it('hides the native view while an overlay opened inside the chat is reported', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    sandboxUi.capturePreview.mockResolvedValueOnce('data:image/png;base64,abc')
+
+    const { rerender } = render(<SandboxUiPage />)
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    await screen.findByTestId('sandbox-ui-mounted')
+
+    // A delete confirmation opened in the chat drawer is renderer DOM at the
+    // window's centre: without this the native view paints over it.
+    rerender(<SandboxUiPage chatShellOverlayOpen />)
+
+    await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(false))
+  })
+
   it('shows an embed preview and hides the native view while shell overlays are open', async () => {
     sandboxUi.listApps.mockResolvedValueOnce({
       apps: [
