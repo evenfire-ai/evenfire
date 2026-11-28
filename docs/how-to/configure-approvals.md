@@ -31,7 +31,7 @@ repository whose configuration has settings it does not accept (drivers,
 filters, includes, signing tools and the like), whose files link outside the
 workspace, or whose index names paths outside the worktree. It also refuses
 revisions in git notes history. In `auto`, a call that returns only names,
-ids and metadata such as line counts and sizes (`status`, `log` without a
+ids and metadata such as blob ids, line counts, sizes and rename similarity (`status`, `log` without a
 patch, branches, tags, refs, `remote`, listings) runs with no card, and that metadata
 can describe any committed file, platform-managed paths included; a call that can return file content (`show`, `diff`, `grep`,
 `blame`, `cat_file`, `log` with a patch or pickaxe) shows a card for that one
