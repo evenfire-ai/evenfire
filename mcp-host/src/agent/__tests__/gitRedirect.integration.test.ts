@@ -38,6 +38,7 @@ const saved = {
   enableApproval: appConfig.enableApproval,
   workspacePath: appConfig.nativeTool.workspacePath,
   gitRead: appConfig.nativeTool.gitRead,
+  lang: process.env.LANG,
 }
 let workspace: string
 
@@ -73,12 +74,17 @@ beforeEach(() => {
   git('commit', '-qm', 'c1')
   appConfig.enableApproval = true
   appConfig.nativeTool.workspacePath = workspace
+  // The shell tool forwards LANG, and the witnesses read git's English output
+  // ("On branch"), so the suite pins the C locale whatever the host's is.
+  process.env.LANG = 'C'
   appConfig.nativeTool.gitRead = registerGitRead ? probe : undefined
 })
 afterEach(() => {
   appConfig.enableApproval = saved.enableApproval
   appConfig.nativeTool.workspacePath = saved.workspacePath
   appConfig.nativeTool.gitRead = saved.gitRead
+  if (saved.lang === undefined) delete process.env.LANG
+  else process.env.LANG = saved.lang
   rmSync(workspace, { recursive: true, force: true })
   registerGitRead = true
 })
