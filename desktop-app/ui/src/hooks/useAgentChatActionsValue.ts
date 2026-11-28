@@ -28,11 +28,8 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
       await vm.handleDeleteChat(...args).catch(() => undefined)
     }
   )
-  const handleDeleteChatForAgent = useStableCallback(
-    async (...args: Parameters<AppVm['handleDeleteChatForAgent']>) => {
-      await vm.handleDeleteChatForAgent(...args).catch(() => undefined)
-    }
-  )
+  // Confirmed-delete callers must observe failure to keep their dialog open.
+  const handleDeleteChatForAgent = useStableCallback(vm.handleDeleteChatForAgent)
   const handleSelectChat = useStableCallback(vm.handleSelectChat)
   const clearComposerSendError = useStableCallback(vm.clearComposerSendError)
   const handleAddComposerImageAttachments = useStableCallback(vm.handleAddComposerImageAttachments)

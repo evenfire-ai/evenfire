@@ -57,7 +57,11 @@ function StorageDeleteSidebar() {
   )
 }
 
-async function mountStorageDelete(target = 'chat-2', withOtherAgent = false) {
+async function mountStorageDelete(
+  target = 'chat-2',
+  withOtherAgent = false,
+  chats = ['chat-1', 'chat-2', 'chat-3']
+) {
   const { clerum, handle } = installAppControllerClerum({
     agentNames: withOtherAgent ? ['agent-x', 'agent-y'] : ['agent-x'],
   })
@@ -66,7 +70,7 @@ async function mountStorageDelete(target = 'chat-2', withOtherAgent = false) {
     ...runtimeConfig,
     envKey: 'delete-feedback-fixture',
   })
-  for (const chat of ['chat-1', 'chat-2', 'chat-3']) {
+  for (const chat of chats) {
     await clerum.chat.create('agent-x', chat)
     await clerum.chat.upsertMessages('agent-x', chat, [
       { id: `${chat}-history`, role: 'user', content: `${chat} real history`, timestamp: 1 },
@@ -88,7 +92,9 @@ async function mountStorageDelete(target = 'chat-2', withOtherAgent = false) {
   act(() => app.getVm().handleSelectChatAgent('agent-x', { chatId: 'chat-1', selectLatest: false }))
   await waitFor(() => expect(screen.getByText('chat-1 real history')).toBeTruthy())
   await waitFor(() => expect(app.getVm().sessionStateByChatId['chat-1']?.syncing).toBe(false))
-  await waitFor(() => expect(app.getVm().latestChatSessions).toHaveLength(withOtherAgent ? 4 : 3))
+  await waitFor(() =>
+    expect(app.getVm().latestChatSessions).toHaveLength(chats.length + (withOtherAgent ? 1 : 0))
+  )
   const row = screen
     .getAllByTestId('latest-session-row')
     .find(
@@ -128,6 +134,45 @@ it('reports a current storage deletion failure once and retains the actual conve
   expect(app.getVm().chatMessagesLoading).toBe(false)
   expect((await clerum.readIndex('agent-x')).chats.some(chat => chat.id === 'chat-2')).toBe(true)
   expect(app.getVm().latestChatSessions.some(chat => chat.id === 'chat-2')).toBe(true)
+})
+
+it('keeps the real producer storage failure retryable and closes after retry succeeds', async () => {
+  const { app, clerum } = await mountStorageDelete()
+  const captured = vi.mocked(clerum.chat.captureDeleteFence).mock.calls.length
+  clerum.chat.delete.mockRejectedValueOnce(new Error('fixture storage unavailable'))
+  confirmStorageDelete()
+  await waitFor(() =>
+    expect(screen.getByRole('alert').textContent).toContain('Could not delete the chat')
+  )
+  const dialog = screen.getByRole('dialog', { name: 'Delete session?' })
+  await waitFor(() => expect(dialog.getAttribute('aria-busy')).toBe('false'))
+  expect(clerum.chat.delete).toHaveBeenCalledTimes(1)
+  expect(clerum.chat.captureDeleteFence.mock.calls.length).toBeGreaterThan(captured)
+  const first = clerum.chat.delete.mock.calls[0]
+  confirmStorageDelete()
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Delete session?' })).toBeNull())
+  expect(clerum.chat.delete).toHaveBeenCalledTimes(2)
+  expect(clerum.chat.delete.mock.calls[1]).toEqual(first)
+  expect(app.getVm().latestChatSessions.some(chat => chat.id === 'chat-2')).toBe(false)
+  expect((await clerum.readIndex('agent-x')).chats.some(chat => chat.id === 'chat-2')).toBe(false)
+})
+
+it('invalidates retry when the store fence changed despite unchanged renderer authority', async () => {
+  const { clerum } = await mountStorageDelete()
+  const fence = clerum.chat.captureDeleteFence.mock.results[0]
+    ? await clerum.chat.captureDeleteFence.mock.results[0].value
+    : undefined
+  if (!fence) throw new Error('fixture confirmation did not capture a fence')
+  clerum.chat.delete.mockRejectedValueOnce(new Error('fixture binding changed'))
+  clerum.chat.captureDeleteFence.mockResolvedValueOnce({
+    ...fence,
+    bindingGeneration: fence.bindingGeneration + 1,
+  })
+  confirmStorageDelete()
+  await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Delete cancelled'))
+  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(clerum.chat.delete).toHaveBeenCalledTimes(1)
+  expect((await clerum.readIndex('agent-x')).chats.some(chat => chat.id === 'chat-2')).toBe(true)
 })
 
 it.each([false, true])(
@@ -382,3 +427,26 @@ it.each([false, true])(
     expect(index.pendingChatCleanup?.some(entry => entry.chatId === 'chat-2')).toBe(true)
   }
 )
+
+it('returns focus to surviving navigation after the actual producer deletes the opener', async () => {
+  const { clerum } = await mountStorageDelete()
+  const opener = screen.getAllByRole('button', { name: /^Session options for / })[1]!
+  confirmStorageDelete()
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  expect(clerum.chat.delete).toHaveBeenCalledTimes(1)
+  expect(opener.isConnected).toBe(false)
+  expect(document.activeElement).toBe(screen.getByTestId('nav-chat'))
+})
+
+it('returns focus to navigation after deleting the last session when replacement creation fails', async () => {
+  const { app, clerum } = await mountStorageDelete('chat-1', false, ['chat-1'])
+  const opener = screen.getByRole('button', { name: /^Session options for / })
+  clerum.chat.create.mockRejectedValueOnce(new Error('fixture replacement unavailable'))
+  confirmStorageDelete()
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  expect(clerum.chat.delete).toHaveBeenCalledTimes(1)
+  expect((await clerum.readIndex('agent-x')).chats).toEqual([])
+  expect(app.getVm().activeMessages).toEqual([])
+  expect(opener.isConnected).toBe(false)
+  expect(document.activeElement).toBe(screen.getByTestId('nav-chat'))
+})

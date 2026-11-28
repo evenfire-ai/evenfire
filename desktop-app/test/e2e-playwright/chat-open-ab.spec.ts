@@ -131,9 +131,12 @@ async function openChat(
   const pace = lastOpenAt + OPEN_PACE_MS - Date.now()
   if (pace > 0) await new Promise(resolve => setTimeout(resolve, pace))
   lastOpenAt = Date.now()
+  // The breadcrumb's leading crumb is the way back to a fresh conversation: the
+  // agent inside an open conversation, or "Chat" on the new-chat landing.
   await page
     .getByRole('navigation', { name: 'Chat breadcrumb', exact: true })
-    .getByRole('button', { name: 'Chat', exact: true })
+    .getByRole('button')
+    .first()
     .click()
   // Switch Hosts from the Chat page: the Agents page refreshes the access catalog and the
   // team directory on every visit, which exhausts the per-minute API limits at this pace.

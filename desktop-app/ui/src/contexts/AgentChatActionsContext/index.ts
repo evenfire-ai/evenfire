@@ -4,4 +4,5 @@ export type {
   AgentChatActionsContextValue,
   AgentChatActionsProviderProps,
   QueuedChatDelete,
+  ChatDeleteOutcome,
 } from './types'
