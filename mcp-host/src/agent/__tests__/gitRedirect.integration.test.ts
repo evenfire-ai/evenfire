@@ -333,13 +333,26 @@ describe('typed-git redirect', () => {
       expect(result.toolMessages[0]).toContain('On branch')
     })
 
+    it('with tools.shell_exec true (A5 admin_forced)', async () => {
+      const result = await run({
+        mode: 'auto',
+        turns: [[shell('git status')]],
+        tools: { shell_exec: true },
+      })
+      expect(result.toolMessages.map(redirected)).toEqual([])
+      // Witness: the shell's own exact card is pending.
+      expect(result.approval?.tool_name).toBe('shell_exec')
+    })
+
     it.each([
-      ['tools.shell_exec true (A5 admin_forced)', { shell_exec: true }],
       ['tools.git_read true', { git_read: true }],
       ['tools.file_read true', { file_read: true }],
     ])('with %s', async (_label, tools) => {
       const result = await run({ mode: 'auto', turns: [[shell('git status')]], tools })
       expect(redirected(result.toolMessages[0])).toBe(false)
+      // Witness: the shell path ran the command.
+      expect(result.classifyCalls).toBe(1)
+      expect(result.toolMessages[0]).toContain('On branch')
     })
 
     it('when git_read is not registered', async () => {
@@ -357,6 +370,9 @@ describe('typed-git redirect', () => {
         prepare: conversation => recordDenial(conversation, 'git_read', 'u1'),
       })
       expect(redirected(result.toolMessages[0])).toBe(false)
+      // Witness: the shell path ran the command.
+      expect(result.classifyCalls).toBe(1)
+      expect(result.toolMessages[0]).toContain('On branch')
     })
 
     it('when any guardrail rule is configured', async () => {
@@ -374,6 +390,9 @@ describe('typed-git redirect', () => {
         },
       })
       expect(redirected(result.toolMessages[0])).toBe(false)
+      // Witness: the shell path ran the command.
+      expect(result.classifyCalls).toBe(1)
+      expect(result.toolMessages[0]).toContain('On branch')
     })
 
     it('when the admission inputs carry no approvalTools', async () => {
