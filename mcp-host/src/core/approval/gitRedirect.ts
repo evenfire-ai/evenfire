@@ -128,6 +128,129 @@ function readOnly(subcommand: string, args: readonly string[]): boolean {
 }
 
 /**
+ * The flags of a typed names-only command that git_read can express. A
+ * pointer to git_read for a command it cannot run (`git log --merges`,
+ * `git status --ignored`) would only cost the model a turn. Words that do not
+ * start with `-` are revisions, paths or patterns, and everything after `--`
+ * is a path.
+ */
+interface FlagSurface {
+  /** Flags that stand alone. */
+  exact: ReadonlySet<string>
+  /** `--name=value` forms. */
+  prefixed?: readonly string[]
+  /** Flags whose value is the next word. */
+  valued?: ReadonlySet<string>
+  /** Short-option bundles git_read covers, such as `-sb`. */
+  bundle?: RegExp
+  /** `-N` and `-nN` entry counts. */
+  counts?: boolean
+}
+
+const set = (...flags: string[]): ReadonlySet<string> => new Set(flags)
+
+const NAMES_ONLY_SURFACES: Readonly<Record<string, FlagSurface>> = {
+  status: {
+    exact: set('-s', '--short', '-b', '--branch', '--porcelain', '--porcelain=v1'),
+    bundle: /^-[sb]+$/,
+  },
+  log: {
+    exact: set(
+      '--oneline',
+      '--stat',
+      '--name-only',
+      '--name-status',
+      '--graph',
+      '--all',
+      '--follow'
+    ),
+    prefixed: [
+      '--max-count=',
+      '--since=',
+      '--after=',
+      '--until=',
+      '--before=',
+      '--author=',
+      '--grep=',
+      '--format=',
+      '--pretty=format:',
+      '--pretty=tformat:',
+    ],
+    valued: set(
+      '-n',
+      '--max-count',
+      '--since',
+      '--after',
+      '--until',
+      '--before',
+      '--author',
+      '--grep'
+    ),
+    counts: true,
+  },
+  'rev-parse': { exact: set('--abbrev-ref', '--show-toplevel') },
+  'ls-files': { exact: set() },
+  'ls-tree': { exact: set('-r', '--name-only') },
+  describe: { exact: set('--tags', '--always') },
+  shortlog: { exact: set('-s', '-n', '-sn', '-ns') },
+  'rev-list': { exact: set('--count', '--all') },
+  'merge-base': { exact: set() },
+  'for-each-ref': {
+    exact: set(),
+    prefixed: ['--sort=', '--format=', '--count='],
+    valued: set('--sort', '--format', '--count'),
+  },
+  stash: { exact: set() },
+  worktree: { exact: set() },
+  reflog: { exact: set(), valued: set('-n'), counts: true },
+  remote: { exact: set('-v', '--verbose') },
+  branch: {
+    exact: set(
+      '-a',
+      '-r',
+      '-v',
+      '-vv',
+      '--all',
+      '--list',
+      '-l',
+      '--show-current',
+      '--remotes',
+      '--verbose'
+    ),
+    prefixed: ['--contains=', '--merged=', '--sort='],
+    valued: set('--contains', '--merged'),
+  },
+  tag: {
+    exact: set('--list', '-l'),
+    prefixed: ['--contains=', '--merged=', '--sort='],
+    valued: set('--contains', '--merged'),
+  },
+}
+
+/** Whether git_read can run a names-only typed command with these arguments. */
+function expressible(subcommand: string, args: readonly string[]): boolean {
+  const surface = NAMES_ONLY_SURFACES[subcommand]
+  // Content subcommands are never redirected, so their flags are not judged.
+  if (surface === undefined) return true
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]
+    if (arg === '--') return true
+    if (!arg.startsWith('-')) continue
+    if (surface.exact.has(arg)) continue
+    if (surface.prefixed?.some(prefix => arg.startsWith(prefix))) continue
+    if (surface.valued?.has(arg)) {
+      if (i + 1 >= args.length) return false
+      i++
+      continue
+    }
+    if (surface.bundle?.test(arg)) continue
+    if (surface.counts && /^-n?\d+$/.test(arg)) continue
+    return false
+  }
+  return true
+}
+
+/**
  * Matches a typed read-only git command: at most one leading `cd DIR &&`, then
  * `git`, optionally `-C DIR` or `--no-pager` (repeatable), then a read-only
  * subcommand. None of `;`, `|`, `$`, backtick, `<`, `>` or a newline anywhere,
@@ -135,7 +258,7 @@ function readOnly(subcommand: string, args: readonly string[]): boolean {
  */
 export function matchTypedGitRead(
   command: string
-): { subcommand: string; content: boolean } | null {
+): { subcommand: string; content: boolean; expressible: boolean } | null {
   if (/[;|$`<>\n\r]/.test(command)) return null
   let rest = command.trim()
   const cd = /^cd\s+[^\s&]+\s*&&\s*/.exec(rest)
@@ -162,7 +285,7 @@ export function matchTypedGitRead(
     ((subcommand === 'log' || subcommand === 'reflog') && args.some(logContentArg)) ||
     (subcommand === 'for-each-ref' &&
       args.some(arg => /%\(\*?(raw|contents|body|trailers)/.test(arg)))
-  return { subcommand, content }
+  return { subcommand, content, expressible: content || expressible(subcommand, args) }
 }
 
 /**

@@ -480,9 +480,10 @@ function typedGitRedirect(
   const eligible =
     decision.cell === 'A3' && (decision.kind === 'classify' || decision.kind === 'card')
   if (!eligible) return undefined
-  // Only names-only commands: git_read cards content reads in auto too.
+  // Only names-only commands git_read can run: it cards content reads in
+  // auto too, and a pointer for a flag it lacks only costs a turn.
   const typed = matchTypedGitRead(command)
-  if (typed === null || typed.content) return undefined
+  if (typed === null || typed.content || !typed.expressible) return undefined
   const conversation = config.conversation
   // Whitespace variants are the same command: re-sending one is the escape.
   const key = command.trim().split(/\s+/).join(' ')

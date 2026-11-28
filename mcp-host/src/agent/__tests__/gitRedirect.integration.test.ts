@@ -268,6 +268,15 @@ describe('typed-git redirect', () => {
   })
 
   describe('no redirect', () => {
+    it('for a names-only command with a flag git_read lacks', async () => {
+      for (const command of ['git log --merges', 'git status --ignored', 'git ls-files --others']) {
+        const result = await run({ mode: 'auto', turns: [[shell(command)]] })
+        expect(redirected(result.toolMessages[0])).toBe(false)
+        // Witness: the command took the shell path and was classified.
+        expect(result.classifyCalls).toBe(1)
+      }
+    })
+
     it('for a typed command that returns content (git_read would card it)', async () => {
       for (const command of ['git diff', 'git show HEAD', 'git log -p -3', 'git grep -n TODO']) {
         const result = await run({ mode: 'auto', turns: [[shell(command)]] })

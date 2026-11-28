@@ -93,4 +93,30 @@ describe('matchTypedGitRead', () => {
   ])('does not redirect %s', command => {
     expect(matchTypedGitRead(command)).toBeNull()
   })
+
+  it.each([
+    ['git log --oneline -5', true],
+    ['git log -n 3 --author me --stat', true],
+    ['git log --since=2026-01-01 --format=%h --all', true],
+    ['git status -sb', true],
+    ['git status --porcelain -- src', true],
+    ['git branch -a -vv', true],
+    ['git tag -l --sort=-creatordate', true],
+    ['git for-each-ref --sort=-committerdate --format=%(refname)', true],
+    ['git rev-list --count HEAD', true],
+    ['git describe --tags --always', true],
+    ['git shortlog -sn', true],
+    ['git ls-tree -r --name-only HEAD', true],
+    ['git reflog -10', true],
+    ['git remote -v', true],
+    ['git log --merges', false],
+    ['git log --decorate --oneline', false],
+    ['git status --ignored', false],
+    ['git ls-files --others', false],
+    ['git rev-parse --short HEAD', false],
+    ['git branch --no-merged main', false],
+    ['git log -n', false],
+  ])('%s is expressible as git_read: %s', (command, expressible) => {
+    expect(matchTypedGitRead(command)).toMatchObject({ content: false, expressible })
+  })
 })
