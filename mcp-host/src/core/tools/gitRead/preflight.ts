@@ -22,9 +22,7 @@ export type GitReadRefusalCategory =
   | 'directory_outside_workspace'
   | 'directory_protected'
   | 'alternates_unsupported'
-  | 'alternates_unresolved'
   | 'alternates_unreadable'
-  | 'repository_link_unresolved'
   | 'repository_too_large'
   | 'preflight_failed'
   | 'config_runs_programs'
@@ -222,6 +220,20 @@ function kernelPath(file: string): string {
   return fs.realpathSync.native(file)
 }
 
+/** Whether `cwd` or a directory above it, up to the root, has a `.git` entry. */
+function hasGitEntry(cwd: string, realRoot: string): boolean {
+  for (let dir = cwd; isInside(dir, realRoot); dir = path.dirname(dir)) {
+    try {
+      fs.lstatSync(`${dir}/.git`)
+      return true
+    } catch {
+      // No entry here; look one level up.
+    }
+    if (dir === realRoot) break
+  }
+  return false
+}
+
 function confine(real: string, realRoot: string): void {
   if (!isInside(real, realRoot)) throw new GitReadRefusal('directory_outside_workspace')
   if (isProtectedRealPath(real, realRoot)) throw new GitReadRefusal('directory_protected')
@@ -270,7 +282,9 @@ export function checkAlternates(
     try {
       real = kernelPath(joined)
     } catch {
-      throw new GitReadRefusal('alternates_unresolved')
+      // A missing entry and an outside one get the same refusal: a different
+      // answer would tell whether an outside path exists.
+      throw new GitReadRefusal('directory_outside_workspace')
     }
     confine(real, realRoot)
     if (accepted.has(real)) continue
@@ -311,7 +325,8 @@ export function walkRepositoryLinks(
         try {
           target = kernelPath(child)
         } catch {
-          throw new GitReadRefusal('repository_link_unresolved')
+          // As for alternates: missing and outside answer alike.
+          throw new GitReadRefusal('directory_outside_workspace')
         }
         confine(target, realRoot)
         if (fs.statSync(target).isDirectory()) walk(target)
@@ -665,17 +680,23 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
   try {
     // P2. Discovery, under the ceiling.
     const discovery = await run(['rev-parse', '--git-dir', '--git-common-dir', '--show-toplevel'])
+    // A repository that git cannot resolve (a gitdir file or core.worktree
+    // naming a missing path) answers as one that resolves outside, so the
+    // refusal never tells whether an outside path exists. Without any .git
+    // entry there is no repository to name a path.
+    const unresolved = (): GitReadRefusalCategory =>
+      hasGitEntry(cwd, realRoot) ? 'directory_outside_workspace' : 'not_a_repository'
     if (discovery.outcome !== 'exited' || discovery.exitCode !== 0) {
-      return { kind: 'refused', category: 'not_a_repository' }
+      return { kind: 'refused', category: unresolved() }
     }
     const lines = discovery.stdout.split('\n').filter(line => line.length > 0)
-    if (lines.length !== 3) return { kind: 'refused', category: 'not_a_repository' }
+    if (lines.length !== 3) return { kind: 'refused', category: unresolved() }
     const [gitDir, commonDir, top] = lines.map(line => {
       try {
         // Joined as text, never normalized: the kernel resolves any `..`.
         return kernelPath(path.isAbsolute(line) ? line : `${cwd}/${line}`)
       } catch {
-        throw new GitReadRefusal('not_a_repository')
+        throw new GitReadRefusal('directory_outside_workspace')
       }
     })
     for (const real of [gitDir, commonDir, top]) confine(real, realRoot)
@@ -691,7 +712,7 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
     try {
       objects = kernelPath(`${commonDir}/objects`)
     } catch {
-      throw new GitReadRefusal('not_a_repository')
+      throw new GitReadRefusal('directory_outside_workspace')
     }
     confine(objects, realRoot)
 

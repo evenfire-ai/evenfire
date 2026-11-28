@@ -130,7 +130,7 @@ describe('git_read alternates reader (P5)', () => {
   it('a nonexistent entry followed by an outside entry is refused', async () => {
     expect(await row(`/nonexistent-git-read/objects\n${outsideObjects}\n`)).toEqual({
       control: true,
-      verdict: 'alternates_unresolved',
+      verdict: 'directory_outside_workspace',
     })
   })
 

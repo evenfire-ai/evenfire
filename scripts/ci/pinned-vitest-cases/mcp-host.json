@@ -3221,7 +3221,7 @@
   },
   {
     "suite": "gitRead.repositoryLinks.integration.test.ts",
-    "fullName": "git_read repository links (P2–P4) HEAD linked outside is not a repository"
+    "fullName": "git_read repository links (P2–P4) HEAD linked outside is refused as outside (git itself does not resolve it)"
   },
   {
     "suite": "gitRead.repositoryLinks.integration.test.ts",

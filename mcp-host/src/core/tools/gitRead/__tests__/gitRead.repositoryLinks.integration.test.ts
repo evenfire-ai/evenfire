@@ -116,12 +116,13 @@ describe('git_read repository links (P2–P4)', () => {
     expect(await verdict(repo)).toBe('directory_outside_workspace')
   })
 
-  it('HEAD linked outside is not a repository', async () => {
+  it('HEAD linked outside is refused as outside (git itself does not resolve it)', async () => {
     const repo = freshRepo()
     fs.rmSync(path.join(repo, '.git', 'HEAD'))
     fs.symlinkSync(secretLine, path.join(repo, '.git', 'HEAD'))
     expect(controlGit(fx.root, repo, 'status').status).not.toBe(0)
-    expect(await verdict(repo)).toBe('not_a_repository')
+    // A repository git cannot resolve answers as one that resolves outside.
+    expect(await verdict(repo)).toBe('directory_outside_workspace')
   })
 
   it('a link inside the root is accepted', async () => {
@@ -142,7 +143,7 @@ describe('git_read repository links (P2–P4)', () => {
   it('a dangling link is refused', async () => {
     const repo = freshRepo()
     fs.symlinkSync(path.join(fx.root, 'nowhere'), path.join(repo, '.git', 'dangling'))
-    expect(await verdict(repo)).toBe('repository_link_unresolved')
+    expect(await verdict(repo)).toBe('directory_outside_workspace')
   })
 
   it('an inside alternate store whose pack links outside is refused', async () => {

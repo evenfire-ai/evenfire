@@ -29,14 +29,11 @@ export const GIT_READ_REFUSALS: Readonly<Record<GitReadRefusalCategory, string>>
   not_a_repository:
     'No git repository at this directory (git_read does not use bare or plain-file git directories).',
   directory_outside_workspace:
-    'The repository, its object store or a file it links to is outside the workspace.',
+    'The repository, its object store or a file it links to is outside the workspace or does not resolve.',
   directory_protected: 'The repository or its object store is inside platform-managed state.',
   alternates_unsupported:
     "This repository's object-store alternates file uses a form git_read does not read (quoted, unusual whitespace, too deep or too large). Run git with shell_exec instead; the user may be asked to approve it.",
-  alternates_unresolved:
-    "An object store listed in this repository's alternates file does not exist.",
   alternates_unreadable: "This repository's object-store alternates file could not be read.",
-  repository_link_unresolved: "A link inside this repository's .git directory does not resolve.",
   repository_too_large:
     "This repository's .git directory has more entries than git_read checks (200,000).",
   root_unavailable: 'git_read unavailable: no verified caller workspace.',
