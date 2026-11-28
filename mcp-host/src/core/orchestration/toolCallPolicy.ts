@@ -484,6 +484,9 @@ function typedGitRedirect(
   // auto too, and a pointer for a flag it lacks only costs a turn.
   const typed = matchTypedGitRead(command)
   if (typed === null || typed.content || !typed.expressible) return undefined
+  // A directory git_read cannot take (outside the workspace, or rewritten by
+  // the shell) would only cost a turn.
+  if (typed.directory === null) return undefined
   const conversation = config.conversation
   // Whitespace variants are the same command: re-sending one is the escape.
   const key = command.trim().split(/\s+/).join(' ')

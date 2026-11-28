@@ -119,4 +119,21 @@ describe('matchTypedGitRead', () => {
   ])('%s is expressible as git_read: %s', (command, expressible) => {
     expect(matchTypedGitRead(command)).toMatchObject({ content: false, expressible })
   })
+
+  it.each([
+    ['git status', '.'],
+    ['git -C service log -3', 'service'],
+    ['cd service && git status', 'service'],
+    ['cd apps && git -C api log -3', 'apps/api'],
+    ['git -C /etc status', null],
+    ['cd /tmp && git log', null],
+    ['git -C .. status', null],
+    ['cd a/../b && git status', null],
+    ['cd ~ && git status', null],
+    ['git -C ~/repo status', null],
+    ['git -C "repo" status', null],
+    ['git -C -x status', null],
+  ])('%s runs in git_read directory %s', (command, directory) => {
+    expect(matchTypedGitRead(command)).toMatchObject({ directory })
+  })
 })

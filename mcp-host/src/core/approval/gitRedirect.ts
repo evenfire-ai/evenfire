@@ -5,6 +5,7 @@
  * redirected once per task; sending the same text again takes today's path.
  */
 import { Counter, register } from 'prom-client'
+import { checkGitReadParams } from '../tools/gitRead/definition'
 
 /** The fixed result of a redirected call. */
 export const GIT_REDIRECT_TEXT =
@@ -251,18 +252,39 @@ function expressible(subcommand: string, args: readonly string[]): boolean {
 }
 
 /**
+ * The directory a typed command runs in, as git_read's workspace-relative
+ * `directory`, or null when git_read could not take it: an absolute path, a
+ * `..` segment, a leading `~` (the shell expands it), quoting or escaping
+ * (the shell would rewrite it), or anything git_read's own rule refuses.
+ */
+function workspaceDirectory(parts: readonly string[]): string | null {
+  if (parts.length === 0) return '.'
+  if (parts.some(part => part.startsWith('~') || /['"\\]/.test(part))) return null
+  const directory = parts.join('/')
+  return checkGitReadParams({ subcommand: 'status', directory }).ok ? directory : null
+}
+
+/**
  * Matches a typed read-only git command: at most one leading `cd DIR &&`, then
  * `git`, optionally `-C DIR` or `--no-pager` (repeatable), then a read-only
  * subcommand. None of `;`, `|`, `$`, backtick, `<`, `>` or a newline anywhere,
  * and no `&` other than the one after `cd DIR`.
  */
-export function matchTypedGitRead(
-  command: string
-): { subcommand: string; content: boolean; expressible: boolean } | null {
+export function matchTypedGitRead(command: string): {
+  subcommand: string
+  content: boolean
+  expressible: boolean
+  /** git_read's `directory` for the command, or null when it has none. */
+  directory: string | null
+} | null {
   if (/[;|$`<>\n\r]/.test(command)) return null
   let rest = command.trim()
-  const cd = /^cd\s+[^\s&]+\s*&&\s*/.exec(rest)
-  if (cd) rest = rest.slice(cd[0].length)
+  const cd = /^cd\s+([^\s&]+)\s*&&\s*/.exec(rest)
+  const directories: string[] = []
+  if (cd) {
+    rest = rest.slice(cd[0].length)
+    directories.push(cd[1])
+  }
   if (rest.includes('&')) return null
   const words = rest.split(/\s+/)
   if (words[0] !== 'git') return null
@@ -271,6 +293,7 @@ export function matchTypedGitRead(
     if (words[i] === '--no-pager') {
       i += 1
     } else if (words[i] === '-C' && i + 1 < words.length) {
+      directories.push(words[i + 1])
       i += 2
     } else {
       break
@@ -285,7 +308,12 @@ export function matchTypedGitRead(
     ((subcommand === 'log' || subcommand === 'reflog') && args.some(logContentArg)) ||
     (subcommand === 'for-each-ref' &&
       args.some(arg => /%\(\*?(raw|contents|body|trailers)/.test(arg)))
-  return { subcommand, content, expressible: content || expressible(subcommand, args) }
+  return {
+    subcommand,
+    content,
+    expressible: content || expressible(subcommand, args),
+    directory: workspaceDirectory(directories),
+  }
 }
 
 /**
