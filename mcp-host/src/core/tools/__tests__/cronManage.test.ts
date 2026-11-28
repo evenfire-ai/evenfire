@@ -499,16 +499,19 @@ describe('CronManageTool — ownership (F4)', () => {
     expect(got.content).toContain('not found')
   })
 
-  it('same (sender, channelType) on a different channelId IS still the owner', async () => {
+  it('same (sender, channelType) on a different channelId is not the owner', async () => {
     const aJobId = await createJobAs(sourceA, 'a-job') // telegram:alice @ cA
     const sameUserOtherChat = { ...sourceA, channelId: 'cOTHER', messageId: 'm2' }
     const tool = new CronManageTool(scheduler, sameUserOtherChat)
 
-    // channelId is intentionally NOT part of ownership (matches the workspace
-    // userKey = hash(channelType:sender)): the user owns their job across chats.
-    expect(JSON.parse((await tool.execute({ action: 'list' })).content)).toHaveLength(1)
+    expect(JSON.parse((await tool.execute({ action: 'list' })).content)).toHaveLength(0)
     const got = await tool.execute({ action: 'get', jobId: aJobId })
-    expect(got.is_error).toBe(false)
+    expect(got.is_error).toBe(true)
+    expect(got.content).toContain('not found')
+
+    const owner = new CronManageTool(scheduler, sourceA)
+    const owned = await owner.execute({ action: 'get', jobId: aJobId })
+    expect(owned.is_error).toBe(false)
   })
 })
 

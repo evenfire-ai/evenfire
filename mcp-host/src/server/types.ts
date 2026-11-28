@@ -460,7 +460,7 @@ export type TaskResultHandler = (
 ) => Promise<MessageResponse | null>
 export type CronResultsHandler = (caller?: RuntimeCallerContext) => Array<{
   id: string
-  origin: { channelType: string; channelId: string; sender: string }
+  origin: { channelType: string; channelId: string; sender: string; threadId?: string }
   response: string
   attachments?: Attachment[]
   cronJobId: string

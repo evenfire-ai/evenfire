@@ -233,6 +233,23 @@ export function executionModeForSource(source: TaskSource): 'interactive' | 'una
 }
 
 /**
+ * User text for startTurn. A cron fire stores the prompt on sourceMessage.content.
+ * conversationHistory[0] is "Scheduled task triggered:" and must not win when
+ * that content is empty. An origin-less fire has no message; its user turn is
+ * the prompt.
+ */
+function userTextForTurn(task: Task): string {
+  if (task.source === 'cron') {
+    if (task.sourceMessage) return task.sourceMessage.content
+    const userTurn = [...task.conversationHistory]
+      .reverse()
+      .find(message => message.role === 'user')
+    return userTurn?.content ?? ''
+  }
+  return task.sourceMessage?.content || task.conversationHistory[0]?.content || ''
+}
+
+/**
  * The caller root generated files go under. A message with no sender would
  * share one folder with every other sender-less message on its channel, so it
  * gets none and the generators refuse to write. A task with no message at all
@@ -585,7 +602,7 @@ export class TaskExecutor {
           sessionId: this.conversation.id,
         }
       }
-      const userInput = msg?.content || this.task.conversationHistory[0]?.content || ''
+      const userInput = userTextForTurn(this.task)
       // Auto-title (spec 15): on turn 1 only, derive the server-authoritative
       // session title. Security order is FIXED (§5): redact the FULL input with
       // the operator secret list FIRST, then collapse+truncate — truncating
@@ -2581,7 +2598,10 @@ export class TaskExecutor {
       // only one that survives into shell_exec's child env.
       this.deps.llmProvider.getProviderType(),
       gfsWorkspace ? { ...gfsWorkspace, deliveryAvailable: gfsDeliveryEligible } : undefined,
-      generatedOutputsRoot(this.task.sourceMessage, this.deps.gfsCallerWorkspacePath)
+      generatedOutputsRoot(this.task.sourceMessage, this.deps.gfsCallerWorkspacePath),
+      this.task.source === 'cron' && workflowCallerContext == null
+        ? { omitModelSuppliedTargets: true }
+        : undefined
     )
     await registerDesktopTools(nativeRegistry)
     // Eagerly open this caller's remote OAuth partitions before the catalog is

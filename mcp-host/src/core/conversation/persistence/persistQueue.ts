@@ -210,6 +210,19 @@ export class PersistQueue {
   }
 
   /**
+   * Wait for the worker acknowledgement with no caller timeout.
+   * Session writes keep `enqueueSync` and its sync timeout.
+   */
+  sendDurable<T = unknown>(op: WorkerOp, timeoutMs: null): Promise<T> {
+    try {
+      this.assertAdmissible()
+    } catch (err) {
+      return Promise.reject(err as Error)
+    }
+    return this.send<T>(op, timeoutMs)
+  }
+
+  /**
    * Resolves when the worker answers a `ping`. The worker registers its
    * message handler only after it has opened and migrated the database, so
    * this resolves once the database is open. No timeout: opening (spawn,

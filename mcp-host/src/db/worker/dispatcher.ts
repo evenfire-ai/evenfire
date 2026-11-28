@@ -6,6 +6,15 @@
  * worker_threads boilerplate.
  */
 import type { Database } from 'better-sqlite3'
+import {
+  claimCronJob,
+  deleteCronJob,
+  insertCronJob,
+  loadCronJobs,
+  readCronJob,
+  setCronLastRun,
+  setCronSchedule,
+} from '../cronJobs'
 import { PreparedStatements, prepareStatements } from '../statements'
 import { withBusyRetry } from './busyRetry'
 import type {
@@ -945,6 +954,55 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
       const result = db.pragma('wal_checkpoint(PASSIVE)')
       return result
     }
+
+    case 'load_cron_jobs':
+      return loadCronJobs(db)
+
+    case 'read_cron_job':
+      return readCronJob(db, op.id)
+
+    case 'insert_cron_job':
+      return withBusyRetry(() => {
+        const tx = db.transaction(() => {
+          insertCronJob(db, op.row)
+        })
+        tx.immediate()
+        return { ok: true }
+      })
+
+    case 'delete_cron_job':
+      return withBusyRetry(() => {
+        const tx = db.transaction(() => {
+          deleteCronJob(db, op.id)
+        })
+        tx.immediate()
+        return { ok: true }
+      })
+
+    case 'claim_cron_job':
+      // One UPDATE: enabled = 1 and next_run_at = :slot. changes is the reply.
+      return withBusyRetry(() => {
+        const tx = db.transaction(() => claimCronJob(db, op))
+        return tx.immediate()
+      })
+
+    case 'set_cron_schedule':
+      return withBusyRetry(() => {
+        const tx = db.transaction(() => {
+          setCronSchedule(db, op.id, op.enabled, op.nextRunAt)
+        })
+        tx.immediate()
+        return { ok: true }
+      })
+
+    case 'set_cron_last_run':
+      return withBusyRetry(() => {
+        const tx = db.transaction(() => {
+          setCronLastRun(db, op.id, op.lastRunAt)
+        })
+        tx.immediate()
+        return { ok: true }
+      })
 
     case 'shutdown':
       // Closing happens in the worker entry; dispatcher just returns ack.

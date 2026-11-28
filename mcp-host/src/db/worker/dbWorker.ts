@@ -14,6 +14,7 @@ import { runMigrations } from '../migrate'
 import { applyPragmas } from '../pragmas'
 import { createDispatcher, dispatch } from './dispatcher'
 import { openConversationDatabase } from './openDatabase'
+import { createOpenMigrationBusyRetry } from './openMigrationBusy'
 import {
   HEARTBEAT_ID,
   type HeartbeatPayload,
@@ -47,7 +48,10 @@ async function main(): Promise<void> {
     throw new Error('dbWorker.ts: workerData.dbPath is required')
   }
 
-  const db = openConversationDatabase(data.dbPath)
+  // One budget for both calls, starting at the first busy failure. The
+  // fatal catch below exits 1 when that budget ends or another error is thrown.
+  const retryOpenMigrationBusy = createOpenMigrationBusyRetry()
+  const db = retryOpenMigrationBusy(() => openConversationDatabase(data.dbPath))
   const pragmaResult = applyPragmas(db, { barrierMode: data.barrierMode === true })
   if (!pragmaResult.walAvailable) {
     parentPort.postMessage({
@@ -60,7 +64,7 @@ async function main(): Promise<void> {
     } satisfies WorkerReply)
   }
 
-  runMigrations(db)
+  retryOpenMigrationBusy(() => runMigrations(db))
   const deps = createDispatcher(db)
   const checkpointEvery = Math.max(1, data.checkpointEveryWrites ?? 100)
   let writesSinceCheckpoint = 0

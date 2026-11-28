@@ -17,6 +17,7 @@ import * as pendingApprovalAuthorizationScope from './016-pending-approval-autho
 import * as sessionParentIndex from './017-session-parent-index'
 import * as sessionDeniedTools from './018-session-denied-tools'
 import * as sessionsApprovalMode from './019-sessions-approval-mode'
+import * as cronJobs from './020-cron-jobs'
 
 /**
  * Ordered list of migrations. New migrations append; never reorder or rename.
@@ -47,4 +48,5 @@ export const migrations: Array<{
   sessionParentIndex,
   sessionDeniedTools,
   sessionsApprovalMode,
+  cronJobs,
 ]

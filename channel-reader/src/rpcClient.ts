@@ -155,6 +155,8 @@ export interface ChannelReaderRuntimeSource {
   channelType: 'telegram' | 'email' | 'slack' | 'teams'
   channelId: string
   sender: string
+  /** Creating message thread, when one was stored on the cron origin. */
+  threadId?: string
 }
 
 /**

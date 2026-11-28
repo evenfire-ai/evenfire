@@ -45,6 +45,38 @@ const PRIORITY_WEIGHTS: Record<TaskPriority, number> = {
   low: 1,
 }
 
+/** Replay stored identity. providerEventId is a channel-reader event and is not fired again. */
+function firedProviderIdentity(
+  identity: NonNullable<CronJob['providerIdentity']>
+): NonNullable<CronJob['providerIdentity']> {
+  const fired: NonNullable<CronJob['providerIdentity']> = {
+    medium: identity.medium,
+    providerUserId: identity.providerUserId,
+    providerChannelId: identity.providerChannelId,
+  }
+  if (identity.providerWorkspaceId !== undefined) {
+    fired.providerWorkspaceId = identity.providerWorkspaceId
+  }
+  if (identity.providerChannelType !== undefined) {
+    fired.providerChannelType = identity.providerChannelType
+  }
+  if (identity.providerTarget) {
+    const target = identity.providerTarget
+    fired.providerTarget = {
+      hostRef: target.hostRef,
+      communicationChannelNamespace: target.communicationChannelNamespace,
+      communicationChannelName: target.communicationChannelName,
+    }
+    if (target.providerBotId !== undefined) {
+      fired.providerTarget.providerBotId = target.providerBotId
+    }
+    if (target.providerBotUsername !== undefined) {
+      fired.providerTarget.providerBotUsername = target.providerBotUsername
+    }
+  }
+  return fired
+}
+
 /**
  * MessageQueue — factory + event-forwarding shim.
  */
@@ -130,10 +162,17 @@ export class MessageQueue extends EventEmitter {
     cronJobId: string,
     content: string,
     origin?: CronJob['origin'],
-    priority: TaskPriority = 'normal'
+    priority: TaskPriority = 'normal',
+    providerIdentity?: CronJob['providerIdentity']
   ): Task {
+    const id = uuidv4()
+    const threadId =
+      typeof origin?.threadId === 'string' && origin.threadId.trim() !== ''
+        ? origin.threadId
+        : undefined
+    const identity = providerIdentity ? firedProviderIdentity(providerIdentity) : undefined
     const task: Task = {
-      id: uuidv4(),
+      id,
       source: 'cron',
       cronJobId,
       sourceMessage: origin
@@ -141,10 +180,12 @@ export class MessageQueue extends EventEmitter {
             channelType: origin.channelType,
             channelId: origin.channelId,
             sender: origin.sender,
-            content: '',
+            content,
             timestamp: new Date().toISOString(),
-            messageId: `cron-${cronJobId}-${Date.now()}`,
+            messageId: `cron-${id}`,
             hostRef: '',
+            ...(threadId ? { threadId } : {}),
+            ...(identity ? { providerIdentity: identity } : {}),
           }
         : undefined,
       priority,
@@ -330,9 +371,17 @@ export class MessageQueue extends EventEmitter {
    * Legacy boolean facade over admit(). Production caller: cronScheduler.executeJob
    * (cron messageIds are unique per fire, so cron never trips delivery dedupe).
    * messageHandler uses admit() directly so it can suppress duplicates loudly.
+   *
+   * queue_full does not register inside admit(). The channel path registers in
+   * messageHandler. Cron has no such caller, and SessionProcessor still runs
+   * the task, so the lifecycle record is registered here before that dispatch.
    */
   enqueue(task: Task): boolean {
-    return this.admit(task).admitted
+    const outcome = this.admit(task)
+    if (!outcome.admitted && outcome.reason === 'queue_full' && task.source === 'cron') {
+      this.lifecycle?.register(task)
+    }
+    return outcome.admitted
   }
 
   /**

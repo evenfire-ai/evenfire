@@ -225,6 +225,11 @@ export interface Attachment {
 
 export interface SendMessageOptions {
   parseMode?: 'telegram-html'
+  /**
+   * Telegram forum topic id. This is Bot API `message_thread_id`, not
+   * `reply_to_message_id`.
+   */
+  telegramMessageThreadId?: string
   telegramInlineKeyboard?: TelegramInlineKeyboardButton[][]
   slackBlocks?: SlackBlock[]
   teamsActions?: Array<{

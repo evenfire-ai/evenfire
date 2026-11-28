@@ -23,8 +23,8 @@ describe('MessageQueue — createTaskFromCron with origin', () => {
     expect(task.sourceMessage!.channelType).toBe('telegram')
     expect(task.sourceMessage!.channelId).toBe('-5130716657')
     expect(task.sourceMessage!.sender).toBe('516801777')
-    expect(task.sourceMessage!.messageId).toContain('cron-job-123-')
-    expect(task.sourceMessage!.content).toBe('')
+    expect(task.sourceMessage!.messageId).toBe(`cron-${task.id}`)
+    expect(task.sourceMessage!.content).toBe('Fetch news')
     expect(task.sourceMessage!.hostRef).toBe('')
   })
 

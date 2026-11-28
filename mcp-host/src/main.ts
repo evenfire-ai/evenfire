@@ -19,6 +19,7 @@ import { AgentStateMachine, CronScheduler, wireCronDispatch } from './agent'
 import type { ResolvedTaskModel } from './agent'
 import { agentToolEnvProvider } from './agent/agentToolEnv'
 import type { PendingCronResult } from './agent/cronDispatch'
+import { createCronDurableStore } from './agent/cronStore'
 import { createFileReferenceGfsGate } from './agent/fileReferenceGfsGate'
 import { createIncomingAdmission, replayedIncomingMessage } from './agent/incomingAdmission'
 import { INCOMING_ATTACHMENT_MAX_COUNT } from './agent/incomingAttachments'
@@ -2095,10 +2096,6 @@ async function initializeAgent(): Promise<void> {
     }
   }
 
-  // Create cron scheduler and inject into agent
-  cronScheduler = new CronScheduler(messageQueue, { statelessLifecycle: config.statelessLifecycle })
-  agent.setCronScheduler(cronScheduler)
-
   // Wire activity events (agent, queue, core events -> activity hub)
   wireActivityEvents(agent, messageQueue, publishActivity)
 
@@ -2138,13 +2135,6 @@ async function initializeAgent(): Promise<void> {
       : {}),
   })
   agent.setSessionProcessor(sessionProcessor)
-
-  wireCronDispatch(cronScheduler, {
-    sessionProcessor,
-    pendingCronResults,
-    sanitizeAttachments,
-    cronResultsInFlight,
-  })
 
   // Cron×stateless drained-gauge race fix: clear the in-flight marker on the
   // task's terminal lifecycle transition. On success this fires AFTER the cron
@@ -2217,6 +2207,29 @@ async function initializeAgent(): Promise<void> {
     )
   }
 
+  const durableQueue =
+    persistQueue && (config.sessionStoreMode === 'sqlite' || config.sessionStoreMode === 'dual')
+      ? persistQueue
+      : undefined
+  const cronStore = durableQueue
+    ? createCronDurableStore({
+        send(op, timeoutMs) {
+          return durableQueue.sendDurable(op, timeoutMs)
+        },
+      })
+    : undefined
+  cronScheduler = new CronScheduler(messageQueue, {
+    statelessLifecycle: config.statelessLifecycle,
+    ...(cronStore ? { store: cronStore } : {}),
+  })
+  agent.setCronScheduler(cronScheduler)
+  wireCronDispatch(cronScheduler, {
+    sessionProcessor,
+    pendingCronResults,
+    sanitizeAttachments,
+    cronResultsInFlight,
+  })
+
   // P.3 invariant #3: rehydrate pending_approvals from durable storage
   // BEFORE SessionProcessor accepts new traffic. No-op when the cold-start
   // loader is still the NoOp default (memory mode).
@@ -2224,6 +2237,10 @@ async function initializeAgent(): Promise<void> {
   // Fail closed: accepting traffic with durable approvals present but no
   // reconstructed executor would strand decisions and break trace continuity.
   await agent.bootstrap()
+
+  if (cronStore) {
+    await cronScheduler.loadFromStore()
+  }
 
   // Start the agent
   agent.start()
@@ -3433,6 +3450,9 @@ async function shutdown(signal: string): Promise<void> {
     guardrailResolveTimer = null
   }
 
+  // Terminal before agent.stop so an in-flight claim cannot enqueue.
+  cronScheduler?.stop()
+
   if (agent) {
     await agent.stop()
   }
@@ -3457,7 +3477,6 @@ async function shutdown(signal: string): Promise<void> {
     }
   }
 
-  cronScheduler?.stop()
   spilloverStorage?.stopGc()
   await mcpClosePromise
   await mcpFleetCoordinator.drainForShutdown()
