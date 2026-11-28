@@ -11,9 +11,9 @@
 <h3 align="center">Build your company's intelligence layer, without losing control.</h3>
 
 <p align="center">
-  Where your team and AI agents work together — a complete, fully open-source platform,
-  from a native desktop app to a secure, self-hosted backend.
-  Bring your own model keys; every risky action waits for a human "yes."
+  Give your team AI agents that can work with tools and files on your infrastructure.
+  Choose your models, share agents with your team, and configure approvals, access and budgets
+  from the Control UI. Work with your agents in Evenfire Desktop.
 </p>
 
 <p align="center">
@@ -24,14 +24,83 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick start</a> · <a href="#what-is-evenfire">What is Evenfire</a> · <a href="#the-platform">The platform</a> · <a href="#why-evenfire">Why</a> · <a href="#security-model">Security</a> · <a href="#supported-llm-providers">Providers</a> · <a href="#deploying-to-a-remote-cluster">Deploy</a> · <a href="docs/README.md">Docs</a> · <a href="#status">Status</a> · <a href="#community-and-license">License</a>
+  <a href="https://trendshift.io/repositories/168438?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-168438" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/168438/daily?language=TypeScript" alt="evenfire-ai/evenfire | Trendshift" width="250" height="55"/></a>
 </p>
 
 <p align="center">
-  <img src="docs/assets/control-ui-usage.webp" alt="Control UI: usage dashboard with charts of token consumption per model over time" width="82%" />
+  <a href="#see-evenfire-in-action">See it in action</a> · <a href="#quick-start">Quick start</a> · <a href="#what-is-evenfire">What is Evenfire</a> · <a href="#the-platform">The platform</a> · <a href="#why-evenfire">Why</a> · <a href="#security-model">Security</a> · <a href="#supported-llm-providers">Providers</a> · <a href="#deploying-to-a-remote-cluster">Deploy</a> · <a href="docs/README.md">Docs</a> · <a href="#status">Status</a> · <a href="#community-and-license">License</a>
 </p>
 
-<p align="center"><sub>The Control UI's usage dashboard: token consumption per model, over time. <a href="docs/surfaces/README.md">Tour all three UIs →</a></sub></p>
+## See Evenfire in action
+
+From a conversation to a tool action, Evenfire connects the work your team wants
+agents to do with the controls needed to run them. Use Desktop for day-to-day
+work and the Control UI to manage agents, connectors, access and usage.
+
+### Work with agents in Evenfire Desktop
+
+Start a conversation with an agent, give it a task, and follow its progress as
+it calls the tools you have enabled. Review its response and open the files it
+produces from the same conversation.
+
+<p align="center">
+  <img src="docs/assets/readme/01-desktop-conversation.png" alt="Marketing agent in Evenfire Desktop with a downloadable draft campaign brief" width="100%">
+</p>
+
+### Approve tool actions before execution
+
+Configure which tool actions require approval, then review a request before
+allowing it to proceed. In Desktop, review and approve or deny each request
+directly in the conversation.
+
+<p align="center">
+  <img src="docs/assets/readme/02-human-approvals.png" alt="Marketing agent awaiting approval for an Airtable tool action, with Approve, Always approve and Deny controls" width="100%">
+</p>
+
+[Configure approval policies](docs/how-to/configure-approvals.md).
+
+### Configure each agent's instructions and tools
+
+Choose an agent's model and instructions in the Control UI, assign its
+connectors, and manage which teams can use it. Give each agent the capabilities
+and access it needs for its role.
+
+<p align="center">
+  <img src="docs/assets/readme/03-agent-configuration.png" alt="Control UI agent overview showing its model, assigned connectors, members and teams" width="100%">
+</p>
+
+### Extend agents with connectors and plugins
+
+Browse the Marketplace to discover and install connectors and plugins.
+Connectors expose tools through MCP; plugins can add workflows and their own
+interfaces. Manage installed capabilities in the Control UI.
+
+<p align="center">
+  <img src="docs/assets/readme/04-marketplace.png" alt="Evenfire Marketplace listing connectors including Figma, Firecrawl, GitHub and Google Sheets" width="100%">
+</p>
+
+### Share files with your team and agents
+
+Share files and folders with people, teams and agents in EvenDrive. Give your
+agents access to the documents they need so they can work with you on shared
+material. File access is checked and audited by the platform.
+
+<p align="center">
+  <img src="docs/assets/readme/05-evendrive.png" alt="EvenDrive folder sharing with people, a team and an agent, with an Editor access selector" width="100%">
+</p>
+
+### Monitor usage, costs and budgets
+
+See token usage across agents, teams, providers and models. Configure model
+prices to track costs, and set scoped budgets to warn or block new work when
+budget enforcement is enabled.
+
+<p align="center">
+  <img src="docs/assets/readme/06-cost-and-usage.png" alt="Control UI token usage dashboard with request totals and usage broken down by team" width="100%">
+</p>
+
+[Track usage and configure budgets](docs/how-to/token-budgets-and-usage.md) ·
+[Tour the platform's interfaces](docs/surfaces/README.md).
 
 ---
 
