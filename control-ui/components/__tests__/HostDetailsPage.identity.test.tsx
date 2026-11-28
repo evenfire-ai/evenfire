@@ -501,18 +501,151 @@ describe('HostDetailsPage identity integration', () => {
     expect(container.querySelector('.cu-host-approval-section .cu-section-title')).toBeNull()
   })
 
-  it('shows the agent description in place of the identifier and truncates long copy', async () => {
+  it('renders the identity without the agent description or slug fallback', async () => {
     const { container } = render(<HostDetailsPage />)
-    const description = await screen.findByTitle(host.spec.description)
+    await screen.findByRole('button', { name: 'Edit agent name' })
 
-    expect(description).toHaveClass('cu-host-overview-identity__description')
-    expect(description.textContent).toHaveLength(100)
-    expect(description.textContent?.endsWith('…')).toBe(true)
+    expect(container.querySelector('.cu-host-overview-identity__description')).toBeNull()
+    expect(screen.queryByTitle(host.spec.description)).not.toBeInTheDocument()
+    expect(screen.queryByText(/coordinates customer support requests/)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Edit agent name' })).toBeInTheDocument()
+    // No spec.lifecycle on the fixture host → Stateful, left of the status.
+    const typeChip = container.querySelector('.cu-host-overview-identity__type')
+    expect(typeChip).toHaveTextContent('Stateful')
+    fireEvent.mouseEnter(typeChip)
+    expect(screen.getByRole('tooltip')).toHaveTextContent(
+      'This agent runs continuously; its process is never scaled to zero.'
+    )
+    fireEvent.mouseLeave(typeChip)
+    // The card survives the pointer grace window, then hides.
+    await waitFor(() => expect(screen.queryByRole('tooltip')).toBeNull())
     expect(screen.getByText('Created').nextElementSibling).toHaveTextContent(/2026/)
     expect(screen.queryByText('Last updated')).not.toBeInTheDocument()
     expect(container.querySelector('.cu-host-overview-identity__slug')).toBeNull()
     expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
+  })
+
+  it('labels a suspended lifecycle state as Idle', async () => {
+    const suspendedHost = {
+      ...host,
+      spec: { ...host.spec, lifecycle: { stateless: true } },
+      status: { lifecycle: { state: 'Suspended' } },
+    }
+    ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      host: suspendedHost,
+      contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
+      secrets: [{ name: 'openai-secret', keys: ['openai-api-key'] }],
+      users: [],
+      teams: [],
+      agentUsers: [],
+      agentTeams: [],
+    })
+    ;(api.getHost as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(suspendedHost)
+
+    const { container } = render(<HostDetailsPage />)
+    await screen.findByRole('button', { name: 'Edit agent name' })
+
+    const status = container.querySelector('.cu-host-overview-identity__status')
+    expect(status).toHaveTextContent('Idle')
+    expect(status).not.toHaveTextContent('Suspended')
+    // The stateless host announces its type left of the status.
+    const typeChip = container.querySelector('.cu-host-overview-identity__type')
+    expect(typeChip).toHaveTextContent('Stateless')
+    fireEvent.mouseEnter(typeChip)
+    expect(screen.getByRole('tooltip')).toHaveTextContent(
+      'This agent persists session state to disk and scales to zero while idle. It wakes on demand.'
+    )
+  })
+
+  // WCAG 2.2 SC 1.4.13 interaction contract for the type tooltip
+  // (dismissible, hoverable, persistent) and viewport-aware placement.
+  it('dismisses the tooltip on Escape and shows it again on re-hover', async () => {
+    const { container } = render(<HostDetailsPage />)
+    const typeChip = await screen
+      .findByRole('button', {
+        name: 'Edit agent name',
+      })
+      .then(() => container.querySelector('.cu-host-overview-identity__type') as HTMLElement)
+
+    fireEvent.mouseEnter(typeChip)
+    expect(screen.getByRole('tooltip')).toBeInTheDocument()
+    fireEvent.keyDown(typeChip, { key: 'Escape' })
+    expect(screen.queryByRole('tooltip')).toBeNull()
+    // Leaving and re-entering the trigger starts a new hover interaction.
+    fireEvent.mouseLeave(typeChip)
+    fireEvent.mouseEnter(typeChip)
+    expect(screen.getByRole('tooltip')).toBeInTheDocument()
+  })
+
+  it('keeps the tooltip open on pointer leave while the trigger keeps focus', async () => {
+    const { container } = render(<HostDetailsPage />)
+    const typeChip = await screen
+      .findByRole('button', {
+        name: 'Edit agent name',
+      })
+      .then(() => container.querySelector('.cu-host-overview-identity__type') as HTMLElement)
+
+    fireEvent.focus(typeChip)
+    expect(screen.getByRole('tooltip')).toBeInTheDocument()
+    fireEvent.mouseLeave(typeChip)
+    expect(screen.getByRole('tooltip')).toBeInTheDocument()
+    fireEvent.blur(typeChip)
+    await waitFor(() => expect(screen.queryByRole('tooltip')).toBeNull())
+  })
+
+  it('keeps the tooltip open while the pointer moves onto the card', async () => {
+    const { container } = render(<HostDetailsPage />)
+    const typeChip = await screen
+      .findByRole('button', {
+        name: 'Edit agent name',
+      })
+      .then(() => container.querySelector('.cu-host-overview-identity__type') as HTMLElement)
+
+    fireEvent.mouseEnter(typeChip)
+    const card = screen.getByRole('tooltip')
+    fireEvent.mouseLeave(typeChip)
+    // Inside the grace window the card is still there; entering it cancels
+    // the pending hide.
+    fireEvent.mouseEnter(card)
+    await new Promise(resolve => setTimeout(resolve, 150))
+    expect(screen.getByRole('tooltip')).toBeInTheDocument()
+    fireEvent.mouseLeave(card)
+    await waitFor(() => expect(screen.queryByRole('tooltip')).toBeNull())
+  })
+
+  it('flips the card above the trigger and clamps it near the viewport edges', async () => {
+    const { container } = render(<HostDetailsPage />)
+    const typeChip = await screen
+      .findByRole('button', {
+        name: 'Edit agent name',
+      })
+      .then(() => container.querySelector('.cu-host-overview-identity__type') as HTMLElement)
+
+    const innerHeightSpy = vi.spyOn(window, 'innerHeight', 'get').mockReturnValue(200)
+    Object.defineProperty(typeChip, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        left: 20,
+        right: 60,
+        top: 160,
+        bottom: 180,
+        width: 40,
+        height: 20,
+        x: 20,
+        y: 160,
+        toJSON: () => ({}),
+      }),
+    })
+    try {
+      fireEvent.mouseEnter(typeChip)
+      const card = screen.getByRole('tooltip') as HTMLElement
+      // No room below (bottom 180 + gap vs innerHeight 200) → above, top = 160-6-40.
+      expect(card.style.top).toBe('114px')
+      // Center 40 clamped to half-card 144 + 8 from the left edge.
+      expect(card.style.left).toBe('152px')
+    } finally {
+      innerHeightSpy.mockRestore()
+    }
   })
 
   it('edits the agent name in a scalar dialog via one PUT without changing the agent slug', async () => {
