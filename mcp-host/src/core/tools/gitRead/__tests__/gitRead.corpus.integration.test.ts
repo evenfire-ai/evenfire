@@ -373,9 +373,13 @@ describe('git_read corpus on real git', () => {
     Object.assign(process.env, poison)
     const envs: Array<Readonly<Record<string, string>>> = []
     const spawned: string[] = []
+    const pinnedTo = new Set<string>()
     const spy: GitSpawn = (git, argv, options) => {
       envs.push(options.env)
-      spawned.push(argv[0])
+      // The call's own processes run with the checked --git-dir and --work-tree.
+      const pinned = argv[0].startsWith('--git-dir=')
+      if (pinned) pinnedTo.add(`${argv[0]} ${argv[1]}`)
+      spawned.push(pinned ? `${argv[2]}*` : argv[0])
       return spawnGit(git, argv, options)
     }
     try {
@@ -401,31 +405,34 @@ describe('git_read corpus on real git', () => {
       }
     }
     // Every process, preflight included, in order, for the four calls.
+    // A `*` marks a process run with the checked --git-dir and --work-tree.
     expect(spawned).toEqual([
       // status: discovery, config, the index-name check, the command, the submodule note
       'rev-parse',
       'config',
       'ls-files',
-      'status',
-      'ls-files',
+      'status*',
+      'ls-files*',
       // show HEAD:a.txt: discovery, config, peel, notes refs, the command
       'rev-parse',
       'config',
       'rev-parse',
       'for-each-ref',
-      'show',
+      'show*',
       // log --follow -p: discovery, config, notes refs, the follow check, the command
       'rev-parse',
       'config',
       'for-each-ref',
       'log',
-      'log',
+      'log*',
       // blame: discovery, config, notes refs, the command
       'rev-parse',
       'config',
       'for-each-ref',
-      'blame',
+      'blame*',
     ])
+    const repo = path.join(fs.realpathSync(fx.root), 'repo')
+    expect([...pinnedTo]).toEqual([`--git-dir=${repo}/.git --work-tree=${repo}`])
     expect(envs).toHaveLength(spawned.length)
     const literal = gitReadEnv(path.dirname(fs.realpathSync(fx.root)))
     for (const env of envs) expect(env).toEqual(literal)

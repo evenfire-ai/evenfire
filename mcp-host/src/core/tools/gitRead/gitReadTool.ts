@@ -152,8 +152,11 @@ export class GitReadTool implements Tool {
     if (preflight.kind === 'refused') return this.refused(preflight.category, done)
     if (preflight.kind === 'git_failed') return done(cut(preflight.stderr).text, true)
 
+    // The call's git runs on the git dir and worktree the preflight checked,
+    // never on a repository discovered again from the directory.
+    const pinned = [`--git-dir=${preflight.gitDir}`, `--work-tree=${preflight.topLevel}`]
     const run = (argv: readonly string[], maxBuffer: number): Promise<GitSpawnResult> =>
-      this.spawn(this.options.gitPath, argv, {
+      this.spawn(this.options.gitPath, [...pinned, ...argv], {
         cwd: preflight.cwd,
         env: preflight.env,
         timeoutMs,

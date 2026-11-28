@@ -99,8 +99,9 @@ describe('git_read results for each ending of the main command', () => {
   async function endingWith(
     outcome: GitSpawnResult['outcome']
   ): Promise<{ content: string; is_error: boolean }> {
+    // The main command runs after the --git-dir/--work-tree the preflight checked.
     const spawn: GitSpawn = (git, argv, options) =>
-      argv[0] === 'log'
+      argv[2] === 'log' && argv[0].startsWith('--git-dir=')
         ? Promise.resolve({ exitCode: null, stdout: 'partial\n', stderr: '', outcome })
         : spawnGit(git, argv, options)
     const tool = new GitReadTool({

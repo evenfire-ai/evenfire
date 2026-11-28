@@ -444,7 +444,14 @@ export interface PreflightContext {
 }
 
 export type PreflightResult =
-  | { kind: 'ok'; cwd: string; env: Readonly<Record<string, string>> }
+  | {
+      kind: 'ok'
+      cwd: string
+      env: Readonly<Record<string, string>>
+      /** The git dir and worktree the checks confined; the call's git runs on them. */
+      gitDir: string
+      topLevel: string
+    }
   | { kind: 'refused'; category: GitReadRefusalCategory }
   /** A check git itself rejected: its stderr is the result, and nothing else runs. */
   | { kind: 'git_failed'; stderr: string }
@@ -677,6 +684,7 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
     })
 
   let topLevel: string
+  let checkedGitDir: string
   try {
     // P2. Discovery, under the ceiling.
     const discovery = await run(['rev-parse', '--git-dir', '--git-common-dir', '--show-toplevel'])
@@ -706,6 +714,7 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
     // realpath check judge.
     if (!isInside(cwd, top)) throw new GitReadRefusal('not_a_repository')
     topLevel = top
+    checkedGitDir = gitDir
 
     // P3. The object store.
     let objects: string
@@ -837,5 +846,5 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
     }
   }
 
-  return { kind: 'ok', cwd, env }
+  return { kind: 'ok', cwd, env, gitDir: checkedGitDir, topLevel }
 }
