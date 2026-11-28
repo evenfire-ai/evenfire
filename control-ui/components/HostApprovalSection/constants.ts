@@ -5,7 +5,8 @@ export interface NativeToolMeta {
   /**
    * Resolved value of the tool class's hard-coded `requiresApproval()` in
    * mcp-host. Verified against `mcp-host/src/core/tools/*.ts` —
-   *   - `'required'` (true): git_read, http_request, shell_exec
+   *   - `'required'` (true): git_read, http_request, shell_exec (and cron_manage,
+   *     which this list does not show)
    *   - `'skip'` (false): everything else, including all clerum__* output
    *     tools (registered via InternalToolAdapter) and the file/json/system
    *     tools.
