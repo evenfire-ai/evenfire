@@ -18,7 +18,7 @@ function category(params: Record<string, unknown>): string | null {
 describe('git_read definition', () => {
   it('fits the 2,048-byte native definition budget', () => {
     const bytes = Buffer.byteLength(JSON.stringify(GIT_READ_DEFINITION), 'utf8')
-    expect(bytes).toBe(1781)
+    expect(bytes).toBe(1773)
     expect(bytes).toBeLessThanOrEqual(2048)
   })
 
@@ -28,6 +28,14 @@ describe('git_read definition', () => {
       'Refusals are fixed text; errors from git are passed through.'
     )
     expect(GIT_READ_DEFINITION.description).not.toContain('Errors are fixed text')
+  })
+
+  it('says protected paths are excluded by name, not that their content is never returned', () => {
+    // Content stored in the repository under another name is not excluded (review F04, F39).
+    expect(GIT_READ_DEFINITION.description).toContain(
+      'Protected platform paths are excluded by name.'
+    )
+    expect(GIT_READ_DEFINITION.description).not.toContain('never returned')
   })
 })
 

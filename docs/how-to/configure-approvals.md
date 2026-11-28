@@ -23,8 +23,10 @@ output of `json_transform` reaches the model wrapped as tool output, like
 
 `git_read` is read-only git in a workspace repository, without a shell. It is
 registered when a root-owned git 2.38 or newer is installed in `/usr/bin` or
-`/bin` and the shell and file tools share one workspace root. It is built
-not to return the content of platform-managed paths, and it refuses a
+`/bin` and the shell and file tools share one workspace root. It excludes
+platform-managed paths by name, so content stored in the repository under
+another name is not excluded; that is one reason content reads show a card
+in `auto`. It refuses a
 repository whose configuration has settings it does not accept (drivers,
 filters, includes, signing tools and the like), whose files link outside the
 workspace, or whose index names paths outside the worktree. It also refuses
