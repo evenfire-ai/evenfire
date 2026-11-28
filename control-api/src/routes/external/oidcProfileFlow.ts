@@ -5,7 +5,7 @@ import { pool } from '../../db.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import { rootLogger } from '../../observability/logger.js'
 import { loadOidcProviderConfiguration } from '../../oidc/configuration.js'
-import { MEMBER_POLICY_EVIDENCE_CLAIM_NAMES } from '../../oidc/memberEligibility.js'
+import { memberPolicyEvidenceClaimNames } from '../../oidc/memberEligibility.js'
 import { OidcProtocolEngine, type VerifiedOidcIdentityProof } from '../../oidc/protocolEngine.js'
 import {
   OidcAttemptRejectedError,
@@ -74,8 +74,10 @@ function defaultProvider(): Provider | undefined {
 /**
  * At most one engine, for the current configuration generation, so provider
  * discovery is not repeated on every request. The generation covers every
- * protocol setting and the client credential; a new generation replaces the
- * engine. The member sign-in switch is not part of it and is read from the
+ * protocol setting, the client credential and the eligibility settings other
+ * than the new-member team; a new generation replaces the engine. A new
+ * required claim name is therefore a new engine, which collects that claim.
+ * The member sign-in switch is not part of the generation and is read from the
  * provider loaded for each request.
  */
 const engines = new Map<string, OidcProtocolEngine>()
@@ -87,7 +89,7 @@ function defaultEngine(provider: Provider): OidcProtocolEngine {
     db: pool,
     getClientSecret: () => process.env[provider.clientSecretRef] ?? '',
     encryptionKeyHex: config.oauthEncryptionKey,
-    policyEvidenceClaimNames: MEMBER_POLICY_EVIDENCE_CLAIM_NAMES,
+    policyEvidenceClaimNames: memberPolicyEvidenceClaimNames(provider.memberEligibility),
   })
   engines.clear()
   engines.set(provider.configurationGeneration, engine)

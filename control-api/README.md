@@ -272,6 +272,137 @@ Route-policy controls:
 
 - `CONTROL_API_POLICY_AUTH_AUDIENCE`: expected audience used by protected route-policy checks.
 
+### OIDC member sign-in (unreleased)
+
+Members can sign in to Profile UI with one OpenID Connect provider. The
+feature is unreleased and off by default: with no `CONTROL_API_OIDC_*`
+variable set, the OIDC routes answer 404 and Profile UI shows only the
+password form.
+
+Settings:
+
+- The registration, all nine or none: `CONTROL_API_OIDC_REGISTRATION_ID`,
+  `CONTROL_API_OIDC_DISPLAY_LABEL`, `CONTROL_API_OIDC_ISSUER`,
+  `CONTROL_API_OIDC_CLIENT_ID`, `CONTROL_API_OIDC_CLIENT_SECRET`,
+  `CONTROL_API_OIDC_CLIENT_AUTH_METHOD` (`client_secret_basic` or
+  `client_secret_post`), `CONTROL_API_OIDC_REDIRECT_URI`,
+  `CONTROL_API_OIDC_RESPONSE_MODE` (`query`) and
+  `CONTROL_API_OIDC_TRUST_GENERATION`. Sign-in requests the scopes
+  `openid profile email`.
+- `CONTROL_API_OIDC_MEMBER_SIGN_IN=enabled` turns member sign-in on. It also
+  needs `CONTROL_API_OIDC_UNRELEASED=acknowledged`.
+- `CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE`: the value a top-level ID token
+  claim must hold: 1–256 characters, no control or format characters, and no
+  leading or trailing whitespace (inner spaces are allowed). A format
+  character such as U+200B is invisible and would match no token. The claim
+  matches when it is
+  a string exactly equal to the value, or an array of strings with one element
+  exactly equal to it. Anything else does not match, including a missing
+  claim, a prefix or substring, and an array with a non-string element. A
+  claim value the sign-in cannot read, such as an array of more than 32 items
+  or a string over 512 characters, refuses sign-in too, and so does an
+  unreadable `roles` claim, whichever claim is required.
+- `CONTROL_API_OIDC_REQUIRED_CLAIM_NAME`: the claim's name. It is `roles`
+  when a value is set and the name is omitted. Omitting both settings adds no
+  claim check. A name without a value is refused, and so is a name that is an
+  OIDC protocol claim (`iss`, `sub`, `aud`, `exp`, `iat`, `nbf`, `jti`,
+  `nonce`, `azp`, `auth_time`, `at_hash`, `c_hash`, `s_hash`, `sid`), a claim
+  eligibility already reads (`tid`, `idp`, `acct`, `email`, `email_verified`,
+  `xms_edov`), empty, over 128 characters, or has control characters, format
+  characters, or leading or trailing whitespace. Use a claim only an
+  identity-provider admin can set, such as an app role, a group, or
+  `app_metadata`. Do not use a profile claim the person can edit, such as
+  `name`, `nickname`, `preferred_username`, or `given_name`.
+- `CONTROL_API_OIDC_ACCOUNT_CREATION`: what a first sign-in that finds no
+  account does. Unset, a non-Entra issuer signs in only existing accounts.
+  The setting is refused for Entra ID, which always creates accounts for the
+  pinned tenant. Two values turn creation on for other issuers. With either,
+  an account is created only when the ID token has an `email` claim and
+  `email_verified` is `true`; a first sign-in without them is refused.
+  - `enabled` creates an account for each person whose ID token holds the
+    required claim, and needs `CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE`. Without
+    a value it is refused. Use a group or app role your administrators
+    assign, not a profile claim people can edit.
+  - `any_issuer_account` creates an account for every person the issuer signs
+    in with a verified email, with no claim check, and is refused when a
+    required claim value is set. Use it only when the issuer cannot sign in
+    anyone outside your company: the application requires assignment, and
+    self-service sign-up and social or external logins are off at the
+    issuer. Sign in with Apple, Entra External ID user flows with sign-up on,
+    and Auth0 tenants with sign-up on sign in people who registered
+    themselves. With this value each of them gets an active account, and
+    joins `CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID` if it is set. Google's
+    `accounts.google.com` needs the `hd` required claim, so only `enabled`
+    can turn creation on there.
+- `CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID`: a team UUID that each account the
+  sign-in creates joins as a `member`.
+- Entra ID is an issuer on `login.microsoftonline.com`,
+  `login.microsoftonline.us` or `login.partner.microsoftonline.cn`. It needs
+  `CONTROL_API_OIDC_TENANT_ID` (a tenant GUID), and the issuer must be
+  `https://<host>/<tenant-id>/v2.0` for that tenant; multi-tenant authorities
+  and the Microsoft consumer tenant are refused.
+  `CONTROL_API_OIDC_ALLOW_GUESTS=true` admits guest accounts and needs a
+  required claim named `roles`. Every other issuer, Entra External ID and
+  Azure AD B2C included, is generic, and the tenant and guest settings are
+  refused for it.
+- Google's `accounts.google.com` issuer needs the required claim name `hd`,
+  with your Workspace domain as the value.
+
+A configuration that breaks these rules does not stop control-api. Every OIDC
+route answers 503 `oidc_configuration_unavailable`, and each request logs
+`oidc_configuration_unavailable` with the names of the settings at fault,
+never their values. Profile UI then shows only the password form, and
+password sign-in keeps working. `CONTROL_API_OIDC_ACCOUNT_CREATION` in the
+list means a value other than exactly `enabled` or `any_issuer_account`, any
+value on Entra ID, `enabled` with no required claim value, or
+`any_issuer_account` beside one. Set a claim value, or use
+`any_issuer_account` if every person the issuer signs in should get an
+account. On `accounts.google.com`, `any_issuer_account` is always refused:
+use `enabled` with the `hd` claim there. An empty
+`CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE` is refused, and the list names it.
+It still counts as a value, so `any_issuer_account` beside it is refused as
+well. An unknown `CONTROL_API_OIDC_*` name fails the same way, even with no
+registration set. That includes the removed
+`CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS` and
+`CONTROL_API_OIDC_REQUIRED_ROLE`, which the required claim and account
+creation settings replace. While `CONTROL_API_OIDC_MEMBER_SIGN_IN` is set, a
+configuration that fails to load still counts as member sign-in on when a
+member is removed: the member is kept as a retired row rather than deleted.
+
+Provider checklist:
+
+- **Assignment.** In Entra ID, set the enterprise application's
+  **Assignment required?** to **Yes**, so unassigned users can't sign in.
+  Microsoft notes that it doesn't apply to Global Administrators; a required
+  `roles` claim still does. In Okta, give the app to selected groups
+  (**Limit access to selected groups**), not to everyone in the org, which is
+  the wizard's default. Federation Broker Mode drops assignments and leaves
+  access to sign-on policies.
+- **Self-service sign-up.** In Auth0, turn on **Disable Sign Ups** on the
+  database connection and turn off social connections for the application. In
+  Entra External ID, set `isSignUpAllowed` to `false` on the sign-up and
+  sign-in user flow through Microsoft Graph. In Azure AD B2C, use a **Sign in**
+  user flow with no social identity providers selected.
+- **Google Workspace.** Use an Internal app, which limits authorization to
+  members of your Google Cloud organization, and require `hd`. Google says to
+  check `hd`, not the email domain, to restrict access to a domain.
+- **`email_verified`.** Know what your issuer's `email_verified` proves. A
+  first sign-in with a verified email links to the existing account with that
+  address, or creates one where account creation is on. OpenID Connect leaves
+  how an address is verified to the issuer.
+- **New-member team.** Don't set one for an issuer that isn't bound to your
+  company: every account the sign-in creates joins that team.
+- **Okta groups.** Okta's org authorization server puts the groups claim in
+  the ID token only when the `groups` scope is requested, and sign-in doesn't
+  request it. Add the groups claim on a custom authorization server instead,
+  set to always be included in the ID token, and use that server's issuer as
+  `CONTROL_API_OIDC_ISSUER`. Set `CONTROL_API_OIDC_REQUIRED_CLAIM_NAME` to the
+  claim's name, or name the claim `roles`.
+- **More than 32 groups.** A groups claim with more than 32 items refuses
+  sign-in, so send only the groups that matter. In Entra ID, emit only the groups
+  assigned to the application, or use app roles. In Okta, use the groups claim
+  filter.
+
 ### Generating Secrets and Keys
 
 Generate RSA keypair for session JWTs (RS256):

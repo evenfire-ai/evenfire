@@ -70,6 +70,8 @@ const describeRealPostgres = adminUrl ? describe : describe.skip
 const ENTRA_TENANT_ID = '7a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
 const ENTRA_ISSUER = `https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0`
 const REGISTRATION_ID = 'fake-entra-route'
+const GROUPS_REGISTRATION_ID = 'fake-groups-route'
+const REQUIRED_GROUP = 'evenfire-users'
 const WRITTEN_TABLES = ['users', 'user_oidc_links', 'oidc_connections', 'external_user_sessions']
 
 function databaseUrl(baseUrl: string, database: string): string {
@@ -294,9 +296,10 @@ describeRealPostgres(
       expect((await tableCounts()).users).toBe(before.users + 1)
     }
 
-    it('33 roles under REQUIRED_ROLE are not_eligible and write no row', async () => {
+    it('33 roles under a required roles claim are not_eligible and write no row', async () => {
       const requiredRole = 'Evenfire.Member'
-      const fake = entraFake('on', { CONTROL_API_OIDC_REQUIRED_ROLE: requiredRole })
+      // The claim name defaults to `roles`.
+      const fake = entraFake('on', { CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE: requiredRole })
       const member = memberClaims('too-many-roles')
       const roles = (count: number) => [
         ...Array.from({ length: count - 1 }, (_, index) => `fixture-role-${index}`),
@@ -325,6 +328,85 @@ describeRealPostgres(
         fake,
         { ...member.claims, tid: '0f9e8d7c-6b5a-4f3e-8d2c-1b0a9f8e7d6c' },
         { tid: ENTRA_TENANT_ID }
+      )
+    })
+
+    /**
+     * A non-Entra registration that creates accounts and requires the `groups`
+     * claim, as Okta sends it. Its registration id is its own: an id recorded
+     * for the Entra issuer would be refused as connection_mismatch. A sign-in
+     * proves the route's default engine collects the configured claim name.
+     */
+    function groupsFake(): OidcMemberSignInFakeProvider {
+      return createOidcMemberSignInFakeProvider({
+        memberSignInEnv: {
+          CONTROL_API_OIDC_REGISTRATION_ID: GROUPS_REGISTRATION_ID,
+          CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
+          CONTROL_API_OIDC_REQUIRED_CLAIM_NAME: 'groups',
+          CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE: REQUIRED_GROUP,
+        },
+      })
+    }
+
+    function groupsMemberClaims(label: string) {
+      const subject = uniqueLabel(`${label}-subject`)
+      const email = `${uniqueLabel(label)}@okta.fixture.test`
+      return { subject, email, claims: { sub: subject, email, email_verified: true } }
+    }
+
+    it('signs in an Okta-style member whose groups claim holds the value', async () => {
+      const fake = groupsFake()
+      const member = groupsMemberClaims('groups-member')
+      const before = await tableCounts()
+
+      const { completed, state } = await completeThroughRoute(fake, {
+        ...member.claims,
+        groups: ['Everyone', REQUIRED_GROUP],
+      })
+
+      expect(completed.status).toBe(200)
+      expect(completed.body).toEqual({
+        outcome: 'member_signed_in',
+        memberAuthenticationActivated: true,
+        token: expect.any(String),
+        sessionContract: expect.stringMatching(/^v[12]$/),
+      })
+      expect(await attemptStatus(state)).toBe('completed')
+      const link = await testPool.query<{ email: string }>(
+        `SELECT u.email
+           FROM user_oidc_links l
+           JOIN users u ON u.id = l.user_id
+          WHERE l.connection_id = $1 AND l.issuer = $2 AND l.subject = $3`,
+        [GROUPS_REGISTRATION_ID, fake.provider.issuer, member.subject]
+      )
+      expect(link.rows).toEqual([{ email: member.email }])
+      const after = await tableCounts()
+      expect(after.users).toBe(before.users + 1)
+      expect(after.user_oidc_links).toBe(before.user_oidc_links + 1)
+    })
+
+    it('refuses a member whose groups claim lacks the value, then signs in with it', async () => {
+      const member = groupsMemberClaims('groups-without-value')
+
+      await expectNotEligibleThenControl(
+        groupsFake(),
+        { ...member.claims, groups: ['Everyone'] },
+        { groups: [REQUIRED_GROUP] }
+      )
+    })
+
+    it('refuses a member in 33 groups, then signs in with 32', async () => {
+      const member = groupsMemberClaims('too-many-groups')
+      // The value is in both lists, so only the 32-element cap differs.
+      const groups = (count: number) => [
+        ...Array.from({ length: count - 1 }, (_, index) => `fixture-group-${index}`),
+        REQUIRED_GROUP,
+      ]
+
+      await expectNotEligibleThenControl(
+        groupsFake(),
+        { ...member.claims, groups: groups(33) },
+        { groups: groups(32) }
       )
     })
   }

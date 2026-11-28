@@ -47,7 +47,6 @@ const ENTRA_TENANT_ID = '6f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f'
 const ENTRA_ISSUER = `https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0`
 const OTHER_TENANT_IDP = 'https://sts.windows.net/0a0b0c0d-1e1f-4a2b-8c3d-4e5f6a7b8c9d/'
 const MEMBER_ROLE = 'Evenfire.Member'
-const ALLOWED_DOMAIN = 'allowed.fixture.test'
 const WATCHED_TABLES = ['users', 'profiles', 'user_oidc_links', 'team_members', 'invitations']
 
 function databaseUrl(baseUrl: string, database: string): string {
@@ -477,41 +476,67 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
     expect(await usersWithEmail(email)).toHaveLength(1)
   })
 
-  it('row 4 creates for an allowed domain and refuses other domains with no_account', async () => {
-    const fake = createOidcMemberSignInFakeProvider({
+  /**
+   * A non-Entra provider that creates accounts and requires the `roles` claim
+   * (the default name). The engine collects `roles` in its base evidence list.
+   */
+  function creatingFake(
+    registrationId: string,
+    env: Record<string, string | undefined> = {}
+  ): OidcMemberSignInFakeProvider {
+    return createOidcMemberSignInFakeProvider({
       memberSignInEnv: {
-        CONTROL_API_OIDC_REGISTRATION_ID: 'fake-allowed-domains',
+        CONTROL_API_OIDC_REGISTRATION_ID: registrationId,
         CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
-        CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS: ALLOWED_DOMAIN,
+        CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE: MEMBER_ROLE,
+        ...env,
       },
     })
-    expect(policyOf(fake).accountCreation).toBe('allowed_domains')
+  }
 
-    const allowedSubject = uniqueLabel('row4-allowed-subject')
-    const local = uniqueLabel('allowed')
-    const allowedProof = await fake.signIn({
-      sub: allowedSubject,
-      email: `${local}@ALLOWED.Fixture.Test`,
-      email_verified: true,
-      name: 'Allowed Member',
+  it('creates an account with creation enabled and the claim present', async () => {
+    const fake = creatingFake('fake-creation-enabled')
+    expect(policyOf(fake)).toMatchObject({
+      accountCreation: 'enabled',
+      requiredClaim: { name: 'roles', value: MEMBER_ROLE },
     })
-    const created = await resolve(fake, allowedProof)
+    const subject = uniqueLabel('creation-enabled-subject')
+    const local = uniqueLabel('created')
+    const storedEmail = `${local}@any-domain.fixture.test`
+
+    const created = await resolve(
+      fake,
+      await fake.signIn({
+        sub: subject,
+        roles: [MEMBER_ROLE],
+        email: `${local}@Any-Domain.Fixture.Test`,
+        email_verified: true,
+        name: 'Created Member',
+      })
+    )
+
     expect(created.status).toBe('resolved')
     if (created.status !== 'resolved') return
-    expect(created.account).toMatchObject({
-      email: `${local}@${ALLOWED_DOMAIN}`,
-      lifecycleState: 'active',
-      created: { account: true, link: true },
+    expect(created).toEqual({
+      status: 'resolved',
+      account: {
+        userId: created.account.userId,
+        email: storedEmail,
+        lifecycleState: 'active',
+        lifecycleVersion: '1',
+        created: { account: true, link: true },
+      },
+      guest: false,
     })
-    expect(await usersWithEmail(`${local}@${ALLOWED_DOMAIN}`)).toEqual([
+    expect(await usersWithEmail(storedEmail)).toEqual([
       {
         id: created.account.userId,
-        email: `${local}@${ALLOWED_DOMAIN}`,
-        name: 'Allowed Member',
+        email: storedEmail,
+        name: 'Created Member',
         lifecycle_state: 'active',
       },
     ])
-    expect(await linksFor(allowedSubject)).toHaveLength(1)
+    expect(await linksFor(subject)).toHaveLength(1)
     const profile = await testPool.query(`SELECT 1 FROM profiles WHERE user_id = $1::uuid`, [
       created.account.userId,
     ])
@@ -522,21 +547,79 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
       [created.account.userId]
     )
     expect(memberships.rowCount).toBe(0)
+  })
 
+  it('creates an account for a person without the claim under any_issuer_account', async () => {
+    const fake = creatingFake('fake-creation-any-issuer-account', {
+      CONTROL_API_OIDC_ACCOUNT_CREATION: 'any_issuer_account',
+      CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE: undefined,
+    })
+    expect(policyOf(fake)).toMatchObject({ accountCreation: 'enabled', requiredClaim: null })
+    const subject = uniqueLabel('any-issuer-account-subject')
+    const email = `${uniqueLabel('any-issuer-account')}@unrelated.fixture.test`
+
+    // No roles claim: the claim `enabled` would require is absent.
+    const created = await resolve(
+      fake,
+      await fake.signIn({ sub: subject, email, email_verified: true, name: 'Any Issuer Account' })
+    )
+
+    expect(created.status).toBe('resolved')
+    if (created.status !== 'resolved') return
+    expect(created.account.created).toEqual({ account: true, link: true })
+    expect(await usersWithEmail(email)).toEqual([
+      {
+        id: created.account.userId,
+        email,
+        name: 'Any Issuer Account',
+        lifecycle_state: 'active',
+      },
+    ])
+    expect(await linksFor(subject)).toHaveLength(1)
+  })
+
+  it('refuses not_eligible with creation enabled and the claim absent, writing no users row', async () => {
+    const fake = creatingFake('fake-creation-claim-absent')
     const before = await watchedTables()
-    for (const email of [
-      `${uniqueLabel('other')}@other.fixture.test`,
-      `${uniqueLabel('sub')}@sub.${ALLOWED_DOMAIN}`,
-      `${uniqueLabel('suffix')}@not${ALLOWED_DOMAIN}`,
-      `${ALLOWED_DOMAIN}@other.fixture.test`,
-    ]) {
+
+    for (const roles of [undefined, ['Other.Role'], `${MEMBER_ROLE}.Admin`]) {
+      const email = `${uniqueLabel('claim-absent')}@fixture.test`
+      const subject = uniqueLabel('claim-absent-subject')
       const proof = await fake.signIn({
-        sub: uniqueLabel('row4-other-subject'),
+        sub: subject,
+        ...(roles === undefined ? {} : { roles }),
         email,
         email_verified: true,
       })
-      expect(await resolve(fake, proof)).toEqual({ status: 'refused', reason: 'no_account' })
+      expect(await resolve(fake, proof)).toEqual({ status: 'refused', reason: 'not_eligible' })
+      expect(await usersWithEmail(email)).toEqual([])
+      expect(await linksFor(subject)).toEqual([])
     }
+    expect(await watchedTables()).toEqual(before)
+    const connection = await testPool.query(
+      `SELECT 1 FROM oidc_connections WHERE id = 'fake-creation-claim-absent'`
+    )
+    expect(connection.rowCount).toBe(0)
+  })
+
+  it('refuses no_account with creation off', async () => {
+    const fake = creatingFake('fake-creation-off', { CONTROL_API_OIDC_ACCOUNT_CREATION: undefined })
+    expect(policyOf(fake)).toMatchObject({
+      accountCreation: 'disabled',
+      requiredClaim: { name: 'roles', value: MEMBER_ROLE },
+    })
+    const email = `${uniqueLabel('creation-off')}@fixture.test`
+    const proof = await fake.signIn({
+      sub: uniqueLabel('creation-off-subject'),
+      roles: [MEMBER_ROLE],
+      email,
+      email_verified: true,
+    })
+    const before = await watchedTables()
+
+    // The claim is present, so eligibility passes; only creation refuses.
+    expect(await resolve(fake, proof)).toEqual({ status: 'refused', reason: 'no_account' })
+    expect(await usersWithEmail(email)).toEqual([])
     expect(await watchedTables()).toEqual(before)
   })
 
@@ -707,7 +790,8 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
 
     // An Entra guest without email_verified is unverified too (not domain_claim_missing).
     const guests = entraFake('fake-entra-unverified-guest', {
-      CONTROL_API_OIDC_REQUIRED_ROLE: MEMBER_ROLE,
+      CONTROL_API_OIDC_REQUIRED_CLAIM_NAME: 'roles',
+      CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE: MEMBER_ROLE,
       CONTROL_API_OIDC_ALLOW_GUESTS: 'true',
     })
     const guestProof = await guests.signIn({
@@ -728,7 +812,8 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
 
   it('guests are not linked to an existing account by email', async () => {
     const fake = entraFake('fake-entra-guests', {
-      CONTROL_API_OIDC_REQUIRED_ROLE: MEMBER_ROLE,
+      CONTROL_API_OIDC_REQUIRED_CLAIM_NAME: 'roles',
+      CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE: MEMBER_ROLE,
       CONTROL_API_OIDC_ALLOW_GUESTS: 'true',
     })
     const email = `${uniqueLabel('guest')}@guest.fixture.test`
@@ -772,7 +857,8 @@ describeRealPostgres('OIDC account resolution on real PostgreSQL', () => {
 
   it('an Entra guest with the required role creates an account, and without the role is not_eligible', async () => {
     const fake = entraFake('fake-entra-guest-creation', {
-      CONTROL_API_OIDC_REQUIRED_ROLE: MEMBER_ROLE,
+      CONTROL_API_OIDC_REQUIRED_CLAIM_NAME: 'roles',
+      CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE: MEMBER_ROLE,
       CONTROL_API_OIDC_ALLOW_GUESTS: 'true',
       CONTROL_API_OIDC_NEW_MEMBER_TEAM_ID: newMemberTeamId,
     })

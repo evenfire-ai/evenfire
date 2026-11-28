@@ -513,15 +513,15 @@ describe('Control API OIDC member sign-in completion', () => {
     expect(engineConstructions).toEqual([
       {
         generation: 'engine-cache-generation-a',
-        policyEvidenceClaimNames: ['tid', 'idp', 'roles', 'acct', 'xms_edov'],
+        policyEvidenceClaimNames: ['acct', 'idp', 'roles', 'tid', 'xms_edov'],
       },
       {
         generation: 'engine-cache-generation-b',
-        policyEvidenceClaimNames: ['tid', 'idp', 'roles', 'acct', 'xms_edov'],
+        policyEvidenceClaimNames: ['acct', 'idp', 'roles', 'tid', 'xms_edov'],
       },
       {
         generation: 'engine-cache-generation-a',
-        policyEvidenceClaimNames: ['tid', 'idp', 'roles', 'acct', 'xms_edov'],
+        policyEvidenceClaimNames: ['acct', 'idp', 'roles', 'tid', 'xms_edov'],
       },
     ])
   })
@@ -601,6 +601,146 @@ describe('Control API OIDC member sign-in completion', () => {
       }
       expect(createEngine).not.toHaveBeenCalled()
       expect(signInMember).not.toHaveBeenCalled()
+    })
+
+    it('builds a new engine with the new evidence list when the claim name changes', async () => {
+      // The default getProvider and createEngine: the route loads the provider
+      // from the environment and builds the engine from it.
+      const app = express()
+      app.use(express.json())
+      app.use(createExternalOidcProfileFlowRouter())
+      const attemptRequiring = (claimName: string) => {
+        stubOidcEnvironment('acknowledged')
+        vi.stubEnv('CONTROL_API_OIDC_REQUIRED_CLAIM_NAME', claimName)
+        vi.stubEnv('CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE', 'evenfire-users')
+        return request(app)
+          .post('/external/oidc/profile-flow/attempts')
+          .send({ browserBinding: 'B'.repeat(43) })
+      }
+      engineConstructions.length = 0
+
+      expect((await attemptRequiring('groups')).status).toBe(200)
+      expect((await attemptRequiring('department')).status).toBe(200)
+
+      expect(engineConstructions).toHaveLength(2)
+      const [first, second] = engineConstructions
+      expect(first!.generation).not.toBe(second!.generation)
+      expect(first!.policyEvidenceClaimNames).toEqual([
+        'acct',
+        'groups',
+        'idp',
+        'roles',
+        'tid',
+        'xms_edov',
+      ])
+      expect(second!.policyEvidenceClaimNames).toEqual([
+        'acct',
+        'department',
+        'idp',
+        'roles',
+        'tid',
+        'xms_edov',
+      ])
+      expect(flowLog.error).not.toHaveBeenCalled()
+    })
+
+    /**
+     * Each environment loads once its removed setting is taken out, so the
+     * refusal comes from the removed name alone. The domain-list row keeps
+     * account creation on, which needs a required claim value; the role row
+     * leaves account creation unset.
+     */
+    const REMOVED_SETTING_ENV: Record<string, Record<string, string>> = {
+      CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS: {
+        CONTROL_API_OIDC_ACCOUNT_CREATION: 'enabled',
+        CONTROL_API_OIDC_REQUIRED_CLAIM_VALUE: 'Evenfire.Member',
+        CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS: 'company.example.test',
+      },
+      CONTROL_API_OIDC_REQUIRED_ROLE: {
+        CONTROL_API_OIDC_REQUIRED_ROLE: 'Evenfire.Member',
+      },
+    }
+
+    it.each(['CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS', 'CONTROL_API_OIDC_REQUIRED_ROLE'])(
+      'answers 503 and logs the failure for the removed setting %s',
+      async setting => {
+        const signInMember = vi.fn()
+        const createEngine = vi.fn()
+        const app = express()
+        app.use(express.json())
+        app.use(createExternalOidcProfileFlowRouter({ createEngine, signInMember }))
+        const settingEnv = REMOVED_SETTING_ENV[setting]!
+        stubOidcEnvironment('acknowledged')
+        for (const [name, value] of Object.entries(settingEnv)) vi.stubEnv(name, value)
+
+        const configuration = await request(app).get('/external/oidc/profile-flow/configuration')
+        const attempt = await request(app)
+          .post('/external/oidc/profile-flow/attempts')
+          .send({ browserBinding: 'B'.repeat(43) })
+        const completion = await request(app).post(COMPLETE_PATH).send(completeBody)
+
+        for (const response of [configuration, attempt, completion]) {
+          expect(response.status).toBe(503)
+          expect(response.body).toEqual({ error: 'oidc_configuration_unavailable' })
+        }
+        // Every refusal names the removed setting, and never its value.
+        expect(flowLog.error).toHaveBeenCalledTimes(3)
+        for (const [payload] of flowLog.error.mock.calls) {
+          expect(payload).toEqual({
+            event: 'oidc_configuration_unavailable',
+            errorClass: 'Error',
+            fields: [setting],
+          })
+        }
+        expect(loggedText()).not.toContain(settingEnv[setting])
+        expect(createEngine).not.toHaveBeenCalled()
+        expect(signInMember).not.toHaveBeenCalled()
+
+        // Control: without the removed setting, the same environment loads.
+        flowLog.error.mockReset()
+        vi.stubEnv(setting, undefined)
+        const configured = await request(app).get('/external/oidc/profile-flow/configuration')
+        expect(configured.status).toBe(200)
+        expect(configured.body).toEqual({
+          redirectUri: REGISTRATION_ENV.CONTROL_API_OIDC_REDIRECT_URI,
+          memberAuthenticationActivated: true,
+          displayLabel: REGISTRATION_ENV.CONTROL_API_OIDC_DISPLAY_LABEL,
+        })
+        expect(flowLog.error).not.toHaveBeenCalled()
+      }
+    )
+
+    it.each([
+      ['CONTROL_API_OIDC_ALLOWED_EMAIL_DOMAINS', 'retired-domain-list.example.test'],
+      ['CONTROL_API_OIDC_REQUIRED_ROLE', 'Retired.Role.Assignment'],
+    ])('answers 503 for a leftover %s when no registration is set', async (setting, value) => {
+      for (const key of Object.keys(process.env)) {
+        if (key.startsWith('CONTROL_API_OIDC_')) vi.stubEnv(key, undefined)
+      }
+      vi.stubEnv(setting, value)
+      const app = express()
+      app.use(express.json())
+      app.use(createExternalOidcProfileFlowRouter())
+
+      const configuration = await request(app).get('/external/oidc/profile-flow/configuration')
+
+      expect(configuration.status).toBe(503)
+      expect(configuration.body).toEqual({ error: 'oidc_configuration_unavailable' })
+      expect(flowLog.error).toHaveBeenCalledTimes(1)
+      expect(flowLog.error.mock.calls[0]?.[0]).toEqual({
+        event: 'oidc_configuration_unavailable',
+        errorClass: 'Error',
+        fields: [setting],
+      })
+      expect(loggedText()).not.toContain(value)
+
+      // With the leftover removed, the same empty registration is not configured.
+      flowLog.error.mockReset()
+      vi.stubEnv(setting, undefined)
+      const absent = await request(app).get('/external/oidc/profile-flow/configuration')
+      expect(absent.status).toBe(404)
+      expect(absent.body).toEqual({ error: 'oidc_not_configured' })
+      expect(flowLog.error).not.toHaveBeenCalled()
     })
   })
 })

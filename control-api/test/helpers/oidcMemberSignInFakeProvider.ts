@@ -10,7 +10,7 @@ import {
   loadOidcProviderConfiguration,
   readOidcClientSecret,
 } from '../../src/oidc/configuration.js'
-import { MEMBER_POLICY_EVIDENCE_CLAIM_NAMES } from '../../src/oidc/memberEligibility.js'
+import { memberPolicyEvidenceClaimNames } from '../../src/oidc/memberEligibility.js'
 import { OidcProtocolEngine, type VerifiedOidcIdentityProof } from '../../src/oidc/protocol.js'
 import {
   OIDC_R5_PUBLIC_IP,
@@ -57,7 +57,11 @@ export type OidcMemberSignInFakeProviderOptions = {
 
 export type OidcMemberSignInFakeProvider = {
   provider: OidcProviderConfiguration
-  /** Built with the route's own policy evidence claim names (MEMBER_POLICY_EVIDENCE_CLAIM_NAMES). */
+  /**
+   * Built with the policy evidence claim names the route derives from the
+   * provider (memberPolicyEvidenceClaimNames): the base list, which always
+   * collects `roles`, plus the configured required claim name.
+   */
   engine: OidcProtocolEngine
   /** The exact `CONTROL_API_OIDC_*` environment the provider was loaded from. */
   env: Record<string, string>
@@ -222,7 +226,7 @@ export function createOidcMemberSignInFakeProvider(
     db: options.db ?? new OidcR5MemoryAttemptDb().client,
     getClientSecret: () => readOidcClientSecret(provider, env),
     encryptionKeyHex: GENERATION_KEY_HEX,
-    policyEvidenceClaimNames: MEMBER_POLICY_EVIDENCE_CLAIM_NAMES,
+    policyEvidenceClaimNames: memberPolicyEvidenceClaimNames(provider.memberEligibility),
     now: () => Date.now(),
   })
 

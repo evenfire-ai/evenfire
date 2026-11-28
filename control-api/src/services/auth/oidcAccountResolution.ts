@@ -151,25 +151,13 @@ async function resolveExistingAccount(
   return resolved(user, { account: false, link: true }, guest)
 }
 
-async function accountCreationAllowed(
-  db: Query,
-  policy: OidcMemberSignInPolicy,
-  claimEmail: string
-): Promise<boolean> {
+function accountCreationAllowed(policy: OidcMemberSignInPolicy): boolean {
   switch (policy.accountCreation) {
     case 'entra':
+    case 'enabled':
       return true
     case 'disabled':
       return false
-    case 'allowed_domains': {
-      // The domain is the part after the last '@', lowercased by PostgreSQL as
-      // the stored address will be. An address without '@' has no domain.
-      const result = await db.query(
-        `SELECT lower(substring($1 from '@([^@]*)$')) = ANY($2::text[]) AS allowed`,
-        [claimEmail, [...policy.allowedEmailDomains]]
-      )
-      return (result.rows[0] as { allowed: boolean | null } | undefined)?.allowed === true
-    }
   }
 }
 
@@ -254,7 +242,7 @@ export async function resolveOidcAccount(
   if (candidates.length === 1) return resolveExistingAccount(db, candidates[0]!, identity, guest)
 
   // Row 4: create the account.
-  if (!(await accountCreationAllowed(db, policy, claimEmail))) return refused('no_account')
+  if (!accountCreationAllowed(policy)) return refused('no_account')
   if (policy.newMemberTeamId !== null && !(await newMemberTeamExists(db, policy.newMemberTeamId))) {
     return refused('provider_configuration', 'unknown_new_member_team')
   }
