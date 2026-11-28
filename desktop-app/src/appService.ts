@@ -6310,7 +6310,8 @@ export class AppService {
       this.requireSessionToken()
       if (!this.me) throw new Error('Not authenticated')
       const environmentBinding = this.captureAuthEnvironmentBinding()
-      const { buildGfsResourceWebLink, normalizeGfsResourceUri } = await import('./gfsDeepLinks.js')
+      const { buildGfsResourceWebLink, normalizeGfsResourceUri } =
+        await import('@clerum/desktop-app-links')
       const canonicalUri = normalizeGfsResourceUri(uri)
       if (!canonicalUri) throw new Error('Cannot create a deep link for this resource')
       const profileUiBaseUrl = getActiveDeploymentProfileUiBaseUrl()

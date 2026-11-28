@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '../gfsDeepLinks.js'
+import { buildGfsResourceDeepLink, parseGfsResourceDeepLink } from '@clerum/desktop-app-links'
 import {
   GfsResourceDeepLinkQueue,
   GfsUserNavigationGeneration,

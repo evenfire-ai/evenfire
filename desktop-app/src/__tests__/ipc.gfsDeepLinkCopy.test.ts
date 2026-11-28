@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { buildGfsResourceWebLink } from '@clerum/desktop-app-links'
 import type { AppService } from '../appService.js'
-import { buildGfsResourceWebLink } from '../gfsDeepLinks.js'
 
 type Handler = (event: unknown, payload: unknown) => Promise<unknown>
 

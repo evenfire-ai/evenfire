@@ -1,5 +1,8 @@
-import type { GfsResourceDeepLinkEnvelope, GfsResourceDeepLinkTarget } from './gfsDeepLinks.js'
-import { normalizeGfsResourceUri } from './gfsDeepLinks.js'
+import type {
+  GfsResourceDeepLinkEnvelope,
+  GfsResourceDeepLinkTarget,
+} from '@clerum/desktop-app-links'
+import { normalizeGfsResourceUri } from '@clerum/desktop-app-links'
 
 export class GfsUserNavigationGeneration {
   private value = 0

@@ -6,6 +6,8 @@ const CLERUM_OAUTH_PROTOCOL = 'clerum:'
 const SANDBOX_UI_WEB_LINK_PATH = '/open/apps'
 const GFS_RESOURCE_DEEP_LINK_HOST = 'files'
 const GFS_RESOURCE_WEB_LINK_PATH = '/open/files'
+const DESKTOP_ENVIRONMENT_DEEP_LINK_HOST = 'desktop-environment'
+const DESKTOP_SETUP_DEEP_LINK_HOST = 'desktop-setup'
 const MAX_APP_SEGMENT_LENGTH = 253
 const MAX_APP_ROUTE_LENGTH = 4096
 const MAX_TEAM_ID_LENGTH = 255
@@ -297,8 +299,66 @@ function parseGfsResourceLink(rawLink) {
   return webUri ? { uri: webUri } : null
 }
 
+// Installed desktops parse these links with the rules below, so the builders must keep emitting
+// the exact same bytes and the parsers must stay as tolerant as the shipped desktop router:
+// port, userinfo, path, hash and unknown keys are ignored, and the first repeated key wins.
+function parseDesktopHandoffQuery(rawUrl, host) {
+  let parsed
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    return null
+  }
+  // `evenfire:` is not a special scheme, so `URL` keeps the host's original case.
+  if (parsed.protocol !== SANDBOX_UI_DEEP_LINK_PROTOCOL || parsed.hostname.toLowerCase() !== host) {
+    return null
+  }
+  return parsed.searchParams
+}
+
+// The object literal fixes key order and drops anything else the caller passes. Values are not
+// coerced: a caller passing a non-string gets the same `URLSearchParams` stringification as before.
+function buildDesktopEnvironmentDeepLink(parts) {
+  const params = new URLSearchParams({
+    externalRestApiBaseUrl: parts.externalRestApiBaseUrl,
+    tenantName: parts.tenantName,
+  })
+  return `${SANDBOX_UI_DEEP_LINK_PROTOCOL}//${DESKTOP_ENVIRONMENT_DEEP_LINK_HOST}?${params.toString()}`
+}
+
+function parseDesktopEnvironmentDeepLink(rawUrl) {
+  const params = parseDesktopHandoffQuery(rawUrl, DESKTOP_ENVIRONMENT_DEEP_LINK_HOST)
+  if (!params) return null
+  const externalRestApiBaseUrl = params.get('externalRestApiBaseUrl') || ''
+  // `appName` is the legacy alias for `tenantName`; older producers may still emit it.
+  const appName = params.get('tenantName') || params.get('appName') || ''
+  if (!externalRestApiBaseUrl) return null
+  return { externalRestApiBaseUrl, appName }
+}
+
+// `encodeURIComponent`, not `URLSearchParams`: they differ on space and on `!'()*`, and the
+// emitted link must stay byte-identical. A lone surrogate throws URIError, as it always has.
+function buildDesktopSetupDeepLink(target) {
+  return (
+    `${SANDBOX_UI_DEEP_LINK_PROTOCOL}//${DESKTOP_SETUP_DEEP_LINK_HOST}` +
+    `?email=${encodeURIComponent(target.email)}` +
+    `&authorizationToken=${encodeURIComponent(target.authorizationToken)}`
+  )
+}
+
+function parseDesktopSetupDeepLink(rawUrl) {
+  const params = parseDesktopHandoffQuery(rawUrl, DESKTOP_SETUP_DEEP_LINK_HOST)
+  if (!params) return null
+  const email = params.get('email') || ''
+  const authorizationToken = params.get('authorizationToken') || ''
+  if (!email || !authorizationToken) return null
+  return { email, authorizationToken }
+}
+
 module.exports = {
   CLERUM_OAUTH_PROTOCOL,
+  DESKTOP_ENVIRONMENT_DEEP_LINK_HOST,
+  DESKTOP_SETUP_DEEP_LINK_HOST,
   GFS_RESOURCE_DEEP_LINK_HOST,
   GFS_RESOURCE_WEB_LINK_PATH,
   SANDBOX_UI_DEEP_LINK_HOST,
@@ -308,10 +368,14 @@ module.exports = {
   buildSandboxUiWebLink,
   buildGfsResourceDeepLink,
   buildGfsResourceWebLink,
+  buildDesktopEnvironmentDeepLink,
+  buildDesktopSetupDeepLink,
   normalizeSandboxUiRoute,
   normalizeGfsResourceUri,
   parseGfsResourceDeepLink,
   parseGfsResourceLink,
+  parseDesktopEnvironmentDeepLink,
+  parseDesktopSetupDeepLink,
   parseSandboxUiDeepLink,
   sandboxUiDeepLinkTargetsEqual,
 }

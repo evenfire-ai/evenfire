@@ -199,9 +199,6 @@ vi.mock('../sandboxUiDeepLinks.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../sandboxUiDeepLinks.js')>()
   return { ...actual, parseSandboxUiDeepLink: harness.parseSandboxUiDeepLink }
 })
-vi.mock('../sandboxUiProtocolWindowPolicy.js', () => ({
-  shouldAcceptSandboxUiProtocolLink: vi.fn(() => true),
-}))
 vi.mock('../sandboxUiSessionRefresh.js', () => ({ notifySandboxUiHostResumed: vi.fn() }))
 vi.mock('../shortcutRouter.js', () => ({ wireHostDesktopShortcutRouting: vi.fn() }))
 vi.mock('../systemIcon.js', () => ({

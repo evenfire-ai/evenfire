@@ -247,12 +247,18 @@ The app handles `evenfire://` links:
 | `evenfire://desktop-setup?…`                              | Finishes invitation setup after you complete it in the browser.                                                                                                                                                            |
 | `evenfire://logout`                                       | Signs the app out.                                                                                                                                                                                                         |
 | `evenfire://app/<namespace>/<name>?path=…&team=…`         | Opens an app, optionally on a specific page and team. The app first asks **Open app link?**; choose **Open** or **Dismiss**.                                                                                               |
+| `evenfire://files?uri=…`                                  | Opens a file or folder in EvenDrive.                                                                                                                                                                                       |
 
 **Copy current app link** copies a regular web link of the form
 `https://<profile-ui>/open/apps/<namespace>/<name>`, which you can paste
 anywhere. Opening it in a browser hands it to the Desktop App as an
 `evenfire://app/…` link, so the person you share it with lands in the same
 app (as long as they have access to it).
+
+In EvenDrive, **Copy link** on a file or folder copies a web link of the form
+`https://<profile-ui>/open/files?uri=…`. Opening it in a browser hands it to
+the Desktop App as an `evenfire://files?uri=…` link, which opens that file or
+folder (as long as the person has access to it).
 
 ## Settings
 

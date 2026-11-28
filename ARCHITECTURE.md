@@ -112,7 +112,7 @@ Shared packages under [`packages/`](packages/) (npm name `@clerum/<dir>`):
 | Package                                                                          | Purpose                                                                                             |
 | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | [codex-catalog-projection](packages/codex-catalog-projection/)                   | Codex model allowlist snapshot and execution projection, used by HCC, mcp-host and workflow-recipes |
-| [desktop-app-links](packages/desktop-app-links/)                                 | `evenfire://app/...` link contract shared by the Desktop App and Profile UI                         |
+| [desktop-app-links](packages/desktop-app-links/)                                 | `evenfire://` link contract (`app`, `files`, `desktop-environment`, `desktop-setup`) shared by the Desktop App and Profile UI|
 | [display-field](packages/display-field/)                                         | Validation for free-text display fields (control/bidi characters, length)                           |
 | [frontend-components](packages/frontend-components/)                             | React table, record-list and edit-dialog components shared by Control UI and Profile UI             |
 | [gfs-interaction-policy](packages/gfs-interaction-policy/)                       | Browser-safe GFS upload naming/collision/retry policy, `FileReference` v1, file classifier          |

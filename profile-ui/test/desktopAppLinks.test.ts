@@ -7,6 +7,7 @@ import {
   buildEvenfireDesktopAppRedirectDocument,
   navigateToDesktopApp,
 } from '../lib/desktopAppLinks'
+import handoffGolden from './fixtures/desktop-handoff-links.golden.json'
 
 function withDesktopHandoffEnabled<T>(run: () => T): T {
   const original = process.env.NEXT_PUBLIC_PROFILE_DESKTOP_HANDOFF_ENABLED
@@ -53,6 +54,15 @@ test('buildDesktopEnvironmentLink defaults the tenant name to Evenfire', () => {
     assert.ok(link)
     const parsedLink = new URL(link)
     assert.equal(parsedLink.searchParams.get('tenantName'), 'Evenfire')
+  })
+})
+
+test('buildDesktopEnvironmentLink emits the exact desktop-environment link of the previous builder', () => {
+  withDesktopHandoffEnabled(() => {
+    assert.ok(handoffGolden.environment.length > 0)
+    for (const { environment, link } of handoffGolden.environment) {
+      assert.equal(buildDesktopEnvironmentLink(environment), link, JSON.stringify(environment))
+    }
   })
 })
 
