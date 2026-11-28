@@ -8,7 +8,7 @@ import * as path from 'path'
 import { GitReadTool, withoutUrlCredentials } from '../gitReadTool'
 import { type Fixture, controlGit, gitw, makeFixture, makeRepo, requireGit } from './gitFixtures'
 
-const SECRET = 'S3CR3T-TOKEN-7f'
+const SECRET = 'fixture-remote-token-7f'
 
 let fx: Fixture
 let tool: GitReadTool
