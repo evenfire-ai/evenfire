@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { SidebarNav } from '../SidebarNav'
 import type { FileExplorerTreeProps } from '../SidebarNav/FileExplorerTree/types'
 import type { SidebarNavProps } from '../SidebarNav/types'
 
+const renameChat = vi.hoisted(() => vi.fn())
 const sidebarNavChatState = vi.hoisted(() => ({
   latestChatSessions: [] as Array<{
     agentRef: string
@@ -13,6 +14,8 @@ const sidebarNavChatState = vi.hoisted(() => ({
     title: string
     remote?: boolean
   }>,
+  agentDisplayByName: {} as Record<string, string>,
+  select: vi.fn(),
 }))
 
 // SidebarNav pulls from four contexts. Mock each module so we only render
@@ -38,14 +41,20 @@ vi.mock('@contexts/AgentChatActionsContext', () => ({
     captureChatDeleteFence: vi.fn(async () => {
       throw new Error('no delete target')
     }),
-    handleRenameChatForAgent: vi.fn(),
+    handleRenameChatForAgent: renameChat,
     handleDeleteChatForAgent: vi.fn(),
   }),
 }))
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({
     selectedAgent: null,
-    handleSelectChatAgent: vi.fn(),
+    handleSelectChatAgent: sidebarNavChatState.select,
+  }),
+}))
+// The real hook reads the access catalog through TanStack Query.
+vi.mock('@hooks/domain/useAgentsDataController', () => ({
+  useAgentsDataController: () => ({
+    agentDisplayByName: sidebarNavChatState.agentDisplayByName,
   }),
 }))
 // The real tree pulls TanStack Query and GFS contexts; the sidebar tests only
@@ -108,6 +117,7 @@ describe('SidebarNav logo', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     sidebarNavChatState.latestChatSessions = []
+    sidebarNavChatState.agentDisplayByName = {}
     // jsdom does not implement matchMedia; SidebarNav reads it to detect the
     // mobile viewport. Stub it as a non-matching desktop viewport.
     if (!window.matchMedia) {
@@ -130,6 +140,40 @@ describe('SidebarNav logo', () => {
 
   afterEach(() => {
     cleanup()
+  })
+
+  it.each(['Enter', 'Escape'])('returns focus to the renamed session options after %s', key => {
+    sidebarNavChatState.latestChatSessions = [
+      { agentRef: 'alpha', id: 'one', title: 'First' },
+      { agentRef: 'alpha', id: 'two', title: 'Second' },
+    ]
+    render(<SidebarNav {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Session options for First' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    const input = screen.getByRole('textbox', { name: 'Rename session' })
+    expect(document.activeElement).toBe(input)
+    fireEvent.keyDown(input, { key })
+    expect(document.activeElement).toBe(
+      screen.getByRole('button', { name: 'Session options for First' })
+    )
+  })
+
+  it('rejects malformed session identities before dispatching a rename', async () => {
+    sidebarNavChatState.latestChatSessions = [{ agentRef: 'alpha', id: '', title: 'Broken' }]
+    const pushToast = vi.fn()
+    render(<SidebarNav {...baseProps({ pushToast })} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Session options for Broken' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    const input = screen.getByRole('textbox', { name: 'Rename session' })
+    fireEvent.change(input, { target: { value: 'Updated' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith('Could not rename the session.', 'error')
+    )
+    expect(renameChat).not.toHaveBeenCalled()
+    expect(
+      (screen.getByRole('textbox', { name: 'Rename session' }) as HTMLInputElement).value
+    ).toBe('Updated')
   })
 
   it('renders both theme lockup variants when expanded', () => {
@@ -401,6 +445,94 @@ describe('SidebarNav logo', () => {
     if (producer === 'app') expect(onOpenSandboxUiApp).toHaveBeenCalledWith(app)
     if (producer === 'folder') expect(onOpenFilesSection).toHaveBeenCalledOnce()
     if (producer === 'preview') expect(onOpenPreviewSection).toHaveBeenCalledOnce()
+  })
+
+  it('disambiguates duplicate agent and session names and retains identity on refresh', () => {
+    sidebarNavChatState.latestChatSessions = [
+      { agentRef: 'support', id: 'chat-1', title: 'Task' },
+      { agentRef: 'support-prod', id: 'chat-2', title: 'Task' },
+      { agentRef: 'support', id: 'chat-3', title: 'Task' },
+    ]
+    sidebarNavChatState.agentDisplayByName = { support: 'Support', 'support-prod': 'Support' }
+    const view = render(<SidebarNav {...baseProps()} />)
+    for (const name of [
+      'Task (Support (support) · chat-1)',
+      'Task (Support (support-prod) · chat-2)',
+      'Task (Support (support) · chat-3)',
+    ]) {
+      fireEvent.click(screen.getByRole('button', { name: `Open ${name}` }))
+    }
+    expect(
+      sidebarNavChatState.select.mock.calls.map(([ref, options]) => [ref, options.chatId])
+    ).toEqual([
+      ['support', 'chat-1'],
+      ['support-prod', 'chat-2'],
+      ['support', 'chat-3'],
+    ])
+    sidebarNavChatState.agentDisplayByName = { support: 'Renamed', 'support-prod': 'Production' }
+    view.rerender(<SidebarNav {...baseProps()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Open Task (Renamed · chat-3)' }))
+    expect(sidebarNavChatState.select).toHaveBeenLastCalledWith(
+      'support',
+      expect.objectContaining({ chatId: 'chat-3' })
+    )
+    expect(
+      screen
+        .getAllByTestId('latest-session-row')
+        .map(row => [row.getAttribute('data-agent-ref'), row.getAttribute('data-chat-id')])
+    ).toEqual([
+      ['support', 'chat-1'],
+      ['support-prod', 'chat-2'],
+      ['support', 'chat-3'],
+    ])
+  })
+
+  it('keeps composed session names distinct from legitimate titles resembling generated labels', () => {
+    sidebarNavChatState.latestChatSessions = [
+      { agentRef: 'support', id: 'chat-1', title: 'Task' },
+      { agentRef: 'support', id: 'chat-2', title: 'Task' },
+      { agentRef: 'other', id: 'chat-3', title: 'Task (Support · chat-1)' },
+      { agentRef: 'other', id: 'chat-4', title: 'Task · Support · chat-1' },
+    ]
+    sidebarNavChatState.agentDisplayByName = { support: 'Support', other: 'Other' }
+    render(<SidebarNav {...baseProps()} />)
+    const rows = screen.getAllByTestId('latest-session-row')
+    const names = rows.map(row =>
+      row.querySelector('.nav-latest-session__main')!.getAttribute('aria-label')
+    )
+    expect(new Set(names).size).toBe(4)
+    expect(rows[0]!.querySelector('.nav-latest-session__agent')!.textContent).toBe(
+      'Support · chat-1; 2'
+    )
+    for (const name of names) fireEvent.click(screen.getByRole('button', { name: name! }))
+    expect(
+      sidebarNavChatState.select.mock.calls.map(([ref, options]) => [ref, options.chatId])
+    ).toEqual([
+      ['support', 'chat-1'],
+      ['support', 'chat-2'],
+      ['other', 'chat-3'],
+      ['other', 'chat-4'],
+    ])
+  })
+
+  it('labels a session row with the agent display name, falling back to its ref', () => {
+    sidebarNavChatState.latestChatSessions = [
+      { agentRef: 'product-agent', id: 'chat-1', title: 'Task Management' },
+      { agentRef: 'profits', id: 'chat-2', title: 'Slack Agents Task' },
+    ]
+    sidebarNavChatState.agentDisplayByName = { 'product-agent': 'Product Agent' }
+    render(<SidebarNav {...baseProps()} />)
+
+    const rows = screen.getAllByTestId('latest-session-row')
+    expect(rows.map(row => row.querySelector('.nav-latest-session__agent')?.textContent)).toEqual([
+      'Product Agent',
+      'profits',
+    ])
+    // The label is presentation only: the row still addresses the agent by ref.
+    expect(rows.map(row => row.getAttribute('data-agent-ref'))).toEqual([
+      'product-agent',
+      'profits',
+    ])
   })
 
   it('clears a desktop Settings submenu when compact mode begins with navigation closed', () => {

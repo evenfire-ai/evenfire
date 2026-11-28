@@ -1,15 +1,11 @@
 import { type Locator, type Page, expect } from '@playwright/test'
 import { HOST_REF } from './artifacts.mcp-host.runtime.js'
+import { startAgentChatFromFleet } from './helpers/agentNavigation.js'
 import { openAgentsPage } from './navigationHelpers.js'
 
 async function enterAgentChat(page: Page): Promise<void> {
   await openAgentsPage(page)
-  const chatInput = page.getByTestId('chat-input')
-  const agentLink = page.getByRole('button', { name: `Open conversation with ${HOST_REF}` }).first()
-  await expect(chatInput.or(agentLink)).toBeVisible({ timeout: 20_000 })
-  if (await agentLink.isVisible()) {
-    await agentLink.click()
-  }
+  await startAgentChatFromFleet(page, HOST_REF)
 }
 
 async function closeChatListBackdropIfOpen(page: Page): Promise<void> {

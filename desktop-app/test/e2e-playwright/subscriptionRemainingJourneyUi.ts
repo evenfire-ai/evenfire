@@ -1,5 +1,6 @@
 /** E2E_GUARDIAN_IPC_FLOW: all business transitions use visible Desktop controls; reads correlate only after the UI turn. */
 import type { Page, TestInfo } from '@playwright/test'
+import { fleetAgentActions } from './helpers/agentIdentity.js'
 import { openResourcesNavItem } from './navigationHelpers.js'
 import { expect, readVendorAttempts, sha256, test } from './subscriptionImageFixtures.js'
 import type { ProviderBinding, SubscriptionImageRun } from './subscriptionImageRunContract.js'
@@ -20,10 +21,7 @@ export async function assertPrimary(page: Page, binding: ProviderBinding): Promi
 export async function openOwnedChat(page: Page, binding: ProviderBinding): Promise<void> {
   await test.step('choose the owned Host and its primary model visibly', async () => {
     await openResourcesNavItem(page, 'nav-agents')
-    const actions = page.getByRole('button', {
-      name: `More actions for ${binding.hostLabel}`,
-      exact: true,
-    })
+    const actions = fleetAgentActions(page, binding.hostRef)
     await expect(actions).toBeVisible({ timeout: 30_000 })
     await actions.click()
     await expect(actions).toHaveAttribute('aria-expanded', 'true')

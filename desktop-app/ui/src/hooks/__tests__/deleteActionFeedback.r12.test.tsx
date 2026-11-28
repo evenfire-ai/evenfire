@@ -84,8 +84,21 @@ async function mountDelete(origin: 'thread' | 'sidebar', chatIds = ['chat-1', 'c
       ? [...app.getVm().chatList].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
       : app.getVm().latestChatSessions
   const row = chats.findIndex(chat => chat.id === 'chat-1')
-  const menuName = origin === 'thread' ? 'Session actions for' : 'Session options for'
-  fireEvent.click(screen.getAllByRole('button', { name: `${menuName} ${chats[row]!.title}` })[row]!)
+  if (origin === 'sidebar') {
+    const sessionRow = screen
+      .getAllByTestId('latest-session-row')
+      .find(
+        item =>
+          item.getAttribute('data-agent-ref') === 'agent-x' &&
+          item.getAttribute('data-chat-id') === 'chat-1'
+      )
+    expect(sessionRow).toBeDefined()
+    fireEvent.click(within(sessionRow!).getByRole('button', { name: /^Session options for / }))
+  } else {
+    fireEvent.click(
+      screen.getAllByRole('button', { name: `Session actions for ${chats[row]!.title}` })[row]!
+    )
+  }
   fireEvent.click(
     origin === 'thread'
       ? screen.getByRole('button', { name: 'Delete' })

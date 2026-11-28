@@ -2,6 +2,9 @@ import type { ReactNode, RefObject } from 'react'
 import type { ChatDeleteFence } from '../../../../src/types'
 import type { ComposerImageAttachment, ComposerReferenceAttachment } from '../../uiTypes'
 
+/** Outcome of the fenced storage mutation, independent of navigation. */
+export type ChatDeleteOutcome = 'deleted' | 'retryable-failure' | 'stale-authority'
+
 export interface QueuedChatDelete {
   agentRef: string
   fence: ChatDeleteFence
@@ -25,7 +28,7 @@ export interface AgentChatActionsContextValue {
     agentRef: string,
     chatId: string,
     deletion: QueuedChatDelete
-  ) => Promise<void>
+  ) => Promise<ChatDeleteOutcome>
   handleSelectChat: (chatId: string) => Promise<void>
   clearComposerSendError: () => void
   handleAddComposerImageAttachments: (attachments: ComposerImageAttachment[]) => void

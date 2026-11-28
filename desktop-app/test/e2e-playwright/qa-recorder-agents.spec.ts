@@ -1,4 +1,5 @@
 import { type ElectronApplication, type Page, expect, test } from '@playwright/test'
+import { agentDisplayName, fleetAgentSelector } from './helpers/agentIdentity.js'
 import {
   EXTERNAL_REST_API_BASE_URL,
   RPC_PROXY_BASE_URL,
@@ -42,7 +43,7 @@ test('optional QA recorder: Desktop agents journey — fleet', async ({}, testIn
     // The fleet renders one .agents-table-row-clickable per agent. Assert the
     // exact chatllm fixture row is present, resilient to the chat-autoselect
     // landing (composer visible instead) and to empty/loading states.
-    const exactAgentRow = page.locator('.agents-table-row-clickable', { hasText: hostRef }).first()
+    const exactAgentRow = page.locator(fleetAgentSelector(hostRef))
     const composer = page.getByRole('textbox', { name: 'Agent message composer' })
     const emptyState = page.getByText('No agents available')
     await expect(exactAgentRow.or(composer).or(emptyState)).toBeVisible({ timeout: 20_000 })
@@ -108,7 +109,7 @@ test('optional QA recorder: Desktop agents journey — workspace routes', async 
     // clicking its fleet row. Resilient to the auto-selected-chat landing: if the
     // fleet did not render, the route-switching portion is skipped and we still
     // capture a proof of whatever shell is present.
-    const exactAgentRow = page.locator('.agents-table-row-clickable', { hasText: hostRef }).first()
+    const exactAgentRow = page.locator(fleetAgentSelector(hostRef))
     const composer = page.getByRole('textbox', { name: 'Agent message composer' })
     const emptyState = page.getByText('No agents available')
     await expect(exactAgentRow.or(composer).or(emptyState)).toBeVisible({ timeout: 20_000 })
@@ -120,7 +121,7 @@ test('optional QA recorder: Desktop agents journey — workspace routes', async 
       // the default Connectors section renders its hero shell.
       const agentBreadcrumb = page.getByLabel('Agent breadcrumb')
       await expect(agentBreadcrumb).toBeVisible({ timeout: 20_000 })
-      await expect(agentBreadcrumb).toContainText(hostRef)
+      await expect(agentBreadcrumb).toContainText(await agentDisplayName(page, hostRef))
       await expect(page.locator('section[aria-label="Agent connectors"]')).toBeVisible({
         timeout: 20_000,
       })

@@ -15,6 +15,7 @@ import { SubscriptionCapabilityNotice } from '@components/SubscriptionCapability
 import { useToast } from '@components/Toast'
 import { HOST_DEFAULT_TAB, HOST_TABS } from '@constants/hostDetails'
 import { CONTROL_ROUTES } from '@constants/routes'
+import { type AgentLifecycleType, agentLifecycleTypeFromSpec } from '@lib/agentLifecycle'
 import { connectorAuthenticationLabel } from '@lib/connectorAuthentication'
 import { useSubscriptionCapabilities } from '@lib/hooks/useSubscriptionCapabilities'
 import { HostAccessTab } from '../../../components/HostAccessTab'
@@ -232,7 +233,6 @@ export default function HostDetailsPage() {
   // loadData('model'|'none')) keep the loaded title — no re-flash.
   const [overviewReady, setOverviewReady] = useState(false)
   const [editingDisplayName, setEditingDisplayName] = useState(false)
-  const [hostDescription, setHostDescription] = useState('')
   const [contextRefDraft, setContextRefDraft] = useState('')
   const [providerDraft, setProviderDraft] = useState<LlmProvider>('openai')
   // Model options are the operator allowlist (enabled only). The host's saved
@@ -344,6 +344,7 @@ export default function HostDetailsPage() {
   const [selectedConnectorNames, setSelectedConnectorNames] = useState<string[]>([])
   const [hostStatusLabel, setHostStatusLabel] = useState('Unknown')
   const [hostStatusTone, setHostStatusTone] = useState<'active' | 'inactive' | 'unknown'>('unknown')
+  const [hostAgentType, setHostAgentType] = useState<AgentLifecycleType>('stateful')
   const [hostCreatedAt, setHostCreatedAt] = useState('')
   const [accessSummary, setAccessSummary] = useState<{
     memberCount: number
@@ -584,7 +585,6 @@ export default function HostDetailsPage() {
         setHostDisplaySaved(overview.hostDisplay)
         setOverviewReady(true)
         setEditingDisplayName(false)
-        setHostDescription(String(spec.description || '').trim())
         setContextRefDraft(overview.contextRef)
         setChannelsDraft(overview.channels)
         // Overview read-only summary: linked context's MCP servers + access counts.
@@ -625,10 +625,16 @@ export default function HostDetailsPage() {
         const lifecycleState = String(
           (host.status as { lifecycle?: { state?: string } } | undefined)?.lifecycle?.state || ''
         ).trim()
+        setHostAgentType(agentLifecycleTypeFromSpec(spec))
         const lowerState = lifecycleState.toLowerCase()
         if (lowerState === 'active' || lowerState === 'ready') {
           setHostStatusLabel('Active')
           setHostStatusTone('active')
+        } else if (lowerState === 'suspended') {
+          // A stateless host scales to zero while suspended; surface that
+          // state to admins as Idle, not Suspended.
+          setHostStatusLabel('Idle')
+          setHostStatusTone('unknown')
         } else if (lowerState === 'blocked' || lowerState === 'failed') {
           setHostStatusLabel(lifecycleState || 'Inactive')
           setHostStatusTone('inactive')
@@ -1495,7 +1501,7 @@ export default function HostDetailsPage() {
               setHostDisplayDraft(hostDisplaySaved)
               setEditingDisplayName(false)
             }}
-            description={hostDescription}
+            agentType={hostAgentType}
             statusLabel={hostStatusLabel}
             statusTone={hostStatusTone}
             contextRef={contextRefDraft}
