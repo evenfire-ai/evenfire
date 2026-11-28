@@ -25,6 +25,7 @@ import {
   isGfsSessionAuthorityFailure,
 } from '@lib/gfsGrantErrors'
 import { hasGfsMoveSourcePermissions } from '@lib/gfsMovePermissions'
+import type { GfsResourceKind } from '@lib/gfsResourceActions'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import type { GfsAccessRole } from '@/gfs/GfsGrantList'
 import {
@@ -208,6 +209,8 @@ export function useFilePreviewResourceActions({
       ? undefined
       : affordancesQuery.data
   const sourceParentId = resource?.parentResourceId ?? null
+  const resolvedKind: GfsResourceKind | null =
+    resource?.kind === 'file' ? 'file' : resource?.kind === 'directory' ? 'directory' : null
   const moveContextRef = useRef({
     gfsUri,
     sessionScope,
@@ -1749,6 +1752,8 @@ export function useFilePreviewResourceActions({
     canMove,
     canDownload: Boolean(resource?.kind === 'file' && canResolve),
     canDelete,
+    resourceKind: resolvedKind,
+    parentResourceId: sourceParentId,
     mutating: mutationPending,
   }
 }

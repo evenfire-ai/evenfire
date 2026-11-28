@@ -85,10 +85,11 @@ function AnchoredMenuOwner({ resource }: { resource: ChildResource }) {
   const actions = buildGfsResourceActions({
     kind: resource.kind,
     uri: resource.gfsUri,
+    moveApplicable: true,
+    previewable: true,
     handlers: {
       share: vi.fn(),
       'copy-link': vi.fn(),
-      'copy-route': vi.fn(),
       preview: vi.fn(),
       rename: vi.fn(),
       move: vi.fn(),
@@ -118,8 +119,10 @@ function stubAffordances(resolveHeld: (resourceId: string) => Promise<GfsHeldAff
   vi.stubGlobal('clerum', { gfs: { affordances: produce } })
 }
 
+/** Runnable: neither natively disabled nor `aria-disabled`. */
 function itemEnabled(menu: HTMLElement, name: string): boolean {
-  return !(within(menu).getByRole('menuitem', { name }) as HTMLButtonElement).disabled
+  const item = within(menu).getByRole('menuitem', { name }) as HTMLButtonElement
+  return !item.disabled && item.getAttribute('aria-disabled') !== 'true'
 }
 
 /**
@@ -174,7 +177,6 @@ describe('GfsResourceMenu anchor mode', () => {
     const flyout = screen.getByRole('menu', { name: 'Share options for notes.md' })
     expect(itemEnabled(flyout, 'Share')).toBe(false)
     expect(itemEnabled(flyout, 'Copy link')).toBe(true)
-    expect(itemEnabled(flyout, 'Copy file ID')).toBe(true)
 
     await act(async () => {
       held.get('target')!.resolve(heldPermissionResponse(['read', 'write', 'manage_acl']))
@@ -183,8 +185,11 @@ describe('GfsResourceMenu anchor mode', () => {
 
     expect(itemEnabled(menu, 'Rename')).toBe(true)
     expect(itemEnabled(menu, 'Move to')).toBe(true)
-    // The target holds no `delete`, so the owner stops offering it at all.
-    expect(within(menu).queryByRole('menuitem', { name: 'Delete' })).toBeNull()
+    // The target holds no `delete`: still offered, greyed out with its reason.
+    expect(itemEnabled(menu, 'Delete')).toBe(false)
+    expect(within(menu).getByRole('menuitem', { name: 'Delete' }).getAttribute('title')).toBe(
+      "Delete isn't available"
+    )
     expect(itemEnabled(flyout, 'Share')).toBe(true)
   })
 
@@ -380,6 +385,8 @@ describe('GfsResourceMenu anchor mode', () => {
       const actions = buildGfsResourceActions({
         kind: 'file',
         uri: 'gfs://main/0123456789abcdef0123456789abcdef',
+        moveApplicable: true,
+        previewable: true,
         handlers: { replace },
         canReplace: true,
       })

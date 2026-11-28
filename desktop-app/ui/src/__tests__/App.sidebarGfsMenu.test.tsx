@@ -19,12 +19,10 @@ import { ERROR_TOAST_DURATION_MS } from '@constants/toasts'
 import { installAppControllerClerum } from '@hooks/domain/__tests__/__fixtures__/appControllerHarness'
 import { uninstallMockClerum } from '@hooks/domain/__tests__/__fixtures__/mockClerum'
 import { resolveGfsPreview } from '@lib/gfsPreview'
+import { sidebarRowActionOptions } from '@lib/gfsResourceActionSurfaces'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
-import {
-  gfsActionNeedsAffordances,
-  gfsPendingRowActionAvailability,
-  gfsRowActionAvailability,
-} from '@lib/gfsRowActionAvailability'
+import { withPermissionGate } from '@lib/gfsResourceMenuPermissionGate'
+import { gfsRowActionAvailability } from '@lib/gfsRowActionAvailability'
 import { App } from '@/App'
 import {
   accessibleResource,
@@ -48,6 +46,7 @@ import {
   cleanupNativeCommitTestHarness,
   createNativeCommitTestHarness,
 } from '../../../testSupport/appService.nativeCommitTestHarness'
+import { isMenuItemEnabled } from '../test/gfsMenuItemState'
 import {
   type ChromiumFocusShim,
   chromiumFocusRejection,
@@ -411,7 +410,7 @@ describe('App sidebar GFS resource menu', () => {
 
     const menu = await openRowMenu('notes.txt')
     const rename = await within(menu).findByRole('menuitem', { name: 'Rename' })
-    await waitFor(() => expect((rename as HTMLButtonElement).disabled).toBe(false))
+    await waitFor(() => expect(isMenuItemEnabled(rename)).toBe(true))
     fireEvent.click(rename)
     expect(await screen.findByRole('dialog', { name: 'Rename file' })).toBeTruthy()
     await flushFrames()
@@ -531,7 +530,7 @@ describe('App sidebar GFS resource menu', () => {
 
       const menu = await openRowMenu(row)
       const item = await within(menu).findByRole('menuitem', { name: action })
-      await waitFor(() => expect((item as HTMLButtonElement).disabled).toBe(false))
+      await waitFor(() => expect(isMenuItemEnabled(item)).toBe(true))
       fireEvent.click(item)
       if (action === 'Share') {
         // Share opens its flyout; the flyout's Share opens the dialog.
@@ -597,7 +596,7 @@ describe('App sidebar GFS resource menu', () => {
 
       const menu = await openRowMenu(row)
       const item = await within(menu).findByRole('menuitem', { name: action })
-      await waitFor(() => expect((item as HTMLButtonElement).disabled).toBe(false))
+      await waitFor(() => expect(isMenuItemEnabled(item)).toBe(true))
       // From the click on, the host's fresh permission check waits on main.
       let releaseAffordances!: () => void
       const affordancesHeld = new Promise<void>(resolve => {
@@ -674,7 +673,7 @@ describe('App sidebar GFS resource menu', () => {
     })
     const menu = await screen.findByRole('menu', { name: 'Actions for Reports' })
     const rename = await within(menu).findByRole('menuitem', { name: 'Rename' })
-    await waitFor(() => expect((rename as HTMLButtonElement).disabled).toBe(false))
+    await waitFor(() => expect(isMenuItemEnabled(rename)).toBe(true))
     fireEvent.click(rename)
     const renameDialog = await screen.findByRole('dialog', { name: 'Rename folder' })
     fireEvent.change(within(renameDialog).getByLabelText('Name'), {
@@ -706,7 +705,7 @@ describe('App sidebar GFS resource menu', () => {
     // Rename T = notes.txt, a sibling of Q.
     let menu = await openRowMenu('notes.txt')
     const rename = await within(menu).findByRole('menuitem', { name: 'Rename' })
-    await waitFor(() => expect((rename as HTMLButtonElement).disabled).toBe(false))
+    await waitFor(() => expect(isMenuItemEnabled(rename)).toBe(true))
     fireEvent.click(rename)
     const renameDialog = await screen.findByRole('dialog', { name: 'Rename file' })
     fireEvent.change(within(renameDialog).getByLabelText('Name'), {
@@ -726,7 +725,7 @@ describe('App sidebar GFS resource menu', () => {
     // A host dialog outlives the tree that opened it.
     menu = await openRowMenu('notes-final.txt')
     const remove = await within(menu).findByRole('menuitem', { name: 'Delete' })
-    await waitFor(() => expect((remove as HTMLButtonElement).disabled).toBe(false))
+    await waitFor(() => expect(isMenuItemEnabled(remove)).toBe(true))
     fireEvent.click(remove)
     const deleteDialog = await screen.findByRole('dialog', { name: 'Delete notes-final.txt?' })
     fireEvent.click(screen.getByTestId('nav-files-explorer-toggle'))
@@ -834,7 +833,8 @@ describe('App sidebar GFS resource menu', () => {
 
     const press = (keys: string) => userEvent.setup().keyboard(keys)
     const shareOf = (menu: HTMLElement) => within(menu).getByRole('menuitem', { name: 'Share' })
-    const enabledItems = (menu: HTMLElement) =>
+    // Greyed-out items stay focusable, so they count here.
+    const focusableItems = (menu: HTMLElement) =>
       Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)'))
     const submenuFor = (name: string) =>
       screen.queryByRole('menu', { name: `Share options for ${name}` })
@@ -848,7 +848,7 @@ describe('App sidebar GFS resource menu', () => {
 
       expect(document.activeElement).toBe(shareOf(menu))
       await press('{ArrowDown}')
-      expect(document.activeElement).toBe(enabledItems(menu)[1])
+      expect(document.activeElement).toBe(focusableItems(menu)[1])
     })
 
     it('a right-click on a tree row focuses Share, and ArrowDown reaches the next item', async () => {
@@ -858,7 +858,7 @@ describe('App sidebar GFS resource menu', () => {
 
       expect(document.activeElement).toBe(shareOf(menu))
       await press('{ArrowDown}')
-      expect(document.activeElement).toBe(enabledItems(menu)[1])
+      expect(document.activeElement).toBe(focusableItems(menu)[1])
     })
 
     it('bits that settle after the menu opened leave focus on Share', async () => {
@@ -866,12 +866,12 @@ describe('App sidebar GFS resource menu', () => {
       const summary = await expandReports()
       const reads = holdAffordances(bridge, queryClient)
       const menu = await openByKeyboard(summary)
-      expect(rename(menu).disabled).toBe(true)
+      expect(rename(menu).getAttribute('aria-disabled')).toBe('true')
       expect(reads.waiting.length).toBeGreaterThan(0)
 
       expect(document.activeElement).toBe(shareOf(menu))
       await reads.settle('ok')
-      expect(rename(menu).disabled).toBe(false)
+      expect(isMenuItemEnabled(rename(menu))).toBe(true)
       expect(document.activeElement).toBe(shareOf(menu))
     })
 
@@ -880,13 +880,13 @@ describe('App sidebar GFS resource menu', () => {
       const summary = await expandReports()
       const reads = holdAffordances(bridge, queryClient)
       const menu = await openByKeyboard(summary)
-      expect(rename(menu).disabled).toBe(true)
+      expect(rename(menu).getAttribute('aria-disabled')).toBe('true')
 
       await press('{ArrowDown}')
       const reached = document.activeElement
-      expect(reached).toBe(enabledItems(menu)[1])
+      expect(reached).toBe(focusableItems(menu)[1])
       await reads.settle('ok')
-      expect(rename(menu).disabled).toBe(false)
+      expect(isMenuItemEnabled(rename(menu))).toBe(true)
       expect(document.activeElement).toBe(reached)
       expect((reached as HTMLElement).isConnected).toBe(true)
     })
@@ -901,7 +901,7 @@ describe('App sidebar GFS resource menu', () => {
       pointer.moveTo(shareOf(menu))
       const submenu = submenuFor('notes.txt')
       expect(submenu).toBeTruthy()
-      expect(document.activeElement).toBe(enabledItems(submenu!)[0])
+      expect(document.activeElement).toBe(focusableItems(submenu!)[0])
     })
 
     it('Escape after the bits failed closes the menu and leaves the drawer open', async () => {
@@ -909,10 +909,10 @@ describe('App sidebar GFS resource menu', () => {
       const summary = await expandReports()
       const reads = holdAffordances(bridge, queryClient)
       const menu = await openByKeyboard(summary)
-      expect(rename(menu).disabled).toBe(true)
+      expect(rename(menu).getAttribute('aria-disabled')).toBe('true')
 
       await reads.settle('error')
-      expect(rename(menu).disabled).toBe(true)
+      expect(rename(menu).getAttribute('aria-disabled')).toBe('true')
       await press('{Escape}')
       expect(rowMenu('summary.txt')).toBeNull()
       expect(drawerOpen()).toBe(true)
@@ -924,7 +924,7 @@ describe('App sidebar GFS resource menu', () => {
       const summary = await expandReports()
       const reads = holdAffordances(bridge, queryClient)
       const menu = await openByKeyboard(summary)
-      expect(rename(menu).disabled).toBe(true)
+      expect(rename(menu).getAttribute('aria-disabled')).toBe('true')
 
       await press('{Escape}')
       expect(rowMenu('summary.txt')).toBeNull()
@@ -958,7 +958,7 @@ describe('App sidebar GFS resource menu', () => {
       const { notes } = await openDrawerTree()
       const menu = await openByKeyboard(notes)
       await press('{ArrowDown}')
-      const reached = enabledItems(menu)[1]
+      const reached = focusableItems(menu)[1]
       expect(document.activeElement).toBe(reached)
 
       act(() => {
@@ -988,7 +988,7 @@ describe('App sidebar GFS resource menu', () => {
       await press('{ArrowRight}')
       const submenu = submenuFor('notes.txt')
       expect(submenu).toBeTruthy()
-      expect(document.activeElement).toBe(enabledItems(submenu!)[0])
+      expect(document.activeElement).toBe(focusableItems(submenu!)[0])
       await press('{ArrowLeft}')
       expect(submenuFor('notes.txt')).toBeNull()
       expect(document.activeElement).toBe(shareOf(menu))
@@ -1002,7 +1002,7 @@ describe('App sidebar GFS resource menu', () => {
       fireEvent(shareOf(menu), onPanel)
       expect(onPanel.defaultPrevented).toBe(true)
       await press('{ArrowRight}')
-      const firstChild = enabledItems(submenuFor('notes.txt')!)[0]!
+      const firstChild = focusableItems(submenuFor('notes.txt')!)[0]!
       const onSubmenu = createEvent.contextMenu(firstChild)
       fireEvent(firstChild, onSubmenu)
       expect(onSubmenu.defaultPrevented).toBe(true)
@@ -1016,7 +1016,7 @@ describe('App sidebar GFS resource menu', () => {
       expect(submenu).toBeTruthy()
 
       await press('{ArrowRight}')
-      expect(document.activeElement).toBe(enabledItems(submenu)[0])
+      expect(document.activeElement).toBe(focusableItems(submenu)[0])
       await press('{Escape}')
       expect(submenuFor('notes.txt')).toBeNull()
       expect(rowMenu('notes.txt')).toBeTruthy()
@@ -1060,7 +1060,7 @@ describe('App sidebar GFS resource menu', () => {
       const submenu = submenuFor('notes.txt')
       expect(submenu).toBeTruthy()
       // A narrow window lays the submenu over Share: the pointer now rests on it.
-      pointer.layoutShiftTo(enabledItems(submenu!)[0]!)
+      pointer.layoutShiftTo(focusableItems(submenu!)[0]!)
 
       await press('{Escape}')
       expect(submenuFor('notes.txt')).toBeNull()
@@ -1127,7 +1127,7 @@ describe('App sidebar GFS resource menu', () => {
       const menu = await openByKeyboard(notes)
       const pointer = createPointerDriver(notes)
       pointer.moveTo(shareOf(menu))
-      pointer.moveTo(enabledItems(submenuFor('notes.txt')!)[0]!)
+      pointer.moveTo(focusableItems(submenuFor('notes.txt')!)[0]!)
 
       await press('{Escape}')
       expect(submenuFor('notes.txt')).toBeNull()
@@ -1214,7 +1214,7 @@ describe('App sidebar GFS resource menu', () => {
   describe('model-based oracle', () => {
     type Row = 'notes' | 'summary'
     // `okWithoutParent`: the row's bits arrived and its parent's read failed,
-    // so only Move is withheld.
+    // so only Move is greyed out.
     type Bits = 'ok' | 'pending' | 'error' | 'okWithoutParent'
     type Read = 'row' | 'parent'
     type Answer = 'pending' | 'ok' | 'error'
@@ -1232,103 +1232,125 @@ describe('App sidebar GFS resource menu', () => {
 
     /**
      * The enabled item keys of each level, in order, per opened row and bit
-     * state. A forest root opens settled; the nested file opens pending and
-     * settles once both its own read and its parent's have answered. Pinned
-     * against the producers in the first test.
+     * state: the ones the menu enabled before inert items were greyed out
+     * instead of hidden, which must not change. A forest root opens settled;
+     * the nested file opens pending and settles once both its own read and its
+     * parent's have answered. Pinned against the producers in the first test.
      */
     const ENABLED: Record<Row, Partial<Record<Bits, LevelKeys>>> = {
       notes: {
         ok: {
           panel: ['share', 'rename', 'preview', 'download', 'delete'],
-          submenu: ['share-access', 'copy-link', 'copy-route'],
+          submenu: ['share-access', 'copy-link'],
         },
       },
       summary: {
         pending: {
           panel: ['share', 'preview', 'download'],
-          submenu: ['copy-link', 'copy-route'],
+          submenu: ['copy-link'],
         },
         ok: {
           panel: ['share', 'rename', 'move', 'preview', 'download', 'delete'],
-          submenu: ['share-access', 'copy-link', 'copy-route'],
+          submenu: ['share-access', 'copy-link'],
         },
         error: {
           panel: ['share', 'preview', 'download'],
-          submenu: ['copy-link', 'copy-route'],
+          submenu: ['copy-link'],
         },
         okWithoutParent: {
           panel: ['share', 'rename', 'preview', 'download', 'delete'],
-          submenu: ['share-access', 'copy-link', 'copy-route'],
+          submenu: ['share-access', 'copy-link'],
         },
       },
     }
 
     /**
-     * The same keys from the producers the tree builds its menu with
-     * (`gfsPendingRowActionAvailability` / `gfsRowActionAvailability`, then
-     * the resource actions), with the menu's two layout rules: Share, Copy
-     * link and Copy ID go in the submenu behind a Share item that leads the
-     * panel, Delete closes it, and unsettled bits leave inert every action
-     * that needs them.
+     * The keys the keyboard walks: every offered item, enabled or greyed out
+     * with a reason. They depend on the row alone, never on its bits.
      */
-    function producedKeys(row: Row, bits: Bits): LevelKeys {
+    const SUMMARY_FOCUSABLE: LevelKeys = {
+      panel: ['share', 'rename', 'move', 'preview', 'download', 'delete'],
+      submenu: ['share-access', 'copy-link'],
+    }
+    const FOCUSABLE: Record<Row, Partial<Record<Bits, LevelKeys>>> = {
+      notes: {
+        ok: {
+          panel: ['share', 'rename', 'preview', 'download', 'delete'],
+          submenu: ['share-access', 'copy-link'],
+        },
+      },
+      summary: {
+        pending: SUMMARY_FOCUSABLE,
+        ok: SUMMARY_FOCUSABLE,
+        error: SUMMARY_FOCUSABLE,
+        okWithoutParent: SUMMARY_FOCUSABLE,
+      },
+    }
+
+    /**
+     * The same keys from the producers the tree builds its menu with
+     * (`gfsRowActionAvailability`, the sidebar row surface, the resource
+     * actions and the menu's permission gate), with the menu's two layout rules: Share and Copy link go in the
+     * submenu behind a Share item that leads the panel, and Delete closes it.
+     */
+    function producedKeys(row: Row, bits: Bits): { enabled: LevelKeys; focusable: LevelKeys } {
       const resource = row === 'notes' ? { ...NOTES, parentResourceId: null } : SUMMARY
       const held = heldPermissionResponse(ALL_BITS)
       const settled = bits === 'ok' || bits === 'okWithoutParent'
-      const availability = settled
-        ? gfsRowActionAvailability({
-            resource,
-            listing: row === 'notes' ? 'roots' : 'folder',
-            rowAffordances: row === 'notes' ? null : held,
-            parentAffordances: row === 'notes' || bits === 'okWithoutParent' ? null : held,
-          })
-        : gfsPendingRowActionAvailability(resource)
+      const status = settled ? 'ok' : bits === 'error' ? 'error' : 'pending'
       const handler = () => undefined
-      const canPreview = resolveGfsPreview(resource) !== null
       const actions = getGfsMenuActions(
-        buildGfsResourceActions({
-          kind: 'file',
-          uri: resource.gfsUri,
-          handlers: {
-            'copy-link': handler,
-            'copy-route': handler,
-            'new-folder': handler,
-            'upload-file': handler,
-            rename: handler,
-            move: handler,
-            share: handler,
-            delete: handler,
-            preview: canPreview ? handler : undefined,
-            download: handler,
-          },
-          canRename: availability.canRename,
-          canMove: availability.canMove,
-          canCreateFolder: false,
-          canUpload: false,
-          canShare: availability.canManage,
-          canDelete: availability.canDelete,
-          canPreview,
-          canDownload: true,
-          mutating: false,
-        })
+        buildGfsResourceActions(
+          sidebarRowActionOptions({
+            kind: 'file',
+            uri: resource.gfsUri,
+            readable: true,
+            previewable: resolveGfsPreview(resource) !== null,
+            parentResourceId: resource.parentResourceId,
+            availability: gfsRowActionAvailability({
+              resource,
+              listing: row === 'notes' ? 'roots' : 'folder',
+              rowAffordances: row === 'notes' ? null : held,
+              parentAffordances: row === 'notes' || bits === 'okWithoutParent' ? null : held,
+            }),
+            hostAvailable: true,
+            mutating: false,
+            handlers: {
+              'copy-link': handler,
+              'open-folder': handler,
+              'new-folder': handler,
+              'upload-file': handler,
+              rename: handler,
+              move: handler,
+              share: handler,
+              delete: handler,
+              preview: handler,
+              download: handler,
+            },
+          })
+        ).map(action => withPermissionGate(action, action.id, status))
       )
-      const enabled = (action: (typeof actions)[number]) =>
-        !action.disabled && (settled || !gfsActionNeedsAffordances(action.id))
-      const inSubmenu = (id: string) => ['share', 'copy-link', 'copy-route'].includes(id)
-      const submenuActions = actions.filter(action => inSubmenu(action.id))
+      const inSubmenu = (id: string) => ['share', 'copy-link'].includes(id)
+      const levels = (keep: (action: (typeof actions)[number]) => boolean): LevelKeys => {
+        const submenuActions = actions.filter(action => inSubmenu(action.id))
+        return {
+          panel: [
+            ...(submenuActions.length > 0 ? ['share'] : []),
+            ...actions
+              .filter(action => !inSubmenu(action.id) && action.id !== 'delete' && keep(action))
+              .map(action => action.id),
+            ...actions.filter(action => action.id === 'delete' && keep(action)).map(() => 'delete'),
+          ],
+          submenu: submenuActions
+            .filter(keep)
+            .map(action => (action.id === 'share' ? 'share-access' : action.id)),
+        }
+      }
       return {
-        panel: [
-          ...(submenuActions.length > 0 ? ['share'] : []),
-          ...actions
-            .filter(action => !inSubmenu(action.id) && action.id !== 'delete' && enabled(action))
-            .map(action => action.id),
-          ...actions
-            .filter(action => action.id === 'delete' && enabled(action))
-            .map(() => 'delete'),
-        ],
-        submenu: submenuActions
-          .filter(enabled)
-          .map(action => (action.id === 'share' ? 'share-access' : action.id)),
+        enabled: levels(action => !action.disabled),
+        // A greyed-out item is aria-disabled, never natively disabled, so every
+        // offered item stays reachable by keyboard.
+        focusable: levels(() => true),
       }
     }
 
@@ -1368,6 +1390,7 @@ describe('App sidebar GFS resource menu', () => {
     const MENU_MODULE = 'GfsResourceMenu/index.tsx'
     const READ_RESOURCE: Record<Read, string> = { row: SUMMARY_ID, parent: REPORTS_ID }
     const keysOf = (m: Model) => ENABLED[m.menu!.row][m.menu!.bits]!
+    const focusableOf = (m: Model) => FOCUSABLE[m.menu!.row][m.menu!.bits]!
     let affordanceFailure = ''
     const coverage = new Map<string, number>()
     const cover = (label: string) => coverage.set(label, (coverage.get(label) ?? 0) + 1)
@@ -1384,10 +1407,14 @@ describe('App sidebar GFS resource menu', () => {
         .filter(menu => menu.getAttribute('aria-label')?.startsWith('Share options for '))
     const item = (level: HTMLElement, key: string) =>
       level.querySelector<HTMLElement>(`[role="menuitem"][data-gfs-action="${key}"]`)!
-    const enabledKeys = (level: HTMLElement) =>
+    const focusableKeys = (level: HTMLElement) =>
       Array.from(level.querySelectorAll('[role="menuitem"]:not(:disabled)')).map(
         node => node.getAttribute('data-gfs-action') ?? ''
       )
+    const enabledKeys = (level: HTMLElement) =>
+      Array.from(
+        level.querySelectorAll('[role="menuitem"]:not(:disabled):not([aria-disabled="true"])')
+      ).map(node => node.getAttribute('data-gfs-action') ?? '')
     function spotEl(spot: Spot): Element {
       if (spot === 'fuera') return rowEl('notes')
       if (spot === 'submenu') return item(submenuEls()[0]!, 'copy-link')
@@ -1398,7 +1425,7 @@ describe('App sidebar GFS resource menu', () => {
 
     // ── Model transitions ─────────────────────────────────────────────────
     function openSubmenu(m: Model) {
-      m.menu!.submenu = { focus: keysOf(m).submenu[0]! }
+      m.menu!.submenu = { focus: focusableOf(m).submenu[0]! }
       m.menuFocusCalls += 1
     }
     /** An explicit close of the submenu: focus back on Share, hover disarmed. */
@@ -1461,9 +1488,13 @@ describe('App sidebar GFS resource menu', () => {
         const keys = keysOf(m)
         expect(menus[0]!.getAttribute('aria-label')).toBe(`Actions for ${ROW_NAME[m.menu.row]}`)
         expect(enabledKeys(menus[0]!), 'panel keys').toEqual(keys.panel)
+        expect(focusableKeys(menus[0]!), 'panel focusable keys').toEqual(focusableOf(m).panel)
         // V1′ / V1 and S3: focus on the key the model holds for the top level.
         if (m.menu.submenu) {
           expect(enabledKeys(submenus[0]!), 'submenu keys').toEqual(keys.submenu)
+          expect(focusableKeys(submenus[0]!), 'submenu focusable keys').toEqual(
+            focusableOf(m).submenu
+          )
           expect(submenus[0]!.contains(active), 'V1′: focus in the submenu').toBe(true)
           expect(active?.getAttribute('data-gfs-action'), 'V1′: submenu key').toBe(
             m.menu.submenu.focus
@@ -1554,7 +1585,7 @@ describe('App sidebar GFS resource menu', () => {
         m.menu = {
           row: this.row,
           bits,
-          focus: ENABLED[this.row][bits]!.panel[0]!,
+          focus: FOCUSABLE[this.row][bits]!.panel[0]!,
           submenu: null,
           reads: null,
         }
@@ -1596,7 +1627,7 @@ describe('App sidebar GFS resource menu', () => {
           return
         }
         // The tree waits for both reads; a failed row read fails the menu,
-        // a failed parent read withholds only Move.
+        // a failed parent read greys out only Move.
         m.menu!.bits =
           reads.row === 'error' ? 'error' : reads.parent === 'error' ? 'okWithoutParent' : 'ok'
         cover(`settle:${m.menu!.bits}`)
@@ -1612,7 +1643,8 @@ describe('App sidebar GFS resource menu', () => {
       async perform(m: Model) {
         await press(`{${this.key}}`)
         const menu = m.menu!
-        const level = menu.submenu ? keysOf(m).submenu : keysOf(m).panel
+        // The keyboard walks greyed-out items too: they explain why they are inert.
+        const level = menu.submenu ? focusableOf(m).submenu : focusableOf(m).panel
         const current = level.indexOf(menu.submenu ? menu.submenu.focus : menu.focus)
         const next =
           this.key === 'Home'
@@ -2049,10 +2081,13 @@ describe('App sidebar GFS resource menu', () => {
       affordanceFailure = await affordancesFailureMessage(500)
     })
 
-    it('pins the enabled keys of each level to the producers', () => {
+    it('pins the enabled and focusable keys of each level to the producers', () => {
       for (const row of Object.keys(ENABLED) as Row[]) {
         for (const bits of Object.keys(ENABLED[row]) as Bits[]) {
-          expect(producedKeys(row, bits), `${row} ${bits}`).toEqual(ENABLED[row][bits])
+          expect(producedKeys(row, bits), `${row} ${bits}`).toEqual({
+            enabled: ENABLED[row][bits],
+            focusable: FOCUSABLE[row][bits],
+          })
         }
       }
     })

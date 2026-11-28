@@ -74,6 +74,8 @@ function RowMenu({
   const actions = buildGfsResourceActions({
     kind: target.kind,
     uri: target.gfsUri,
+    moveApplicable: true,
+    previewable: true,
     handlers: { rename: () => host.openGfsAction(target, 'rename') },
     canRename: true,
   })

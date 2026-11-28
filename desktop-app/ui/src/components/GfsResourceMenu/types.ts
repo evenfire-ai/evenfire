@@ -1,4 +1,5 @@
 import type { GfsResourceAction, GfsResourceActionId } from '@lib/gfsResourceActions'
+import type { GfsResourceMenuPermissionGateStatus } from '@lib/gfsResourceMenuPermissionGate'
 
 /** A menu entry's key: an action id, or the Share flyout's own Share entry. */
 export type GfsResourceMenuActionKey = GfsResourceActionId | 'share-access'
@@ -9,7 +10,7 @@ export type GfsResourceMenuActionKey = GfsResourceActionId | 'share-access'
  * `gfsRowActionAvailability`; the menu only keeps every action that depends on
  * them inert until they are `ok`.
  */
-export type GfsResourceMenuPermissionStatus = 'pending' | 'ok' | 'error'
+export type GfsResourceMenuPermissionStatus = GfsResourceMenuPermissionGateStatus
 
 export type GfsResourceMenuProps = {
   resourceName: string

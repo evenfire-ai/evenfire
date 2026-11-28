@@ -30,6 +30,7 @@ import {
 
 import { GfsDragSessionProvider, useGfsDragSession } from '@/gfs/dragSession'
 import { FileExplorerTree } from '..'
+import { isMenuItemEnabled } from '../../../../test/gfsMenuItemState'
 
 function SessionProbe({ onApi }: { onApi: (api: ReturnType<typeof useGfsDragSession>) => void }) {
   onApi(useGfsDragSession())
@@ -1117,7 +1118,7 @@ describe('FileExplorerTree — explicit Move permission retry', () => {
     fireEvent.keyDown(row, { key: 'F10', shiftKey: true })
     const menu = await screen.findByRole('menu', { name: 'Actions for report.txt' })
     const move = await within(menu).findByRole('menuitem', { name: 'Move to' })
-    await waitFor(() => expect((move as HTMLButtonElement).disabled).toBe(false))
+    await waitFor(() => expect(isMenuItemEnabled(move)).toBe(true))
     fireEvent.click(move)
     return screen.findByRole('dialog', { name: 'Move file report.txt' })
   }
@@ -3279,7 +3280,7 @@ describe('FileExplorerTree — drag-and-drop moves', () => {
     })
     const menu = await screen.findByRole('menu', { name: 'Actions for A' })
     const move = await within(menu).findByRole('menuitem', { name: 'Move to' })
-    await waitFor(() => expect((move as HTMLButtonElement).disabled).toBe(false))
+    await waitFor(() => expect(isMenuItemEnabled(move)).toBe(true))
     expect(screen.queryByRole('dialog', { name: 'Move folder A' })).toBeNull()
   })
 })

@@ -6,15 +6,7 @@ import type { Tone } from '@/uiTypes'
 /** The actions the host runs on an explicit resource, in place. */
 export type GfsHostActionId = Extract<
   GfsResourceActionId,
-  | 'share'
-  | 'rename'
-  | 'move'
-  | 'new-folder'
-  | 'upload-file'
-  | 'delete'
-  | 'download'
-  | 'copy-link'
-  | 'copy-route'
+  'share' | 'rename' | 'move' | 'new-folder' | 'upload-file' | 'delete' | 'download' | 'copy-link'
 >
 
 /**

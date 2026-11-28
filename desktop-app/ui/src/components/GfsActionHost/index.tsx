@@ -11,7 +11,7 @@ import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { fetchGfsAuthority, requireFreshGfsPermissions } from '@lib/gfsFreshPermissions'
 import type { GfsFreshPermissionsContext } from '@lib/gfsFreshPermissions.types'
 import { describeGfsReadError, isGfsSessionAuthorityFailure } from '@lib/gfsGrantErrors'
-import { copyGfsDeepLink, copyGfsResourceId } from '@lib/gfsResourceClipboard'
+import { copyGfsDeepLink } from '@lib/gfsResourceClipboard'
 import {
   gfsSessionScope,
   handleGfsAuthorityFailure,
@@ -278,7 +278,7 @@ export function GfsActionHost({
     if (!scope || generation === null) return
     // A revoked session has its own surface; an action would only fail.
     if (readGfsAccessState(queryClient, scope, generation) !== 'active') return
-    if (actionId === 'copy-link' || actionId === 'copy-route') {
+    if (actionId === 'copy-link') {
       const origin: GfsHostActionOrigin = { target, originScope: scope, originGen: generation }
       // The copy itself runs inside the gesture; only its toast waits for main.
       const presentCopyOutcome = (message: string, tone: 'success' | 'error') => {
@@ -286,9 +286,7 @@ export function GfsActionHost({
           if (admitted) pushToastRef.current(message, tone)
         })
       }
-      void (actionId === 'copy-link'
-        ? copyGfsDeepLink(target.gfsUri, presentCopyOutcome)
-        : copyGfsResourceId(target.gfsUri, target.kind, presentCopyOutcome))
+      void copyGfsDeepLink(target.gfsUri, presentCopyOutcome)
       return
     }
     if (actionId === 'download') {

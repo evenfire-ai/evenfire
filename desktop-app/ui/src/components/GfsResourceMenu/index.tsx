@@ -19,13 +19,8 @@ import {
   IconTrash,
   IconUpload,
 } from '@components/SidebarNav/icons'
-import type { GfsResourceActionId } from '@lib/gfsResourceActions'
-import { gfsActionNeedsAffordances } from '@lib/gfsRowActionAvailability'
-import type {
-  GfsResourceMenuActionKey,
-  GfsResourceMenuPermissionStatus,
-  GfsResourceMenuProps,
-} from './types'
+import { withPermissionGate } from '@lib/gfsResourceMenuPermissionGate'
+import type { GfsResourceMenuActionKey, GfsResourceMenuProps } from './types'
 
 type GfsResourceMenuAction = {
   color?: 'neutral' | 'danger'
@@ -35,6 +30,7 @@ type GfsResourceMenuAction = {
   onClick: () => void
   submenu?: boolean
   disabled?: boolean
+  disabledReason?: string
 }
 
 function menuAction(
@@ -45,6 +41,20 @@ function menuAction(
   options: Pick<GfsResourceMenuAction, 'color' | 'submenu' | 'disabled'> = {}
 ): GfsResourceMenuAction | null {
   return onClick ? { ...options, icon, key, label, onClick } : null
+}
+
+/**
+ * A disabled item is `aria-disabled`, never natively `disabled`, and the click
+ * guard keeps it inert; only one disabled for a reason carries a tooltip.
+ * Native `disabled` would make Chromium blur the item when it flips into that
+ * state while focused (a permission arriving, or any upload or change starting
+ * page-wide), dropping focus to the body and leaving the menu unreachable by
+ * keyboard.
+ */
+function disabledItemProps(action: GfsResourceMenuAction) {
+  if (!action.disabled) return {}
+  if (action.disabledReason) return { 'aria-disabled': true, title: action.disabledReason }
+  return { 'aria-disabled': true }
 }
 
 function isMenuAction(action: GfsResourceMenuAction | null): action is GfsResourceMenuAction {
@@ -58,7 +68,6 @@ const ACTIONS_WITHOUT_SURFACE: ReadonlySet<GfsResourceMenuActionKey> = new Set([
   'download',
   'download-zip',
   'copy-link',
-  'copy-route',
   'open-folder',
 ])
 
@@ -116,17 +125,6 @@ function belowOrAboveTop(anchorRect: AnchorRect, height: number, viewportHeight:
     Math.max(EDGE_INSET, unclampedTop),
     Math.max(EDGE_INSET, viewportHeight - height - EDGE_INSET)
   )
-}
-
-function withPermissionGate(
-  action: GfsResourceMenuAction,
-  actionId: GfsResourceActionId,
-  permissionStatus: GfsResourceMenuPermissionStatus | undefined
-): GfsResourceMenuAction {
-  if (permissionStatus === undefined || permissionStatus === 'ok' || action.submenu) return action
-  // Unresolved or failed bits keep the item visible but inert, so the menu
-  // never offers an action the target may not allow.
-  return gfsActionNeedsAffordances(actionId) ? { ...action, disabled: true } : action
 }
 
 export function GfsResourceMenu({
@@ -366,8 +364,8 @@ export function GfsResourceMenu({
   // compact sidebar drawer listens on document). Capturing on document lets
   // the menu consume that Escape before any bubble listener, and only while
   // focus is in the menu, so a closed menu leaves Escape to the drawer. A
-  // click on a disabled item or the panel padding drops focus to body; that
-  // Escape still belongs to the open menu.
+  // click on the panel padding drops focus to body; that Escape still belongs
+  // to the open menu.
   useEffect(() => {
     if (!open || !anchorMode) return
     const handleEscapeCapture = (event: KeyboardEvent) => {
@@ -505,30 +503,28 @@ export function GfsResourceMenu({
     ),
   ].filter(group => group.length > 0)
   const menuActions = actions?.filter(action => action.menu)
-  const sharedActions: GfsResourceMenuAction[] | undefined = menuActions?.map(action =>
-    withPermissionGate(
-      {
-        color: action.id === 'delete' ? 'danger' : undefined,
-        disabled: action.disabled,
-        icon: action.icon,
-        key: action.id,
-        label: action.label,
-        onClick:
-          action.id === 'replace'
-            ? () =>
-                action.run(undefined, {
-                  requestFileSelection: () => replaceInputRef.current?.click(),
-                })
-            : () => action.run(),
-      },
-      action.id,
-      permissionStatus
-    )
+  const gatedMenuActions = menuActions?.map(action =>
+    withPermissionGate(action, action.id, permissionStatus)
   )
+  const sharedActions: GfsResourceMenuAction[] | undefined = gatedMenuActions?.map(action => ({
+    color: action.id === 'delete' ? 'danger' : undefined,
+    disabled: action.disabled,
+    disabledReason: action.disabledReason,
+    icon: action.icon,
+    key: action.id,
+    label: action.label,
+    onClick:
+      action.id === 'replace'
+        ? () =>
+            action.run(undefined, {
+              requestFileSelection: () => replaceInputRef.current?.click(),
+            })
+        : () => action.run(),
+  }))
   const shareMenuChildren =
     actions !== undefined
       ? (sharedActions ?? [])
-          .filter(action => ['share', 'copy-link', 'copy-route'].includes(action.key))
+          .filter(action => ['share', 'copy-link'].includes(action.key))
           .map(
             (action): GfsResourceMenuAction =>
               action.key === 'share' ? { ...action, key: 'share-access', label: 'Share' } : action
@@ -543,7 +539,7 @@ export function GfsResourceMenu({
       ].filter(isMenuAction)
     : []
   const visibleSharedActions = sharedActions?.filter(
-    action => !['share', 'copy-link', 'copy-route', 'delete'].includes(action.key)
+    action => !['share', 'copy-link', 'delete'].includes(action.key)
   )
   const actionGroups =
     actions !== undefined
@@ -613,7 +609,7 @@ export function GfsResourceMenu({
                         aria-haspopup={action.submenu ? 'menu' : undefined}
                         color={action.color}
                         data-gfs-action={action.key}
-                        disabled={action.disabled}
+                        {...disabledItemProps(action)}
                         key={action.key}
                         leadingIcon={action.icon}
                         role="menuitem"
@@ -653,7 +649,7 @@ export function GfsResourceMenu({
                   {shareMenuChildren.map(action => (
                     <MenuItem
                       data-gfs-action={action.key}
-                      disabled={action.disabled}
+                      {...disabledItemProps(action)}
                       key={action.key}
                       leadingIcon={action.icon}
                       role="menuitem"
@@ -679,6 +675,9 @@ export function GfsResourceMenu({
           ref={replaceInputRef}
           // Only the Replace item opens the picker, so the hidden input stays
           // out of the tab order and refuses a file while that item is inert.
+          // It is also disabled then, so assistive tech is not offered a live
+          // upload control on a file that cannot be replaced.
+          disabled={gatedReplace?.disabled}
           tabIndex={-1}
           type="file"
           onChange={event => {
@@ -686,7 +685,7 @@ export function GfsResourceMenu({
             event.currentTarget.value = ''
             if (!file || !gatedReplace || gatedReplace.disabled) return
             closeMenu()
-            const replaceAction = menuActions?.find(action => action.id === 'replace')
+            const replaceAction = gatedMenuActions?.find(action => action.id === 'replace')
             if (replaceAction) replaceAction.run(file)
             else onReplace?.(file)
           }}

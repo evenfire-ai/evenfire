@@ -71,6 +71,7 @@ import { SandboxUiDeepLinkQueue } from '../../../src/sandboxUiDeepLinkQueue'
 import { buildSandboxUiDeepLink, parseSandboxUiDeepLink } from '../../../src/sandboxUiDeepLinks'
 import type { DeepLinkAcknowledgmentAuthority } from '../../../src/types'
 import { installAppControllerClerum } from '../hooks/domain/__tests__/__fixtures__/appControllerHarness'
+import { isMenuItemEnabled } from '../test/gfsMenuItemState'
 import { type SandboxUiMainFake, createSandboxUiMainFake } from './__fixtures__/sandboxUiMainFake'
 
 // The sandbox-ui main fake runs the real main process; these are the
@@ -5815,7 +5816,7 @@ describe('App deep-link orchestration', () => {
           fireEvent.keyDown(sourceButton(), { key: 'F10', shiftKey: true })
           const menu = await view.findByRole('menu', { name: `Actions for ${sourceName}` })
           const moveItem = await within(menu).findByRole('menuitem', { name: 'Move to' })
-          await waitFor(() => expect((moveItem as HTMLButtonElement).disabled).toBe(false))
+          await waitFor(() => expect(isMenuItemEnabled(moveItem)).toBe(true))
           fireEvent.click(moveItem)
           const dialog = await view.findByRole('dialog', { name: `Move file ${sourceName}` })
           fireEvent.click(await within(dialog).findByRole('button', { name: 'Target' }))

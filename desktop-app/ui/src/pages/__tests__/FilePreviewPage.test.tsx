@@ -17,6 +17,7 @@ import { useGfsWatchSubscription } from '@hooks/domain/useGfsWatchSubscription'
 import { resolveDeniedMessage, resolveResource } from '@/gfs/__fixtures__/gfsProducerFixtures'
 import { GfsWatchEventSource } from '@/gfs/__fixtures__/gfsWatchEvents'
 import { delegationAffordances } from '../../../../src/gfs/delegation.js'
+import { isMenuItemEnabled } from '../../test/gfsMenuItemState'
 import { FilePreviewPage } from '../FilePreviewPage'
 
 const hookMock = vi.hoisted(() => ({
@@ -122,7 +123,7 @@ function openPreviewActions(fileName: string) {
 
 function clickPreviewAction(fileName: string, actionName: string) {
   const menu = openPreviewActions(fileName)
-  if (actionName === 'Copy link' || actionName === 'Copy file ID') {
+  if (actionName === 'Copy link') {
     fireEvent.click(within(menu).getByRole('menuitem', { name: /^Share$/ }))
     const shareMenu = screen.getByRole('menu', { name: `Share options for ${fileName}` })
     fireEvent.click(within(shareMenu).getByRole('menuitem', { name: actionName }))
@@ -183,11 +184,16 @@ describe('FilePreviewPage', () => {
     const menu = screen.getByRole('menu', { name: 'Actions for diagram.png' })
     expect(within(menu).queryByRole('menuitem', { name: 'Refresh' })).toBeNull()
     expect(within(menu).queryByRole('menuitem', { name: 'Open file from ID' })).toBeNull()
-    expect(within(menu).getByRole('menuitem', { name: 'Copy content' })).toBeTruthy()
+    expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Copy content' }))).toBe(
+      true
+    )
     fireEvent.click(within(menu).getByRole('menuitem', { name: /^Share$/ }))
     const shareMenu = screen.getByRole('menu', { name: 'Share options for diagram.png' })
-    expect(within(shareMenu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
-    expect(within(shareMenu).getByRole('menuitem', { name: 'Copy file ID' })).toBeTruthy()
+    expect(
+      within(shareMenu)
+        .getAllByRole('menuitem')
+        .map(item => item.textContent)
+    ).toEqual(['Share', 'Copy link'])
   })
 
   it('keeps file actions beside the filename and restores the navbar controls', async () => {
@@ -993,7 +999,7 @@ describe('FilePreviewPage', () => {
     ).toEqual(['Share', 'Rename', 'Move to', 'Download', 'Delete'])
   })
 
-  it('uses the shareable link, canonical ID, and preview copy semantics from the filename menu', async () => {
+  it('uses the shareable link and preview copy semantics from the filename menu', async () => {
     const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
     const markdown = '# Hello\n\nText to copy.'
     const copyDeepLink = vi.fn(async () => ({
@@ -1030,15 +1036,14 @@ describe('FilePreviewPage', () => {
 
     await screen.findByRole('heading', { name: 'Hello' })
     clickPreviewAction('Résumé # ? %.md', 'Copy link')
-    clickPreviewAction('Résumé # ? %.md', 'Copy file ID')
     const menu = openPreviewActions('Résumé # ? %.md')
     const copyContent = within(menu).getByRole('menuitem', { name: 'Copy content' })
     await waitFor(() => expect((copyContent as HTMLButtonElement).disabled).toBe(false))
     fireEvent.click(copyContent)
 
     await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(uri))
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(uri))
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(markdown))
+    expect(writeText).not.toHaveBeenCalledWith(uri)
   })
 
   it('copies the loaded image bytes through the filename menu', async () => {
@@ -1227,12 +1232,19 @@ describe('FilePreviewPage', () => {
     titlebarLeadingRoot.remove()
   })
 
-  it('keeps the canonical file ID action available without exposing an unavailable filename', () => {
+  it('keeps Copy link available without exposing an unavailable filename', async () => {
     const uri = 'gfs://main/0123456789abcdef0123456789abcdef'
-    const writeText = vi.fn(async () => undefined)
-    Object.defineProperty(navigator, 'clipboard', {
+    const copyDeepLink = vi.fn(async () => ({ url: 'https://profile.example/drive/shared' }))
+    Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { writeText },
+      value: {
+        gfs: {
+          copyDeepLink,
+          downloadPreview: vi.fn(async () => ({ bytes: new Uint8Array([1]).buffer })),
+          resolve: vi.fn(resolvePreviewResource),
+          affordances: vi.fn(async () => activeAffordances),
+        },
+      },
     })
     hookMock.useGfsBrowserController.mockReturnValue(controller())
 
@@ -1250,10 +1262,21 @@ describe('FilePreviewPage', () => {
     expect(screen.queryByText('secret.png')).toBeNull()
     expect(screen.getByRole('button', { name: 'Options for unavailable file' })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Options for unavailable file' }))
+    // Nothing is known about an unavailable file: its own actions stay out.
+    expect(
+      within(screen.getByRole('menu', { name: 'Actions for unavailable file' }))
+        .getAllByRole('menuitem')
+        .map(item => item.textContent)
+    ).toEqual(['Share'])
     fireEvent.click(screen.getByRole('menuitem', { name: 'Share' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy file ID' }))
+    expect(
+      within(screen.getByRole('menu', { name: 'Share options for unavailable file' }))
+        .getAllByRole('menuitem')
+        .map(item => item.textContent)
+    ).toEqual(['Copy link'])
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy link' }))
 
-    expect(writeText).toHaveBeenCalledWith(uri)
+    await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(uri))
   })
 
   // R-4 (spec 18 §3.B.5): the preview tab must NOT close when access is revoked;

@@ -51,7 +51,9 @@ vi.mock('../SidebarNav/FileExplorerTree', () => ({
     const actions = buildGfsResourceActions({
       kind: 'file',
       uri: 'gfs://main/0123456789abcdef0123456789abcdef',
-      handlers: { share: vi.fn(), 'copy-link': vi.fn(), 'copy-route': vi.fn(), rename: vi.fn() },
+      moveApplicable: true,
+      previewable: true,
+      handlers: { share: vi.fn(), 'copy-link': vi.fn(), rename: vi.fn() },
       canShare: true,
       canRename: true,
     })
@@ -195,13 +197,13 @@ describe('anchored GfsResourceMenu inside the compact sidebar drawer', () => {
     expect(drawerOpen()).toBe(false)
   })
 
-  it('keeps Escape for the open menu when a click on an inert spot drops focus to body', () => {
+  it('keeps Escape for the open menu when focus drops from a greyed-out item to body', () => {
     renderDrawerWithTree()
     openMenu()
-    const rename = screen.getByRole('menuitem', { name: 'Rename' }) as HTMLButtonElement
-    expect(rename.disabled).toBe(true)
-    // A click on a disabled item or the panel padding blurs the focused item
-    // in a browser; jsdom does not move focus on click.
+    const rename = screen.getByRole('menuitem', { name: 'Rename' })
+    expect(rename.getAttribute('aria-disabled')).toBe('true')
+    // A click on the panel padding blurs the focused item in a browser; jsdom
+    // does not move focus on click.
     fireEvent.click(rename)
     ;(document.activeElement as HTMLElement).blur()
     expect(document.activeElement).toBe(document.body)

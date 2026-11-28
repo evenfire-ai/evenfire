@@ -15192,6 +15192,14 @@ pre {
   pointer-events: auto;
 }
 
+/* The reveal rule above outranks the primitive's :disabled dimming, so a
+   disabled inline icon would show at full strength. Pointer events stay on
+   so its tooltip explains why it is unavailable. */
+.da-gfs-drive__grid .da-grid__row:hover .da-gfs-list__actions > .ui-icon-button:disabled,
+.da-gfs-drive__grid .da-grid__row:focus-within .da-gfs-list__actions > .ui-icon-button:disabled {
+  opacity: 0.5;
+}
+
 .da-gfs-list__rid {
   max-width: 8rem;
   overflow: hidden;
@@ -15947,12 +15955,13 @@ pre {
      Access-row menus inside a Share dialog mount in the dialog instead: at
      body they would tie the window-level Share modal's layer. */
   z-index: calc(var(--layer-dropdown) + 1100);
-  width: min(360px, calc(100vw - (var(--space-4) * 2)));
+  min-width: 200px;
+  max-width: min(280px, calc(100vw - (var(--space-4) * 2)));
   max-height: calc(100vh - (var(--space-4) * 2));
   display: grid;
   gap: 0;
   overflow-y: auto;
-  padding: var(--space-1-5);
+  padding: var(--space-1);
   border: 1px solid rgba(var(--edge-rgb), 0.46);
   border-radius: var(--radius-md);
   background: var(--bg-elev-2);
@@ -15963,12 +15972,13 @@ pre {
 .da-gfs-resource-menu__submenu {
   position: fixed;
   z-index: calc(var(--layer-dropdown) + 1101);
-  width: min(240px, calc(100vw - (var(--space-4) * 2)));
+  min-width: 180px;
+  max-width: min(240px, calc(100vw - (var(--space-4) * 2)));
   max-height: calc(100vh - (var(--space-4) * 2));
   display: grid;
   gap: 0;
   overflow-y: auto;
-  padding: var(--space-1-5);
+  padding: var(--space-1);
   border: 1px solid rgba(var(--edge-rgb), 0.46);
   border-radius: var(--radius-md);
   background: var(--bg-elev-2);
@@ -15978,19 +15988,51 @@ pre {
 
 .da-gfs-resource-menu__panel .ui-menu-item,
 .da-gfs-resource-menu__submenu .ui-menu-item {
-  min-height: 44px;
-  padding: 0 var(--space-2-5);
-  gap: var(--space-2);
   border-radius: calc(var(--radius-sm) - 2px);
-  color: var(--text);
-  font-size: var(--font-size-lg);
-  font-weight: var(--font-weight-medium);
-  line-height: var(--line-height-normal);
 }
 
-.da-gfs-resource-menu__panel .ui-menu-item:hover:enabled,
+/* A greyed-out action stays focusable, so it is aria-disabled rather than
+   :disabled; it borrows the disabled look and gets no hover. Only
+   its content is dimmed: dimming the button would also halve its keyboard
+   focus ring and focus background. */
+.da-gfs-resource-menu__panel .ui-menu-item[aria-disabled='true'],
+.da-gfs-resource-menu__submenu .ui-menu-item[aria-disabled='true'] {
+  cursor: not-allowed;
+}
+
+.da-gfs-resource-menu__panel
+  .ui-menu-item[aria-disabled='true']
+  > :is(.ui-menu-item__icon, .ui-menu-item__label, .ui-menu-item__trailing),
+.da-gfs-resource-menu__submenu
+  .ui-menu-item[aria-disabled='true']
+  > :is(.ui-menu-item__icon, .ui-menu-item__label, .ui-menu-item__trailing) {
+  opacity: 0.5;
+}
+
+/* A grey item is still :enabled, so the primitive's hover would reach it and
+   lift its muted text; the keyboard focus background is kept while the pointer
+   rests on it too. */
+.da-gfs-resource-menu__panel .ui-menu-item[aria-disabled='true']:hover:not(:focus-visible),
+.da-gfs-resource-menu__submenu .ui-menu-item[aria-disabled='true']:hover:not(:focus-visible) {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+/* A grey Delete keeps its red label under the pointer and under keyboard
+   focus, where it gets the neutral focus background: the danger tint is
+   reserved for a Delete that can run. */
+.da-gfs-resource-menu__panel .ui-menu-item--danger[aria-disabled='true']:hover:not(:focus-visible),
+.da-gfs-resource-menu__panel .ui-menu-item--danger[aria-disabled='true']:focus-visible,
+.da-gfs-resource-menu__submenu
+  .ui-menu-item--danger[aria-disabled='true']:hover:not(:focus-visible),
+.da-gfs-resource-menu__submenu .ui-menu-item--danger[aria-disabled='true']:focus-visible {
+  color: var(--danger);
+}
+
+.da-gfs-resource-menu__panel .ui-menu-item:hover:enabled:where(:not([aria-disabled='true'])),
 .da-gfs-resource-menu__panel .ui-menu-item:focus-visible,
-.da-gfs-resource-menu__submenu .ui-menu-item:hover:enabled,
+.da-gfs-resource-menu__submenu .ui-menu-item:hover:enabled:where(:not([aria-disabled='true'])),
 .da-gfs-resource-menu__submenu .ui-menu-item:focus-visible {
   border-color: transparent;
   background: var(--surface-hover);
@@ -15999,28 +16041,28 @@ pre {
 
 .da-gfs-resource-menu__panel .ui-menu-item__icon,
 .da-gfs-resource-menu__submenu .ui-menu-item__icon {
-  width: 24px;
-  height: 24px;
-  flex: 0 0 24px;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
   color: var(--text-dim);
 }
 
 .da-gfs-resource-menu__panel .ui-menu-item__icon svg,
 .da-gfs-resource-menu__submenu .ui-menu-item__icon svg {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
 }
 
 .da-gfs-resource-menu__panel .ui-menu-item__trailing {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   margin-left: auto;
   color: var(--text-dim);
 }
 
 .da-gfs-resource-menu__panel .ui-menu-item__trailing svg {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
 }
 
 .da-gfs-resource-menu__panel .ui-menu-item--danger,
@@ -16028,10 +16070,14 @@ pre {
   color: var(--danger);
 }
 
-.da-gfs-resource-menu__panel .ui-menu-item--danger:hover:enabled,
-.da-gfs-resource-menu__panel .ui-menu-item--danger:focus-visible,
-.da-gfs-resource-menu__submenu .ui-menu-item--danger:hover:enabled,
-.da-gfs-resource-menu__submenu .ui-menu-item--danger:focus-visible {
+.da-gfs-resource-menu__panel
+  .ui-menu-item--danger:hover:enabled:where(:not([aria-disabled='true'])),
+.da-gfs-resource-menu__panel
+  .ui-menu-item--danger:focus-visible:where(:not([aria-disabled='true'])),
+.da-gfs-resource-menu__submenu
+  .ui-menu-item--danger:hover:enabled:where(:not([aria-disabled='true'])),
+.da-gfs-resource-menu__submenu
+  .ui-menu-item--danger:focus-visible:where(:not([aria-disabled='true'])) {
   background: rgba(var(--danger-rgb), 0.12);
   color: var(--danger);
 }
@@ -17361,10 +17407,6 @@ pre {
 .da-gfs-access-row-menu {
   display: inline-flex;
   flex: 0 0 auto;
-}
-
-.da-gfs-access-row-menu__panel.da-gfs-resource-menu__panel {
-  width: min(184px, calc(100vw - (var(--space-4) * 2)));
 }
 
 @media (max-width: 940px) {

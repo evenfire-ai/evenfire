@@ -12,8 +12,9 @@ import {
   isGfsSessionGeneration,
 } from '@hooks/domain/queryKeys'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
+import { filePreviewActionOptions } from '@lib/gfsResourceActionSurfaces'
 import { buildGfsResourceActions, getGfsMenuActions } from '@lib/gfsResourceActions'
-import { copyGfsDeepLink, copyGfsResourceId } from '@lib/gfsResourceClipboard'
+import { copyGfsDeepLink } from '@lib/gfsResourceClipboard'
 import type { FilePreviewPageProps } from './FilePreviewPage.types'
 import { useFilePreviewResourceActions } from './useFilePreviewResourceActions'
 
@@ -103,13 +104,14 @@ export function FilePreviewPage({
     [ctrl.handleAuthorityFailure, capturedSessionGeneration, capturedSessionScope]
   )
 
+  const previewCanResolve = !denied && !unavailable && !accessRevoked && !ctrl.authorityPending
   const previewResourceActions = useFilePreviewResourceActions({
     gfsUri,
     fileName,
     sessionScope: ctrl.sessionScope,
     sessionGeneration: ctrl.sessionGeneration,
     principalScope: ctrl.principalScope,
-    canResolve: !denied && !unavailable && !accessRevoked && !ctrl.authorityPending,
+    canResolve: previewCanResolve,
     onAuthorityFailure: handlePreviewAuthorityFailure,
     onDeleted: () => setDenied('The file was deleted.'),
     onRenameCommitted,
@@ -229,14 +231,6 @@ export function FilePreviewPage({
     [gfsUri, pushToast]
   )
 
-  const handleCopyRoute = useCallback(
-    () =>
-      copyGfsResourceId(gfsUri, 'file', pushToast, {
-        formatError: error => `Could not copy the file ID: ${toMessage(error)}`,
-      }),
-    [gfsUri, pushToast]
-  )
-
   const handleCopyContent = useCallback(async () => {
     const copy = copyContentRef.current
     if (!copy) return
@@ -252,32 +246,31 @@ export function FilePreviewPage({
     setCopyContentReady(Boolean(copy))
   }, [])
 
-  const resourceActions = buildGfsResourceActions({
-    kind: 'file',
-    uri: gfsUri,
-    handlers: {
-      refresh: !denied && !unavailable && !accessRevoked ? () => void handleRefresh() : undefined,
-      'copy-link': () => void handleCopyLink(),
-      'copy-route': () => void handleCopyRoute(),
-      'open-route': onOpenRoute,
-      'copy-content':
-        !denied &&
-        !unavailable &&
-        !accessRevoked &&
-        (fileKind === 'image' || fileKind === 'markdown')
-          ? () => void handleCopyContent()
-          : undefined,
-      ...previewResourceActions.handlers,
-    },
-    canShare: previewResourceActions.canShare,
-    canRename: previewResourceActions.canRename,
-    canMove: previewResourceActions.canMove,
-    canDownload: previewResourceActions.canDownload,
-    canDelete: previewResourceActions.canDelete,
-    mutating: previewResourceActions.mutating,
-    canCopyContent: copyContentReady,
-    refreshing,
-  })
+  const resourceActions = buildGfsResourceActions(
+    filePreviewActionOptions({
+      uri: gfsUri,
+      accessBlocked: Boolean(denied || unavailable || accessRevoked),
+      canResolve: previewCanResolve,
+      resourceKind: previewResourceActions.resourceKind,
+      parentResourceId: previewResourceActions.parentResourceId,
+      copyContentSupported: fileKind === 'image' || fileKind === 'markdown',
+      copyContentReady,
+      canShare: previewResourceActions.canShare,
+      canRename: previewResourceActions.canRename,
+      canMove: previewResourceActions.canMove,
+      canDownload: previewResourceActions.canDownload,
+      canDelete: previewResourceActions.canDelete,
+      mutating: previewResourceActions.mutating,
+      refreshing,
+      handlers: {
+        refresh: () => void handleRefresh(),
+        'copy-link': () => void handleCopyLink(),
+        'open-route': onOpenRoute,
+        'copy-content': () => void handleCopyContent(),
+        ...previewResourceActions.handlers,
+      },
+    })
+  )
   const menuResourceName = denied || unavailable || accessRevoked ? 'unavailable file' : fileName
   const fileActionsMenu = (
     <GfsResourceMenu actions={getGfsMenuActions(resourceActions)} resourceName={menuResourceName} />

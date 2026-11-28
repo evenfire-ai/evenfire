@@ -28,6 +28,7 @@ import {
 import { GfsWatchEventSource, mainDriveKey } from '@/gfs/__fixtures__/gfsWatchEvents'
 import { GfsActionHost } from '..'
 import { delegationAffordances } from '../../../../../src/gfs/delegation.js'
+import { isMenuItemEnabled } from '../../../test/gfsMenuItemState'
 import { useGfsActionHost } from '../context'
 import type { GfsActionHostContextValue, GfsHostActionTarget } from '../types'
 
@@ -357,26 +358,22 @@ describe('GfsActionHost — opening an action', () => {
 })
 
 describe('GfsActionHost — copy', () => {
-  afterEach(() => {
-    delete (navigator as { clipboard?: unknown }).clipboard
-  })
-
-  function deferClipboard() {
-    const written = deferred<void>()
-    const writeText = vi.fn(() => written.promise)
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
-    return { written, writeText }
+  function deferDeepLink() {
+    const copied = deferred<{ url: string }>()
+    const copyDeepLink = vi.fn(() => copied.promise)
+    ;(window.clerum.gfs as { copyDeepLink?: unknown }).copyDeepLink = copyDeepLink
+    return { copied, copyDeepLink }
   }
 
   it('a copy that lands after a session switch shows no toast in the new session', async () => {
     const h = await harness()
-    const { written, writeText } = deferClipboard()
+    const { copied, copyDeepLink } = deferDeepLink()
 
-    h.open(await listedRow('file-t', 'notes.txt', 'file'), 'copy-route')
-    expect(writeText).toHaveBeenCalledWith('gfs://main/file-t')
+    h.open(await listedRow('file-t', 'notes.txt', 'file'), 'copy-link')
+    expect(copyDeepLink).toHaveBeenCalledWith('gfs://main/file-t')
     h.main.generation = 2
     h.publish(2)
-    await act(async () => written.resolve())
+    await act(async () => copied.resolve({ url: 'https://example.test/l' }))
     await act(async () => {})
 
     expect(h.toasts).toEqual([])
@@ -384,12 +381,12 @@ describe('GfsActionHost — copy', () => {
 
   it('(control) the same copy in the same session toasts it', async () => {
     const h = await harness()
-    const { written } = deferClipboard()
+    const { copied } = deferDeepLink()
 
-    h.open(await listedRow('file-t', 'notes.txt', 'file'), 'copy-route')
-    await act(async () => written.resolve())
+    h.open(await listedRow('file-t', 'notes.txt', 'file'), 'copy-link')
+    await act(async () => copied.resolve({ url: 'https://example.test/l' }))
 
-    await waitFor(() => expect(toastMessages(h)).toEqual(['File ID copied']))
+    await waitFor(() => expect(toastMessages(h)).toEqual(['Shareable EvenDrive link copied']))
   })
 })
 
@@ -1403,7 +1400,9 @@ describe('GfsActionHost — Share role dropdown layering', () => {
     const menu = await screen.findByRole('menu', { name: 'Actions for chatllm' })
     expect(menu.parentElement).not.toBe(document.body)
     expect(share.contains(menu)).toBe(true)
-    expect(within(menu).getByRole('menuitem', { name: 'Remove access' })).toBeTruthy()
+    expect(isMenuItemEnabled(within(menu).getByRole('menuitem', { name: 'Remove access' }))).toBe(
+      true
+    )
 
     fireEvent.keyDown(document, { key: 'Escape' })
     await waitFor(() =>

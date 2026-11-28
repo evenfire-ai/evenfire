@@ -31,6 +31,7 @@ import {
   installChromiumFocusShim,
 } from '../../__tests__/__fixtures__/chromiumFocusShim'
 import { createPointerDriver } from '../../__tests__/__fixtures__/pointerDriver'
+import { expectUnavailable, isMenuItemEnabled } from '../../test/gfsMenuItemState'
 import { FilesPage } from '../FilesPage'
 
 const hookMock = vi.hoisted(() => ({
@@ -312,7 +313,7 @@ async function chooseResourceAction(resourceName: string, actionName: string) {
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: `Options for ${resourceName}` }))
   })
-  if (['Copy link', 'Copy file ID', 'Copy folder ID'].includes(actionName)) {
+  if (actionName === 'Copy link') {
     await act(async () => {
       fireEvent.click(screen.getByRole('menuitem', { name: /^Share$/ }))
     })
@@ -382,7 +383,7 @@ describe('FilesPage', () => {
     vi.restoreAllMocks()
   })
 
-  it('hides Move for a shared-root row unless its exact source parent can write and delete', async () => {
+  it('greys out Move for a shared-root row unless its exact source parent can write and delete', async () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
       accessibleResources: [
@@ -410,7 +411,7 @@ describe('FilesPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
     })
 
-    expect(screen.queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+    expectUnavailable(screen.getByRole('menuitem', { name: 'Move to' }), "Move isn't available")
   })
 
   it('offers Move when a read-only shared file has source-parent write and delete rights', async () => {
@@ -441,10 +442,10 @@ describe('FilesPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for report.txt' }))
     })
 
-    expect(screen.getByRole('menuitem', { name: 'Move to' })).toBeTruthy()
+    expect(isMenuItemEnabled(screen.getByRole('menuitem', { name: 'Move to' }))).toBe(true)
   })
 
-  it('hides breadcrumb Move when the current resource parent lacks delete authority', async () => {
+  it('greys out breadcrumb Move when the current resource parent lacks delete authority', async () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
       current: {
@@ -477,7 +478,7 @@ describe('FilesPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for Current folder' }))
     })
 
-    expect(screen.queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+    expectUnavailable(screen.getByRole('menuitem', { name: 'Move to' }), "Move isn't available")
   })
 
   it('renders unavailable automatic discovery as an info notice, not a technical error', () => {
@@ -719,7 +720,7 @@ describe('FilesPage', () => {
     ])
   })
 
-  it('shows permission-backed share and rename actions for folder and file children', () => {
+  it('shows permission-backed share and rename actions for folder and file children', async () => {
     const folder = {
       resourceId: 'folder-child',
       rid: 'folder-child',
@@ -807,9 +808,152 @@ describe('FilesPage', () => {
     expect(within(fileRow!).getByRole('button', { name: 'Download report.txt' })).toBeTruthy()
     expect(within(fileRow!).getByRole('button', { name: 'Rename report.txt' })).toBeTruthy()
 
-    expect(within(readonlyRow!).queryByRole('button', { name: 'Share readonly.txt' })).toBeNull()
-    expect(within(readonlyRow!).queryByRole('button', { name: 'Rename readonly.txt' })).toBeNull()
+    for (const [row, name] of [
+      [folderRow!, 'Assets'],
+      [fileRow!, 'report.txt'],
+    ] as const) {
+      expect(
+        (within(row).getByRole('button', { name: `Share ${name}` }) as HTMLButtonElement).disabled
+      ).toBe(false)
+      expect(
+        (within(row).getByRole('button', { name: `Rename ${name}` }) as HTMLButtonElement).disabled
+      ).toBe(false)
+    }
+
+    // Without manage_acl/write the icons stay, greyed out with the reason as
+    // their tooltip, instead of disappearing.
+    const readonlyShare = within(readonlyRow!).getByRole('button', {
+      name: 'Share readonly.txt',
+    }) as HTMLButtonElement
+    const readonlyRename = within(readonlyRow!).getByRole('button', {
+      name: 'Rename readonly.txt',
+    }) as HTMLButtonElement
+    expect(readonlyShare.disabled).toBe(true)
+    expect(readonlyShare.getAttribute('title')).toBe("Share isn't available")
+    expect(readonlyShare.getAttribute('aria-label')).toBe('Share readonly.txt')
+    expect(readonlyRename.disabled).toBe(true)
+    expect(readonlyRename.getAttribute('title')).toBe("Rename isn't available")
+    expect(readonlyRename.getAttribute('aria-label')).toBe('Rename readonly.txt')
+    expect(
+      (
+        within(readonlyRow!).getByRole('button', {
+          name: 'Download readonly.txt',
+        }) as HTMLButtonElement
+      ).disabled
+    ).toBe(false)
+
+    // Clicking the readonly icons proves nothing: React never dispatches a
+    // click to a natively disabled button, and `disabled` is pinned above.
+    // The enabled twins show the same icons drive their action, so only
+    // `disabled` withholds it on the readonly row. Share uses the folder twin:
+    // a file's Share first navigates to the file, which this controller mock
+    // does not perform.
+    fireEvent.click(within(fileRow!).getByRole('button', { name: 'Rename report.txt' }))
+    const renameForm = await screen.findByRole('form', { name: 'Rename resource' })
+    expect(fileRow!.contains(renameForm)).toBe(true)
+    fireEvent.click(within(renameForm).getByRole('button', { name: 'Cancel rename' }))
+    await waitFor(() => expect(screen.queryByRole('form', { name: 'Rename resource' })).toBeNull())
+    fireEvent.click(within(folderRow!).getByRole('button', { name: 'Share Assets' }))
+    expect(await screen.findByRole('dialog', { name: 'Share folder Assets' })).toBeTruthy()
   })
+
+  type InlineIconCase = {
+    kind: 'directory' | 'file'
+    readable: boolean
+    mutating: boolean
+    held: string[]
+  }
+  const INLINE_ICON_BITS = ['read', 'write', 'delete', 'manage_acl'] as const
+  const inlineIconCases: InlineIconCase[] = (['directory', 'file'] as const).flatMap(kind =>
+    [true, false].flatMap(readable =>
+      [false, true].flatMap(mutating =>
+        Array.from({ length: 1 << INLINE_ICON_BITS.length }, (_, mask) => ({
+          kind,
+          readable,
+          mutating,
+          held: INLINE_ICON_BITS.filter((_, bit) => mask & (1 << bit)),
+        }))
+      )
+    )
+  )
+
+  it.each(inlineIconCases)(
+    'keeps each inline icon in step with its row menu item ($kind, readable=$readable, mutating=$mutating, held=$held)',
+    async ({ kind, readable, mutating, held }) => {
+      const name = kind === 'directory' ? 'Assets' : 'report.txt'
+      hookMock.useGfsBrowserController.mockReturnValue({
+        ...baseController(),
+        current: {
+          resourceId: 'parent-1',
+          gfsUri: 'gfs://main/parent-1',
+          name: 'Workspace',
+          kind: 'directory',
+          version: 1,
+          bytes: 0,
+        },
+        items: [
+          {
+            resourceId: 'child-1',
+            rid: 'child-1',
+            gfsUri: 'gfs://main/child-1',
+            drive: 'main',
+            parentResourceId: 'parent-1',
+            name,
+            kind,
+            path: `/Workspace/${name}`,
+            version: 2,
+            bytes: kind === 'file' ? 12 : 0,
+            readable,
+          },
+        ],
+        rowAffordancesByResourceId: {
+          'child-1': delegationAffordances(new Set(held), false),
+        },
+        mutating,
+      })
+
+      renderFilesPage()
+      const row = screen.getByRole('button', {
+        name: readable ? `Open ${name}` : `${name} (no read access)`,
+      })
+
+      const inline = {
+        share: within(row).queryByRole('button', { name: `Share ${name}` }),
+        download: within(row).queryByRole('button', { name: `Download ${name}` }),
+        rename: within(row).queryByRole('button', { name: `Rename ${name}` }),
+      }
+
+      await act(async () => {
+        fireEvent.click(within(row).getByRole('button', { name: `Options for ${name}` }))
+      })
+      const menu = screen.getByRole('menu', { name: `Actions for ${name}` })
+      const menuDownload = within(menu).queryByRole('menuitem', { name: 'Download' })
+      const menuRename = within(menu).queryByRole('menuitem', { name: 'Rename' })
+      await act(async () => {
+        fireEvent.click(within(menu).getByRole('menuitem', { name: /^Share$/ }))
+      })
+      const shareMenu = screen.getByRole('menu', { name: `Share options for ${name}` })
+      const menuShare = within(shareMenu).queryByRole('menuitem', { name: 'Share' })
+
+      for (const [icon, item] of [
+        [inline.share, menuShare],
+        [inline.download, menuDownload],
+        [inline.rename, menuRename],
+      ] as const) {
+        expect(icon === null).toBe(item === null)
+        if (!icon || !item) continue
+        const enabled = isMenuItemEnabled(item)
+        expect((icon as HTMLButtonElement).disabled).toBe(!enabled)
+        // An item held back only by an in-flight change carries no reason; the
+        // icon then keeps its label as the tooltip.
+        const reason = item.getAttribute('title')
+        expect(icon.getAttribute('title')).toBe(reason ?? icon.getAttribute('aria-label'))
+      }
+      expect(inline.share).not.toBeNull()
+      expect(inline.rename).not.toBeNull()
+      expect(inline.download === null).toBe(kind === 'directory')
+    }
+  )
 
   it('orders directories before files, both alphabetically by name', async () => {
     hookMock.useGfsBrowserController.mockReturnValue({
@@ -962,7 +1106,7 @@ describe('FilesPage', () => {
     expect(openChild).not.toHaveBeenCalled()
   })
 
-  it('omits Preview and Download from the ⋯ menu of an unreadable file (R1-H1)', async () => {
+  it('greys out Preview and Download in the ⋯ menu of an unreadable file, naming the read access (R1-H1)', async () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
       current: {
@@ -1010,16 +1154,129 @@ describe('FilesPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for locked.md' }))
     })
     const lockedMenu = screen.getByRole('menu', { name: 'Actions for locked.md' })
-    expect(within(lockedMenu).queryByRole('menuitem', { name: 'Preview' })).toBeNull()
-    expect(within(lockedMenu).queryByRole('menuitem', { name: 'Download' })).toBeNull()
+    expectUnavailable(
+      within(lockedMenu).getByRole('menuitem', { name: 'Preview' }),
+      "You don't have read access to this file"
+    )
+    expectUnavailable(
+      within(lockedMenu).getByRole('menuitem', { name: 'Download' }),
+      "You don't have read access to this file"
+    )
 
     // A readable, previewable file still offers both.
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for open.md' }))
     })
     const openMenu = screen.getByRole('menu', { name: 'Actions for open.md' })
-    expect(within(openMenu).getByRole('menuitem', { name: 'Preview' })).toBeTruthy()
-    expect(within(openMenu).getByRole('menuitem', { name: 'Download' })).toBeTruthy()
+    expect(isMenuItemEnabled(within(openMenu).getByRole('menuitem', { name: 'Preview' }))).toBe(
+      true
+    )
+    expect(isMenuItemEnabled(within(openMenu).getByRole('menuitem', { name: 'Download' }))).toBe(
+      true
+    )
+  })
+
+  it('offers Preview in a row menu only for a file whose format has a preview', async () => {
+    const { items } = await listChildrenPage([
+      childView('file-bin', 'archive.bin', 'file', { parentResourceId: 'parent-1' }),
+      childView('file-md', 'notes.md', 'file', { parentResourceId: 'parent-1' }),
+    ])
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: await resolveResource(resolvedDirectory('parent-1', 'Workspace')),
+      items,
+    })
+
+    renderFilesPage()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for archive.bin' }))
+    })
+    const binMenu = screen.getByRole('menu', { name: 'Actions for archive.bin' })
+    // Witness: the readable row's read action is live; only Preview does not apply.
+    expect(isMenuItemEnabled(within(binMenu).getByRole('menuitem', { name: 'Download' }))).toBe(
+      true
+    )
+    expect(within(binMenu).queryByRole('menuitem', { name: 'Preview' })).toBeNull()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for notes.md' }))
+    })
+    const mdMenu = screen.getByRole('menu', { name: 'Actions for notes.md' })
+    expect(isMenuItemEnabled(within(mdMenu).getByRole('menuitem', { name: 'Preview' }))).toBe(true)
+  })
+
+  it('leaves breadcrumb Move out of the menu when the current folder has no parent', async () => {
+    const current = await resolveResource(
+      resolvedDirectory('0123456789abcdef0123456789abcdef', 'Root folder', {
+        parentResourceId: null,
+      })
+    )
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current,
+      crumbs: [current],
+      affordances: delegationAffordances(new Set(['read', 'write', 'delete']), false),
+    })
+
+    renderFilesPage()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Root folder' }))
+    })
+
+    const menu = screen.getByRole('menu', { name: 'Actions for Root folder' })
+    // Witness: the current folder's own actions are offered.
+    expect(within(menu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+    expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
+  })
+
+  it('offers Preview on the open file menu only when its format has a preview', async () => {
+    const renderCurrentFile = async (name: string) => {
+      const current = await resolveResource(
+        resolvedFile('abcdefabcdefabcdefabcdefabcdefab', name, { parentResourceId: 'parent-1' })
+      )
+      hookMock.useGfsBrowserController.mockReturnValue({
+        ...baseController(),
+        current,
+        crumbs: [current],
+      })
+      const view = renderFilesPage()
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: `Options for ${name}` }))
+      })
+      return { menu: screen.getByRole('menu', { name: `Actions for ${name}` }), view }
+    }
+
+    const bin = await renderCurrentFile('archive.bin')
+    // Witness: the open file's read action is offered; only Preview does not apply.
+    expect(within(bin.menu).getByRole('menuitem', { name: 'Download' })).toBeTruthy()
+    expect(within(bin.menu).queryByRole('menuitem', { name: 'Preview' })).toBeNull()
+    bin.view.unmount()
+
+    const md = await renderCurrentFile('notes.md')
+    expect(isMenuItemEnabled(within(md.menu).getByRole('menuitem', { name: 'Preview' }))).toBe(true)
+  })
+
+  it('leaves Move out of the row menu of a shared root resource', async () => {
+    const { items } = await listAccessiblePage([
+      accessibleResource('root-file', 'root.txt', 'file', {
+        permissions: ['read', 'write', 'delete'],
+      }),
+    ])
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      accessibleResources: items,
+    })
+
+    renderFilesPage()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for root.txt' }))
+    })
+
+    const menu = screen.getByRole('menu', { name: 'Actions for root.txt' })
+    // Witness: the root row's own actions are offered.
+    expect(within(menu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
+    expect(within(menu).queryByRole('menuitem', { name: 'Move to' })).toBeNull()
   })
 
   it('uses a size column and keeps folder rows focused on the icon and name', () => {
@@ -1141,15 +1398,10 @@ describe('FilesPage', () => {
     const copyDeepLink = vi.fn(async () => ({
       url: buildGfsResourceWebLink('https://profile.example', gfsUri),
     }))
-    const writeText = vi.fn(async () => undefined)
     const refreshCurrentLocation = vi.fn(async () => true)
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: { gfs: { copyDeepLink, getPathForFile: vi.fn((file: File) => `/tmp/${file.name}`) } },
-    })
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText },
     })
     const createFileFromPath = vi.fn(async () => undefined)
     hookMock.useGfsBrowserController.mockReturnValue({
@@ -1171,8 +1423,6 @@ describe('FilesPage', () => {
 
     await chooseResourceAction(folderName, 'Copy link')
     await waitFor(() => expect(copyDeepLink).toHaveBeenCalledWith(gfsUri))
-    await chooseResourceAction(folderName, 'Copy folder ID')
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(gfsUri))
 
     fireEvent.click(within(toolbar).getByRole('button', { name: 'Open link' }))
     expect(await screen.findByRole('dialog', { name: 'Open from link' })).toBeTruthy()
@@ -1233,7 +1483,7 @@ describe('FilesPage', () => {
     }
   })
 
-  it('hides upload actions without write access but keeps the shared chooser mounted', () => {
+  it('greys out upload actions without write access but keeps the shared chooser mounted', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
       current: {
@@ -1254,8 +1504,14 @@ describe('FilesPage', () => {
     renderFilesPage()
 
     fireEvent.click(screen.getByRole('button', { name: 'Options for Restricted folder' }))
-    expect(screen.queryByRole('menuitem', { name: 'New folder' })).toBeNull()
-    expect(screen.queryByRole('menuitem', { name: 'Upload file' })).toBeNull()
+    expectUnavailable(
+      screen.getByRole('menuitem', { name: 'New folder' }),
+      "New folder isn't available"
+    )
+    expectUnavailable(
+      screen.getByRole('menuitem', { name: 'Upload file' }),
+      "Upload file isn't available"
+    )
     expect(screen.getByLabelText('Upload file')).toBeTruthy()
     expect(uploadInput().tabIndex).toBe(-1)
     expect(uploadInput().getAttribute('aria-hidden')).toBe('true')
@@ -2040,7 +2296,7 @@ describe('FilesPage', () => {
     queryClient.clear()
   })
 
-  it('hides the Manage menu entry on rows the caller cannot manage (read-only access)', async () => {
+  it('greys out the Manage menu entry on rows the caller cannot manage (read-only access)', async () => {
     const child = {
       resourceId: 'child-1',
       rid: 'child-1',
@@ -2066,7 +2322,7 @@ describe('FilesPage', () => {
       items: [child],
     }
 
-    // Read-only row: the ⋯ menu must not offer Manage — the ACL modal would
+    // Read-only row: the ⋯ menu must not enable Manage — the ACL modal would
     // only 403 on open (view-ACL = manage-ACL server-side).
     hookMock.useGfsBrowserController.mockReturnValue({
       ...controller,
@@ -2087,14 +2343,23 @@ describe('FilesPage', () => {
     const readOnlyShareMenu = screen.getByRole('menu', {
       name: 'Share options for notes.txt',
     })
-    expect(within(readOnlyShareMenu).queryByRole('menuitem', { name: 'Share' })).toBeNull()
-    expect(within(readOnlyShareMenu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
+    expectUnavailable(
+      within(readOnlyShareMenu).getByRole('menuitem', { name: 'Share' }),
+      "Share isn't available"
+    )
+    // The inert item keeps the flyout open and opens no Manage dialog.
+    fireEvent.click(within(readOnlyShareMenu).getByRole('menuitem', { name: 'Share' }))
+    expect(screen.getByRole('menu', { name: 'Share options for notes.txt' })).toBeTruthy()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(
+      isMenuItemEnabled(within(readOnlyShareMenu).getByRole('menuitem', { name: 'Copy link' }))
+    ).toBe(true)
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
     })
     expect(screen.queryByRole('menu', { name: 'Actions for notes.txt' })).toBeNull()
 
-    // Same row with manage_acl held: the entry appears and opens the modal.
+    // Same row with manage_acl held: the entry is enabled and opens the modal.
     hookMock.useGfsBrowserController.mockReturnValue({
       ...controller,
       rowAffordancesResourceId: 'child-1',
@@ -2123,7 +2388,9 @@ describe('FilesPage', () => {
     const managedShareMenu = await screen.findByRole('menu', {
       name: 'Share options for notes.txt',
     })
-    expect(within(managedShareMenu).getByRole('menuitem', { name: 'Share' })).toBeTruthy()
+    expect(
+      isMenuItemEnabled(within(managedShareMenu).getByRole('menuitem', { name: 'Share' }))
+    ).toBe(true)
     await act(async () => {
       fireEvent.click(within(managedShareMenu).getByRole('menuitem', { name: 'Share' }))
     })
@@ -4928,7 +5195,7 @@ describe('FilesPage', () => {
     expect(listChildren).not.toHaveBeenCalledWith('folder-p', 'main', undefined)
   })
 
-  it('omits Download as zip for a folder the session cannot read', async () => {
+  it('greys out Download as zip for a folder the session cannot read', async () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
       accessibleResources: [
@@ -4956,7 +5223,10 @@ describe('FilesPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for Locked' }))
     })
 
-    expect(screen.queryByRole('menuitem', { name: 'Download as zip' })).toBeNull()
+    expectUnavailable(
+      screen.getByRole('menuitem', { name: 'Download as zip' }),
+      "You don't have read access to this folder"
+    )
   })
 
   it('shows the document icon for txt, md, pdf, doc and docx files instead of the clip', () => {
@@ -5065,7 +5335,7 @@ describe('FilesPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
     })
     expect(setRowAffordancesResourceId).toHaveBeenCalledWith('child-1')
-    expect(screen.queryByRole('menuitem', { name: 'Delete' })).toBeNull()
+    expectUnavailable(screen.getByRole('menuitem', { name: 'Delete' }), "Delete isn't available")
 
     hookMock.useGfsBrowserController.mockReturnValue({
       ...controller,
@@ -6371,8 +6641,8 @@ describe('FilesPage', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for notes.txt' }))
     })
-    // While the row affordances are unresolved, Rename is not offered.
-    expect(screen.queryByRole('menuitem', { name: 'Rename' })).toBeNull()
+    // While the row affordances are unresolved, Rename is offered but inert.
+    expectUnavailable(screen.getByRole('menuitem', { name: 'Rename' }), "Rename isn't available")
 
     hookMock.useGfsBrowserController.mockReturnValue({
       ...controller,
@@ -6454,7 +6724,8 @@ describe('FilesPage', () => {
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for readonly-notes.txt' }))
     })
-    expect(screen.queryByRole('menuitem', { name: 'Delete' })).toBeNull()
+    expectUnavailable(screen.getByRole('menuitem', { name: 'Delete' }), "Delete isn't available")
+    fireEvent.click(screen.getByRole('button', { name: 'Options for readonly-notes.txt' }))
 
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Options for shared-report.txt' }))
