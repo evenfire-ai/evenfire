@@ -1,5 +1,6 @@
 import type { SandboxUiDeepLinkEnvelope } from '@clerum/desktop-app-links'
 import type { GfsResourceDeepLinkEnvelope } from '@clerum/desktop-app-links'
+import type { GfsResourceNavigationRequest } from '@lib/gfsResourceNavigationIntent'
 import type { SandboxUiConversationOrigin } from '@pages/SandboxUiPage.types'
 import type { ActiveSandboxUiApp } from '@/uiTypes'
 
@@ -15,6 +16,19 @@ export type PendingSandboxUiDeepLink = {
   nextRetryAt?: number
   failedMessage?: string
   failedMessageDismissed?: boolean
+}
+
+export type PendingGfsDeepLink = {
+  envelope: GfsResourceDeepLinkEnvelope
+  uri: string
+  receivedIdentity: string | null
+  request: GfsResourceNavigationRequest | null
+}
+
+export type SandboxUiSessionInvalidation = {
+  sessionGeneration: number
+  appDeepLinkMinimumId: number
+  gfsDeepLinkMinimumId: number
 }
 
 /**

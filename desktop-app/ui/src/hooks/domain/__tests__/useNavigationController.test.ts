@@ -58,11 +58,10 @@ describe('useNavigationController — agent-centric navigation (Fase 2)', () => 
     expect(() => act(() => result.current.handleNavSelect(DESKTOP_ROUTES.files))).not.toThrow()
     expect(result.current.activeTab?.kind).toBe('files')
     expect(
-      result.current.beginGfsResourceNavigation(
+      result.current.beginConfirmedGfsResourceNavigation(
         1,
         'gfs://main/0123456789abcdef0123456789abcdef',
-        7,
-        mainNavigationGeneration
+        7
       )
     ).toBeNull()
 
@@ -75,13 +74,11 @@ describe('useNavigationController — agent-centric navigation (Fase 2)', () => 
         },
       },
     })
-    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.chat))
     expect(
-      result.current.beginGfsResourceNavigation(
+      result.current.beginConfirmedGfsResourceNavigation(
         2,
         'gfs://main/abababababababababababababababab',
-        7,
-        mainNavigationGeneration
+        7
       )
     ).not.toBeNull()
   })
@@ -188,7 +185,7 @@ describe('useNavigationController — agent-centric navigation (Fase 2)', () => 
         openFilesTab(state, { id: 'files-owner', path: filesPath, title: 'Reports' })
       )
     )
-    const request = result.current.beginGfsResourceNavigation(1084, linkedUri, 4, 0)
+    const request = result.current.beginConfirmedGfsResourceNavigation(1084, linkedUri, 4)
     expect(request).not.toBeNull()
     if (!request) throw new Error('Expected a current resource-link request')
     expect(request.ownerTabId).toBe('files-owner')
@@ -222,53 +219,12 @@ describe('useNavigationController — agent-centric navigation (Fase 2)', () => 
     const { result } = renderHook(() => useNavigationController())
 
     expect(
-      result.current.beginGfsResourceNavigation(
+      result.current.beginConfirmedGfsResourceNavigation(
         1084,
         'gfs://main/22222222222222222222222222222222',
-        4,
-        0
+        4
       )
     ).toBeNull()
-  })
-
-  it('rejects a superseded link and gives a newer explicit link its own Files destination', () => {
-    const { result } = renderHook(() => useNavigationController())
-    act(() => {
-      result.current.setWorkspaceTabs(state =>
-        openFilesTab(state, { id: 'files-root', path: null, title: 'Existing root' })
-      )
-      result.current.selectWorkspaceTabById('chat-tab-1')
-    })
-
-    const stale = result.current.beginGfsResourceNavigation(
-      1086,
-      'gfs://main/33333333333333333333333333333333',
-      4,
-      0
-    )
-    expect(stale).toBeNull()
-    expect(result.current.activeTab?.id).toBe('chat-tab-1')
-
-    const current = result.current.beginGfsResourceNavigation(
-      1087,
-      'gfs://main/44444444444444444444444444444444',
-      4,
-      1
-    )
-    expect(current).not.toBeNull()
-    if (!current) throw new Error('Expected a link activated after the latest selection')
-    expect(current.createDestination).toBe(true)
-    expect(current.ownerTabId).not.toBe('files-root')
-    let activated = false
-    act(() => {
-      activated = result.current.activateGfsResourceNavigation(current, 4)
-    })
-    expect(activated).toBe(true)
-    expect(result.current.activeTab?.id).toBe(current.ownerTabId)
-    expect(result.current.workspaceTabs.tabs.filter(tab => tab.kind === 'files')).toHaveLength(2)
-    expect(
-      result.current.workspaceTabs.tabs.find(tab => tab.id === 'files-root')?.files?.path
-    ).toBe(null)
   })
 
   it('never reactivates a link owner after the user selects another tab', () => {
@@ -286,7 +242,7 @@ describe('useNavigationController — agent-centric navigation (Fase 2)', () => 
       result.current.selectWorkspaceTabById('files-a')
     })
 
-    const request = result.current.beginGfsResourceNavigation(1085, uriA, 4, 1)
+    const request = result.current.beginConfirmedGfsResourceNavigation(1085, uriA, 4)
     expect(request).not.toBeNull()
     if (!request) throw new Error('Expected a current resource-link request')
     expect(request.ownerTabId).toBe('files-a')

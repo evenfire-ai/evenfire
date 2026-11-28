@@ -18,7 +18,6 @@ import { useNavigationController } from '../useNavigationController'
 type TestLink = {
   id: number
   uri: string
-  userNavigationGenerationAtActivation: number
 }
 
 type HarnessApi = {
@@ -61,8 +60,7 @@ function produceLink(
 ): TestLink {
   const target = parseGfsResourceDeepLink(buildGfsResourceDeepLink(uri))
   if (!target) throw new Error('The shared producer rejected the canonical GFS URI')
-  const envelope = queue.enqueue(target, activationGeneration)
-  return { ...envelope, userNavigationGenerationAtActivation: activationGeneration }
+  return queue.enqueue(target, activationGeneration)
 }
 
 function tabRoute(tab: ReturnType<typeof activeWorkspaceTab>): string {
@@ -92,12 +90,7 @@ function DeepLinkNavigationHarness({
 
   const deliver = useCallback(
     (link: TestLink) => {
-      const request = nav.beginGfsResourceNavigation(
-        link.id,
-        link.uri,
-        7,
-        link.userNavigationGenerationAtActivation
-      )
+      const request = nav.beginConfirmedGfsResourceNavigation(link.id, link.uri, 7)
       if (!request) {
         onAcknowledge(link.id)
         queue.acknowledge(link.id)
@@ -111,7 +104,12 @@ function DeepLinkNavigationHarness({
       setPendingId(request.id)
       return request
     },
-    [nav.activateGfsResourceNavigation, nav.beginGfsResourceNavigation, onAcknowledge, queue]
+    [
+      nav.activateGfsResourceNavigation,
+      nav.beginConfirmedGfsResourceNavigation,
+      onAcknowledge,
+      queue,
+    ]
   )
 
   const completePreview = useCallback(
@@ -164,53 +162,6 @@ function DeepLinkNavigationHarness({
 }
 
 describe('useNavigationController — GFS activation ordering', () => {
-  it('keeps Chat selected when an older link is delivered after an explicit Chat selection', async () => {
-    const generation = installMainNavigationGeneration()
-    const queue = new GfsResourceDeepLinkQueue()
-    const uri = 'gfs://main/abababababababababababababababab'
-    const link = produceLink(uri, queue, generation.current())
-    const initialTabs = selectWorkspaceTab(
-      openFilesTab(createWorkspaceTabsState('chat-tab-1'), {
-        id: 'files-root',
-        path: null,
-        title: 'Files root',
-      }),
-      'chat-tab-1'
-    )
-    let api: HarnessApi | null = null
-    const acknowledge = vi.fn((id: number) => queue.acknowledge(id))
-    render(
-      <DeepLinkNavigationHarness
-        initialTabs={initialTabs}
-        queue={queue}
-        onReady={value => {
-          api = value
-        }}
-        onAcknowledge={acknowledge}
-      />
-    )
-
-    const chatTab = await screen.findByRole('button', { name: 'New chat' })
-    chatTab.focus()
-    fireEvent.click(chatTab)
-    act(() => api?.deliver(link))
-
-    expect(chatTab.getAttribute('aria-pressed')).toBe('true')
-    expect(screen.getByTestId('active-surface').getAttribute('data-tab-id')).toBe('chat-tab-1')
-    expect(screen.getByTestId('active-surface').getAttribute('data-route')).toBe('chat')
-    expect(
-      screen.getByRole('button', { name: 'Files root' }).getAttribute('data-saved-route')
-    ).toBe('root')
-    expect(screen.getByRole('button', { name: 'Files root' }).getAttribute('aria-pressed')).toBe(
-      'false'
-    )
-    expect(document.activeElement).toBe(chatTab)
-    expect(screen.getByTestId('active-surface').getAttribute('data-pending-request-id')).toBe('')
-    expect(queue.list()).toEqual([])
-    expect(acknowledge).toHaveBeenCalledTimes(1)
-    expect(acknowledge).toHaveBeenCalledWith(link.id)
-  })
-
   it('gives a genuinely newer link a separate Files destination', async () => {
     const generation = installMainNavigationGeneration()
     const queue = new GfsResourceDeepLinkQueue()

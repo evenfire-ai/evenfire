@@ -48,20 +48,6 @@ export function assignGfsResourceNavigationOwner(
   return { ownerTabId: null, createDestination: true }
 }
 
-/** An activation is valid only until the next explicit user navigation. */
-export function isGfsResourceNavigationActivationCurrent(
-  userNavigationGenerationAtActivation: number,
-  currentUserNavigationGeneration: number
-): boolean {
-  return (
-    Number.isSafeInteger(userNavigationGenerationAtActivation) &&
-    userNavigationGenerationAtActivation >= 0 &&
-    Number.isSafeInteger(currentUserNavigationGeneration) &&
-    currentUserNavigationGeneration >= 0 &&
-    userNavigationGenerationAtActivation === currentUserNavigationGeneration
-  )
-}
-
 /** A completion is eligible only for its exact current tab, intent, and principal. */
 export function canCompleteGfsResourceNavigation(
   request: GfsResourceNavigationRequest,

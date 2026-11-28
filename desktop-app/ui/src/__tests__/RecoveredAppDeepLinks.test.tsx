@@ -738,31 +738,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     liveTeamId = targetTeamId
     return true
   })
-  const beginGfsResourceNavigation = vi.fn(
-    (
-      id: number,
-      uri: string,
-      principalGeneration: number,
-      userNavigationGenerationAtActivation: number
-    ): GfsResourceNavigationRequest | null => {
-      if (userNavigationGenerationAtActivation !== testUserNavigationGeneration) return null
-      testNavigationIntentSequence += 1
-      controller.navigationIntentSequence = testNavigationIntentSequence
-      forceControllerRender()
-      const intentSequence = testNavigationIntentSequence
-      const state = controller.workspaceTabs
-      const owner = assignGfsResourceNavigationOwner(state, uri)
-      return {
-        id,
-        uri,
-        ownerTabId: owner.createDestination ? nextWorkspaceTabId() : owner.ownerTabId,
-        createDestination: owner.createDestination,
-        intentSequence,
-        principalGeneration,
-        userNavigationGenerationAtActivation,
-      }
-    }
-  )
   const beginConfirmedGfsResourceNavigation = vi.fn(
     (id: number, uri: string, principalGeneration: number): GfsResourceNavigationRequest => {
       const intentSequence = beginUserNavigationIntent()
@@ -970,7 +945,6 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     isNavigationIntentCurrent,
     captureWorkspaceNavigation,
     restoreWorkspaceNavigation,
-    beginGfsResourceNavigation,
     beginConfirmedGfsResourceNavigation,
     isGfsResourceNavigationCurrent,
     activateGfsResourceNavigation,
