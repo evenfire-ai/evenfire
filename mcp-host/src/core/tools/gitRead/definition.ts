@@ -92,7 +92,7 @@ const GIT_READ_SORTS = [
 export const GIT_READ_DEFINITION = {
   name: GIT_READ_TOOL_NAME,
   description:
-    'Read-only git in a workspace repository (no shell). Content of protected platform paths is never returned. Errors are fixed text.',
+    'Read-only git in a workspace repository (no shell). Content of protected platform paths is never returned. Refusals are fixed text; errors from git are passed through.',
   parameters: {
     type: 'object',
     properties: {

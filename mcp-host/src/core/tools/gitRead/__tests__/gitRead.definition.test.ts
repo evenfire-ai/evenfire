@@ -18,8 +18,16 @@ function category(params: Record<string, unknown>): string | null {
 describe('git_read definition', () => {
   it('fits the 2,048-byte native definition budget', () => {
     const bytes = Buffer.byteLength(JSON.stringify(GIT_READ_DEFINITION), 'utf8')
-    expect(bytes).toBe(1743)
+    expect(bytes).toBe(1781)
     expect(bytes).toBeLessThanOrEqual(2048)
+  })
+
+  it('says refusals are fixed text and git errors pass through', () => {
+    // A bad revision returns git's own stderr, so "errors are fixed text" was false.
+    expect(GIT_READ_DEFINITION.description).toContain(
+      'Refusals are fixed text; errors from git are passed through.'
+    )
+    expect(GIT_READ_DEFINITION.description).not.toContain('Errors are fixed text')
   })
 })
 
