@@ -3816,5 +3816,193 @@
   {
     "suite": "toolLaneAdapter.test.ts",
     "fullName": "ToolLaneGuardrail contract a guardrail without derivedFileReadDecision does not type-check"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git status"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git status -sb"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git log --oneline -n 20"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git log -p -- a.txt"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git log origin/main..HEAD"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git log @{u}..HEAD"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git diff"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git diff --cached --stat"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git diff --stat"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git diff --cached"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git diff main...feature"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git diff HEAD~1"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git diff HEAD^ HEAD -- a.txt"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git show"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git show --stat HEAD~1"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git show HEAD:app.py"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git show HEAD~2:a.txt"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git blame -L 1,2"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git grep -n TODO"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git grep -n TODO -- '*.py'"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git stash list"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git ls-tree -r --name-only HEAD"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git ls-files"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git branch -a -vv"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git branch --show-current"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git tag -l 'v1.*'"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git rev-parse HEAD"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git rev-parse --abbrev-ref HEAD"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git rev-parse --show-toplevel"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git describe --tags --always"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git shortlog -sn HEAD"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git rev-list --count HEAD"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git merge-base HEAD origin/main"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git cat-file -p HEAD"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git reflog -n 5"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git remote -v"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git for-each-ref --sort=-committerdate refs/heads/ --format='%(refname:short)'"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git worktree list"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git remote get-url origin"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git log --follow -p -- a.txt"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git log -S TODO"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git log --word-diff -U0"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git git log --graph --all -p"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git grep and merge-base with no result exit 1 and return an empty result"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git a revision that names an outside path gives the same answer whether the path exists or not"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git other git failures return git's stderr as an error"
+  },
+  {
+    "suite": "gitRead.corpus.integration.test.ts",
+    "fullName": "git_read corpus on real git output past the cap is cut with a fixed line and is not an error"
   }
 ]
