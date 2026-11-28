@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # Incremental image planning for pre-gate-sync.sh. The caller supplies
-# PROJECT_DIR, PROFILE, KC, FORCE_CLUSTER_SYNC, IMAGE_SOURCE, IMAGE_TAG,
-# IMAGES_GENERATED_AT, log(), and rollout_if_present().
+# PROJECT_DIR, PROFILE, KC, CLUSTER_SYNC_STATE_CONFIGMAP, FORCE_CLUSTER_SYNC,
+# IMAGE_SOURCE, IMAGE_TAG, IMAGES_GENERATED_AT, log(), and rollout_if_present().
 #
 # IN GHCR MODE EVERY POD RUNS A RELEASE IMAGE. Building clerum/<svc>:test here
 # would produce an image nothing references: the pod restarts onto the same
@@ -28,6 +28,22 @@ INCREMENTAL_DOCKER_ENV_APPLIED=false
 INCREMENTAL_DEADLINE_RUNNER="${INCREMENTAL_DEADLINE_RUNNER:-${PROJECT_DIR}/scripts/minikube/run-with-deadline.mjs}"
 INCREMENTAL_RUNTIME_TIMEOUT_SECONDS="${INCREMENTAL_RUNTIME_TIMEOUT_SECONDS:-30}"
 INCREMENTAL_IMAGE_LOAD_TIMEOUT_SECONDS="${INCREMENTAL_IMAGE_LOAD_TIMEOUT_SECONDS:-1800}"
+# The cluster sync marker as incremental_read_marker last read it.
+INCREMENTAL_MARKER_PRESENT=false
+INCREMENTAL_MARKER_GIT_HEAD=""
+INCREMENTAL_MARKER_IMAGES_GENERATED_AT=""
+INCREMENTAL_MARKER_IMAGE_SOURCE=""
+INCREMENTAL_MARKER_IMAGE_TAG=""
+INCREMENTAL_MARKER_UNCOMMITTED_PATH_COUNT=""
+INCREMENTAL_MARKER_UNCOMMITTED_PATHS=""
+# Paths that differed from HEAD when this run planned. pre-gate-sync.sh stamps
+# them in the marker with the ones that differ when it stamps.
+INCREMENTAL_UNCOMMITTED_PATHS=""
+
+# The image manifest's recorded coordinate is the second record of what the
+# cluster was rendered at (incremental_unproven_render).
+# shellcheck source=scripts/minikube/image-mode.sh
+source "${PROJECT_DIR}/scripts/minikube/image-mode.sh"
 
 incremental_validate_deadline() {
   local name="$1" value="$2" maximum="$3"
@@ -68,7 +84,57 @@ incremental_add_target() {
   INCREMENTAL_TARGETS+=("${target}")
 }
 
-# The commit the cluster's images were last synced to, or nothing.
+# One field of the cluster sync marker. Returns 0 with the value, 3 when the
+# marker does not exist, and 1 on any other read error, so no caller can read a
+# failed read as "no marker".
+incremental_marker_field() {
+  local field="$1" output
+  if output="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane \
+    -o "jsonpath={.data.${field}}" 2>&1)"; then
+    printf '%s' "${output}"
+    return 0
+  fi
+  if [[ "${output}" == *NotFound* || "${output}" == *"not found"* ]]; then
+    return 3
+  fi
+  log "WARNING: unable to read ${CLUSTER_SYNC_STATE_CONFIGMAP}.${field}: ${output}" >&2
+  return 1
+}
+
+# Fills the INCREMENTAL_MARKER_* fields. Fails on a read error; a missing marker
+# is a successful read with INCREMENTAL_MARKER_PRESENT=false.
+incremental_read_marker() {
+  local field value rc
+  INCREMENTAL_MARKER_PRESENT=false
+  INCREMENTAL_MARKER_GIT_HEAD=""
+  INCREMENTAL_MARKER_IMAGES_GENERATED_AT=""
+  INCREMENTAL_MARKER_IMAGE_SOURCE=""
+  INCREMENTAL_MARKER_IMAGE_TAG=""
+  INCREMENTAL_MARKER_UNCOMMITTED_PATH_COUNT=""
+  INCREMENTAL_MARKER_UNCOMMITTED_PATHS=""
+  for field in gitHead imagesGeneratedAt imageSource imageTag \
+               uncommittedPathCount uncommittedPaths; do
+    rc=0
+    value="$(incremental_marker_field "${field}")" || rc=$?
+    case "${rc}" in
+      0) ;;
+      3) return 0 ;;
+      *) return 1 ;;
+    esac
+    case "${field}" in
+      gitHead) INCREMENTAL_MARKER_GIT_HEAD="${value}" ;;
+      imagesGeneratedAt) INCREMENTAL_MARKER_IMAGES_GENERATED_AT="${value}" ;;
+      imageSource) INCREMENTAL_MARKER_IMAGE_SOURCE="${value}" ;;
+      imageTag) INCREMENTAL_MARKER_IMAGE_TAG="${value}" ;;
+      uncommittedPathCount) INCREMENTAL_MARKER_UNCOMMITTED_PATH_COUNT="${value}" ;;
+      uncommittedPaths) INCREMENTAL_MARKER_UNCOMMITTED_PATHS="${value}" ;;
+    esac
+  done
+  INCREMENTAL_MARKER_PRESENT=true
+}
+
+# The commit the cluster's images were last synced to, or nothing, from the
+# fields incremental_read_marker filled.
 #
 # The marker is only a usable baseline while the image set it was stamped
 # against is still the set the profile can prove. Both a GHCR acquisition and a
@@ -76,21 +142,78 @@ incremental_add_target() {
 # head after a newer acquisition would compute an empty delta and gate without
 # proving that the running pods use the newly acquired images. A stamp mismatch
 # therefore invalidates the baseline in every image mode; the caller chooses
-# the established full local build or GHCR recovery path below.
+# the established full local build or GHCR recovery path below. So does a
+# different image coordinate: a marker stamped at another tag describes shadows
+# over another release, not over the one this run resolves.
+#
+# gitHead names only the commit. The images the stamping sync built also carry
+# every path that was uncommitted then, which the marker lists with their count.
+# The count is "0" on a clean stamp, so a marker without one (stamped before
+# the list existed) or a list that does not match it cannot be a baseline.
+incremental_marker_baseline() {
+  if [[ "${INCREMENTAL_MARKER_PRESENT}" != "true" || -z "${INCREMENTAL_MARKER_GIT_HEAD}" ]]; then
+    return 0
+  fi
+  if [[ -z "${INCREMENTAL_MARKER_IMAGES_GENERATED_AT}" || -z "${IMAGES_GENERATED_AT:-}" ||
+        "${INCREMENTAL_MARKER_IMAGES_GENERATED_AT}" != "${IMAGES_GENERATED_AT}" ]]; then
+    return 0
+  fi
+  if [[ "${INCREMENTAL_MARKER_IMAGE_SOURCE}" != "${IMAGE_SOURCE}" ||
+        "${INCREMENTAL_MARKER_IMAGE_TAG}" != "${IMAGE_TAG:-}" ]]; then
+    return 0
+  fi
+  if [[ ! "${INCREMENTAL_MARKER_UNCOMMITTED_PATH_COUNT}" =~ ^[0-9]+$ ||
+        "$(incremental_count_lines "${INCREMENTAL_MARKER_UNCOMMITTED_PATHS}")" != \
+          "${INCREMENTAL_MARKER_UNCOMMITTED_PATH_COUNT}" ]]; then
+    return 0
+  fi
+  printf '%s' "${INCREMENTAL_MARKER_GIT_HEAD}"
+}
+
+# The number of non-empty lines in $1.
+incremental_count_lines() {
+  local text="$1" line count=0
+  while IFS= read -r line; do
+    if [[ -n "${line}" ]]; then
+      count=$((count + 1))
+    fi
+  done <<< "${text}"
+  printf '%s' "${count}"
+}
+
+# Reads the marker and prints its usable baseline, or nothing. A read error
+# prints nothing: with no baseline the plan takes the full local build or the
+# ghcr re-pull, which assume nothing about what the cluster runs.
 incremental_marker_git_head() {
-  local git_head marker_generated
-  git_head="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane \
-    -o jsonpath='{.data.gitHead}' 2>/dev/null || true)"
-  if [[ -z "${git_head}" ]]; then
+  incremental_read_marker || return 0
+  incremental_marker_baseline
+}
+
+# Why the cluster's Deployments may not be rendered at ghcr:<IMAGE_TAG>, as
+# `<record>=<imageSource>:<imageTag>`, or nothing when every record agrees.
+#
+# Only a render moves a Deployment to another tag: a re-pull or a shadow build
+# leaves every pod on the tag it was deployed with. Two records name a render.
+# The last sync stamped its own in the marker. The last image acquisition wrote
+# its coordinate to the image manifest: setup renders what it pulls, but a bare
+# pull renders nothing, so after an acquisition at another tag either record may
+# be the live one. Both must name the coordinate this run resolves.
+incremental_unproven_render() {
+  local want="ghcr:${IMAGE_TAG}" source tag
+  if [[ "${INCREMENTAL_MARKER_PRESENT}" == "true" &&
+        "${INCREMENTAL_MARKER_IMAGE_SOURCE}:${INCREMENTAL_MARKER_IMAGE_TAG}" != "${want}" ]]; then
+    printf 'marker=%s:%s' "${INCREMENTAL_MARKER_IMAGE_SOURCE}" "${INCREMENTAL_MARKER_IMAGE_TAG}"
     return 0
   fi
-  marker_generated="$(${KC} get configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane \
-    -o jsonpath='{.data.imagesGeneratedAt}' 2>/dev/null || true)"
-  if [[ -z "${marker_generated}" || -z "${IMAGES_GENERATED_AT:-}" ||
-        "${marker_generated}" != "${IMAGES_GENERATED_AT}" ]]; then
+  # image_mode_read_manifest has already named the unreadable file on stderr.
+  if ! source="$(image_mode_manifest_field "${PROJECT_DIR}" 1)" ||
+     ! tag="$(image_mode_manifest_field "${PROJECT_DIR}" 2)"; then
+    printf 'manifest=unreadable'
     return 0
   fi
-  printf '%s' "${git_head}"
+  if [[ "${source}:${tag}" != "${want}" ]]; then
+    printf 'manifest=%s:%s' "${source}" "${tag}"
+  fi
 }
 
 # Point the Docker CLI at minikube's daemon, once, so a retag lands where the
@@ -252,14 +375,21 @@ incremental_classify_path() {
 }
 
 incremental_plan() {
-  local marker_git_head path baseline
+  local marker_git_head="" path baseline marker_read=ok unproven
+  local previously_uncommitted=""
+
+  # Before any early return: every plan, including a full build, leaves the
+  # list pre-gate-sync.sh stamps in the marker.
+  if ! INCREMENTAL_UNCOMMITTED_PATHS="$(incremental_uncommitted_paths)"; then
+    exit 1
+  fi
 
   if [[ "${FORCE_CLUSTER_SYNC}" == "true" ]]; then
     if [[ "${IMAGE_SOURCE}" == "ghcr" ]]; then
       # A forced sync in ghcr mode means "discard what the cluster holds and
       # start from the release set again", not "build 28 images". The delta is
-      # still derived below, so the changed images are shadowed back on top of
-      # the freshly pulled release images.
+      # still derived below, from the release images' commit, so the changed
+      # images are shadowed back on top of the freshly pulled release images.
       INCREMENTAL_REPULL_ALL=true
       INCREMENTAL_FULL_DEPLOYMENT=true
       log "Forced cluster sync in ghcr mode: re-pulling the release set, then shadowing the changed images"
@@ -271,7 +401,39 @@ incremental_plan() {
     fi
   fi
 
-  marker_git_head="$(incremental_marker_git_head)"
+  # A failed read leaves no baseline and no proven render, so the plan below
+  # takes the paths that assume nothing about what the cluster runs.
+  if ! incremental_read_marker; then
+    marker_read=failed
+  fi
+
+  # A ghcr Deployment names its release tag, and only a render changes it. When
+  # this run resolves a tag the cluster was not rendered at (a MINIKUBE_IMAGE_TAG
+  # override, or a coordinate nothing can prove), re-pulling and shadowing are
+  # not enough: the pods would keep the old tag under a marker naming the new.
+  if [[ "${IMAGE_SOURCE}" == "ghcr" ]]; then
+    if [[ "${marker_read}" != "ok" ]]; then
+      unproven="marker=unreadable"
+    else
+      unproven="$(incremental_unproven_render)"
+    fi
+    if [[ -n "${unproven}" ]]; then
+      INCREMENTAL_REPULL_ALL=true
+      INCREMENTAL_FULL_DEPLOYMENT=true
+      log "Cluster render at ghcr:${IMAGE_TAG} is unproven (${unproven}); re-pulling and re-deploying the release set"
+    fi
+  fi
+
+  # A re-pull discards every shadow earlier syncs built. The cluster then runs
+  # the release set, so the delta must start from that set's commit, not from
+  # the marker's gitHead.
+  if [[ "${marker_read}" == "ok" && "${INCREMENTAL_REPULL_ALL}" != "true" ]]; then
+    marker_git_head="$(incremental_marker_baseline)"
+    # The cluster runs what the marker's sync built, including the paths that
+    # were uncommitted then. Each one is part of the delta even when it has
+    # since been reverted to its committed content.
+    previously_uncommitted="${INCREMENTAL_MARKER_UNCOMMITTED_PATHS}"
+  fi
   if [[ ! "${marker_git_head}" =~ ^[0-9a-f]{40}$ ]] || \
      ! git -C "${PROJECT_DIR}" cat-file -e "${marker_git_head}^{commit}" 2>/dev/null; then
     if [[ "${IMAGE_SOURCE}" != "ghcr" ]]; then
@@ -290,28 +452,61 @@ incremental_plan() {
     if [[ ! "${baseline}" =~ ^[0-9a-f]{40}$ ]]; then
       INCREMENTAL_FULL_IMAGE_BUILD=true
       INCREMENTAL_FULL_IMAGE_BUILD_REASON="no-baseline"
-      log "No usable cluster marker, and the release images at ${IMAGE_TAG} name no commit this clone has"
+      log "No usable marker baseline, and the release images at ${IMAGE_TAG} name no commit this clone has"
       return 0
     fi
     marker_git_head="${baseline}"
+    # The re-pull discards everything the marker's sync built.
+    previously_uncommitted=""
     INCREMENTAL_REPULL_ALL=true
-    log "No usable cluster marker; deriving the shadow set from the release images' commit ${baseline:0:12}"
+    log "No usable marker baseline; deriving the shadow set from the release images' commit ${baseline:0:12}"
   fi
 
+  # Each read is checked before the plan iterates. Read as empty, an unreadable
+  # delta means "nothing changed": the sync would skip the build, the database
+  # reconcile and the GFS verification, then stamp a marker over images it never
+  # compared with the tree.
+  local committed
+  if ! committed="$(git -C "${PROJECT_DIR}" diff --name-only "${marker_git_head}" HEAD)"; then
+    log "ERROR: PLAN_INPUT_UNREADABLE: git diff ${marker_git_head:0:12}..HEAD failed; refusing to plan from an empty delta" >&2
+    exit 1
+  fi
   while IFS= read -r path; do
     [[ -z "${path}" ]] || incremental_classify_path "${path}"
-  done < <(
-    {
-      git -C "${PROJECT_DIR}" diff --name-only "${marker_git_head}" HEAD
-      git -C "${PROJECT_DIR}" diff --name-only HEAD
-      git -C "${PROJECT_DIR}" ls-files --others --exclude-standard
-    } | LC_ALL=C sort -u
-  )
+  done < <(printf '%s\n%s\n%s\n' "${committed}" "${INCREMENTAL_UNCOMMITTED_PATHS}" \
+             "${previously_uncommitted}" | LC_ALL=C sort -u)
+}
+
+# Every path whose working-tree content differs from HEAD: tracked edits, staged
+# or not, and untracked files git does not ignore. Logs to stderr because callers
+# capture stdout as the list. An unreadable list is not an empty one.
+incremental_uncommitted_paths() {
+  local tracked untracked
+  if ! tracked="$(git -C "${PROJECT_DIR}" diff --name-only HEAD)"; then
+    log "ERROR: PLAN_INPUT_UNREADABLE: git diff HEAD failed; the working-tree changes are unknown" >&2
+    return 1
+  fi
+  if ! untracked="$(git -C "${PROJECT_DIR}" ls-files --others --exclude-standard)"; then
+    log "ERROR: PLAN_INPUT_UNREADABLE: git ls-files failed; the untracked files are unknown" >&2
+    return 1
+  fi
+  printf '%s\n%s\n' "${tracked}" "${untracked}" | LC_ALL=C sort -u | awk 'length'
+}
+
+# The paths the marker must list: those uncommitted when this run planned (its
+# builds may hold their content even if they are reverted by now) and those
+# uncommitted when it stamps. Fails when the working tree cannot be read.
+incremental_uncommitted_paths_to_stamp() {
+  local now
+  if ! now="$(incremental_uncommitted_paths)"; then
+    return 1
+  fi
+  printf '%s\n%s\n' "${INCREMENTAL_UNCOMMITTED_PATHS}" "${now}" | LC_ALL=C sort -u | awk 'length'
 }
 
 incremental_has_target() {
   local selector="$1" target
-  for target in "${INCREMENTAL_TARGETS[@]}"; do
+  for target in ${INCREMENTAL_TARGETS[@]+"${INCREMENTAL_TARGETS[@]}"}; do
     [[ "${target%%|*}" == "${selector}" ]] && return 0
   done
   return 1
@@ -531,7 +726,7 @@ incremental_restart_targets() {
   local -a restart_hosts=()
   local restart_hosts_count=0
 
-  for target in "${INCREMENTAL_TARGETS[@]}"; do
+  for target in ${INCREMENTAL_TARGETS[@]+"${INCREMENTAL_TARGETS[@]}"}; do
     selector="${target%%|*}"
     remainder="${target#*|}"
     namespace="${remainder%%|*}"
@@ -621,7 +816,7 @@ incremental_verify_gfs_if_required() {
 
 incremental_target_summary() {
   local target selector summary=""
-  for target in "${INCREMENTAL_TARGETS[@]}"; do
+  for target in ${INCREMENTAL_TARGETS[@]+"${INCREMENTAL_TARGETS[@]}"}; do
     selector="${target%%|*}"
     summary+="${summary:+, }${selector}"
   done

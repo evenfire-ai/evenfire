@@ -336,7 +336,7 @@ cluster_marker_matches() {
 persist_cluster_marker() {
   local cluster_fingerprint="$1"
   local infra_fingerprint="$2"
-  local git_head updated_at images_generated_at
+  local git_head updated_at images_generated_at uncommitted uncommitted_count
 
   git_head="$(git -C "${PROJECT_DIR}" rev-parse --verify HEAD 2>/dev/null || printf 'unknown')"
   updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -346,6 +346,16 @@ persist_cluster_marker() {
     log "ERROR: cannot read the image manifest to stamp the cluster sync marker"
     return 1
   fi
+  # gitHead names only the commit. The images this sync built also hold every
+  # path that was uncommitted when it planned or is uncommitted now, so the
+  # marker lists them and the next plan rebuilds each one even after the edit
+  # is reverted. The count is "0" on a clean tree, which tells a clean stamp
+  # from a marker written before the list existed.
+  if ! uncommitted="$(incremental_uncommitted_paths_to_stamp)"; then
+    log "ERROR: cannot list the uncommitted paths to stamp the cluster sync marker"
+    return 1
+  fi
+  uncommitted_count="$(incremental_count_lines "${uncommitted}")"
 
   ${KC} create configmap "${CLUSTER_SYNC_STATE_CONFIGMAP}" -n control-plane \
     --from-literal=clusterFingerprint="${cluster_fingerprint}" \
@@ -355,6 +365,8 @@ persist_cluster_marker() {
     --from-literal=imageSource="${IMAGE_SOURCE}" \
     --from-literal=imageTag="${IMAGE_TAG}" \
     --from-literal=imagesGeneratedAt="${images_generated_at}" \
+    --from-literal=uncommittedPathCount="${uncommitted_count}" \
+    --from-literal=uncommittedPaths="${uncommitted}" \
     --from-literal=gate="${GATE_NAME}" \
     --from-literal=updatedAt="${updated_at}" \
     --dry-run=client \

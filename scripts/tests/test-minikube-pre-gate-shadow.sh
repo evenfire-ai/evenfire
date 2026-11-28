@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -u
 FAIL=0
+PASS_COUNT=0
 
 # A ghcr cluster runs RELEASE images. Before this harness existed, the pre-gate
 # had no idea: it built clerum/<svc>:test, restarted the Deployment, and the pod
@@ -19,8 +20,12 @@ FAIL=0
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GHCR_COMPONENT="$REPO_ROOT/deploy/components/ghcr-images/kustomization.yaml"
+# Resolved before any case prepends a stub directory to PATH, so a git stub can
+# hand every call it does not fail on to the real binary.
+TEST_REAL_GIT="$(command -v git)"
+export TEST_REAL_GIT
 
-pass() { echo "PASS: $1"; }
+pass() { echo "PASS: $1"; PASS_COUNT=$((PASS_COUNT + 1)); }
 fail() { echo "FAIL: $1"; FAIL=1; }
 
 # Cleanup is part of fixture isolation and must affect the suite verdict.
@@ -116,9 +121,19 @@ case "$*" in
   *"get nodes"*) echo "minikube  Ready  control-plane  1d  v1.30.0"; exit 0 ;;
   *"get configmap"*jsonpath*)
     key="$(printf '%s' "$*" | sed -n 's/.*{\.data\.\([A-Za-z]*\)}.*/\1/p')"
-    file="${TEST_MARKER_DIR:-/nonexistent}/${key}"
     [ -n "$key" ] || exit 1
-    [ -f "$file" ] || exit 1
+    if [ "${TEST_KUBECTL_MARKER_ERROR:-0}" = "1" ]; then
+      echo "The connection to the server was refused" >&2
+      exit 1
+    fi
+    # As the real CLI answers: a missing ConfigMap is NotFound, and a key the
+    # ConfigMap does not carry prints nothing and succeeds.
+    if [ ! -d "${TEST_MARKER_DIR:-/nonexistent}" ]; then
+      echo 'Error from server (NotFound): configmaps "clerum-pre-gate-sync-state" not found' >&2
+      exit 1
+    fi
+    file="${TEST_MARKER_DIR}/${key}"
+    [ -f "$file" ] || exit 0
     cat "$file"
     exit 0
     ;;
@@ -165,6 +180,10 @@ exit 0
 STUB
   mkdir -p "$d/repo/control-api/src"
   echo "export const x = 1" > "$d/repo/control-api/src/index.ts"
+  # The real ignore rules, so the generated image manifest and API-IP patch are
+  # ignored here as they are in a clone and never reach the plan as untracked
+  # paths.
+  cp "$REPO_ROOT/.gitignore" "$d/repo/.gitignore"
   (
     cd "$d/repo"
     git init -q .
@@ -186,12 +205,51 @@ write_manifest() {
 
 repo_head() { git -C "$1/repo" rev-parse HEAD; }
 
+# A cluster sync marker as pre-gate-sync.sh stamps it, served by the kubectl
+# stub from TEST_MARKER_DIR="$d/marker". A clean stamp lists no uncommitted
+# path and carries the count "0".
+write_marker() {
+  local d=$1 head=$2 generated=$3 source=$4 tag=$5 count=${6:-0} paths=${7:-}
+  mkdir -p "$d/marker"
+  printf '%s' "$head" > "$d/marker/gitHead"
+  printf '%s' "$generated" > "$d/marker/imagesGeneratedAt"
+  printf '%s' "$source" > "$d/marker/imageSource"
+  printf '%s' "$tag" > "$d/marker/imageTag"
+  printf '%s' "$count" > "$d/marker/uncommittedPathCount"
+  printf '%s' "$paths" > "$d/marker/uncommittedPaths"
+}
+
+# A git that fails exactly one of the working-tree reads the pre-gate makes,
+# named by TEST_GIT_FAIL, and logs that it did. Every other call is real git.
+make_failing_git_stub() {
+  local d=$1
+  cat > "$d/bin/git" <<'STUB'
+#!/usr/bin/env bash
+read_name=""
+case "$*" in
+  *" diff --name-only HEAD") read_name=tracked ;;
+  *" diff --name-only "*" HEAD") read_name=committed ;;
+  *" ls-files --others --exclude-standard") read_name=untracked ;;
+esac
+if [ -n "$read_name" ] && [ "$read_name" = "${TEST_GIT_FAIL:-}" ]; then
+  printf 'git-fail %s\n' "$read_name" >>"${TEST_LOG_FILE:?}"
+  echo "fatal: simulated ${read_name} read failure" >&2
+  exit 128
+fi
+exec "${TEST_REAL_GIT:?}" "$@"
+STUB
+  chmod +x "$d/bin/git"
+}
+
 # Loads pre-gate-incremental.sh the way pre-gate-sync.sh does, in a subshell the
-# caller controls, and runs $2 with the callers' contract satisfied.
+# caller controls, and runs $2 with the callers' contract satisfied. That
+# includes pre-gate-sync.sh's set -euo pipefail, so a set -u or errexit failure
+# the sync would hit fails the case too. Call it as a plain assignment and read
+# $? after: on the left of `||`, bash 4.4 and later ignore errexit inside it.
 run_incremental() {
   local d=$1 fn=$2
   (
-    set +u
+    set -euo pipefail
     PROJECT_DIR="$d/repo"
     PROFILE="clerum-test"
     KC="kubectl --context=${PROFILE}"
@@ -602,7 +660,9 @@ assert_no_marker_and_no_revision_label_fails_closed() {
 
 # The baseline read runs inside a command substitution, so a diagnostic printed
 # on stdout there would be captured AS the baseline and then diffed against.
-# A daemon this pre-gate cannot reach must produce no baseline at all.
+# A daemon this pre-gate cannot reach must produce no baseline at all. Under
+# pre-gate-sync.sh's errexit the failed read stops the plan where it happens,
+# naming the daemon, before any delta is derived.
 assert_an_unreachable_docker_daemon_cannot_become_a_baseline() {
   local d out rc
   d="$(mktemp -d)"
@@ -621,10 +681,64 @@ STUB
       run_incremental "$d" 'incremental_plan; echo "full=${INCREMENTAL_FULL_IMAGE_BUILD} reason=${INCREMENTAL_FULL_IMAGE_BUILD_REASON}"'
   )"
   rc=$?
-  if grep -Fq 'full=true' <<< "$out" && grep -Fq 'reason=no-baseline' <<< "$out"; then
-    pass "an unreachable Docker daemon produces no baseline instead of a diagnostic-shaped one"
+  if [ "$rc" -ne 0 ] \
+     && grep -Fq 'minikube -p clerum-test docker-env' "$d/ops.log" \
+     && grep -Fq 'DOCKER_ENV_UNRESOLVED' <<< "$out" \
+     && ! grep -Fq 'deriving the shadow set' <<< "$out" \
+     && ! grep -q '^full=' <<< "$out"; then
+    pass "an unreachable Docker daemon stops the plan instead of becoming a baseline"
   else
-    fail "expected full=true reason=no-baseline from an unreachable daemon; rc=$rc out=$out"
+    fail "expected the plan to stop on DOCKER_ENV_UNRESOLVED from an unreachable daemon; rc=$rc out=$out"
+  fi
+  cleanup_fixture "$d"
+}
+
+# The plan's delta is three git reads. Read as empty, a failed one says "nothing
+# changed": the sync builds nothing, skips the database reconcile and the GFS
+# verification, and stamps a marker. Each read must stop the plan instead. The
+# positive control gives each read a path of its own, so the three selectors in
+# its plan prove all three reads ran.
+assert_an_unreadable_plan_delta_stops_the_sync() {
+  local d base out rc mode bad=""
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  make_failing_git_stub "$d"
+  mkdir -p "$d/repo/rpc-proxy/src"
+  echo "export const y = 1" > "$d/repo/rpc-proxy/src/index.ts"
+  git -C "$d/repo" add -A
+  git -C "$d/repo" -c user.email=t@t -c user.name=t commit -qm release
+  base="$(repo_head "$d")"
+  echo "// committed" >> "$d/repo/control-api/src/index.ts"
+  git -C "$d/repo" -c user.email=t@t -c user.name=t commit -qam committed
+  echo "// edited" >> "$d/repo/rpc-proxy/src/index.ts"
+  mkdir -p "$d/repo/mcp-host/src"
+  echo "export const z = 1" > "$d/repo/mcp-host/src/new.ts"
+  for mode in none committed tracked untracked; do
+    out="$(
+      PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_GIT_FAIL="$mode" \
+      TEST_IMAGE_REVISION="$base" TEST_MARKER_DIR="$d/nomarker" \
+      IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" \
+        run_incremental "$d" 'incremental_plan; echo "targets=$(incremental_target_summary)"'
+    )"
+    rc=$?
+    if [ "$mode" = none ]; then
+      if [ "$rc" -ne 0 ] \
+         || ! grep -Eq '^targets=.*control-api' <<< "$out" \
+         || ! grep -Eq '^targets=.*rpc-proxy' <<< "$out" \
+         || ! grep -Eq '^targets=.*mcp-host' <<< "$out"; then
+        bad+="control(rc=$rc out=$out) "
+      fi
+    elif [ "$rc" -eq 0 ] \
+         || ! grep -Fqx "git-fail ${mode}" "$d/ops.log" \
+         || ! grep -Fq 'PLAN_INPUT_UNREADABLE' <<< "$out" \
+         || grep -q '^targets=' <<< "$out"; then
+      bad+="${mode}(rc=$rc out=$out) "
+    fi
+  done
+  if [ -z "$bad" ]; then
+    pass "each unreadable git read in the plan's delta stops the sync before it plans"
+  else
+    fail "an unreadable plan delta did not stop the sync: ${bad}log=$(cat "$d/ops.log")"
   fi
   cleanup_fixture "$d"
 }
@@ -637,9 +751,7 @@ assert_a_re_acquisition_invalidates_the_marker_baseline_in_ghcr_mode() {
   d="$(mktemp -d)"
   prepare_repo "$d"
   head="$(repo_head "$d")"
-  mkdir -p "$d/marker"
-  printf '%s' "$head" > "$d/marker/gitHead"
-  printf '%s' "2026-08-06T00:00:00Z" > "$d/marker/imagesGeneratedAt"
+  write_marker "$d" "$head" "2026-08-06T00:00:00Z" ghcr "$PIN_TAG"
   write_manifest "$d" '{"generated":"2026-08-06T09:99:99Z","imageSource":"ghcr","imageTag":"'"$PIN_TAG"'","images":{}}'
   out="$(
     PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
@@ -663,9 +775,7 @@ assert_a_re_acquisition_invalidates_the_marker_baseline_in_local_mode() {
   d="$(mktemp -d)"
   prepare_repo "$d"
   head="$(repo_head "$d")"
-  mkdir -p "$d/marker"
-  printf '%s' "$head" > "$d/marker/gitHead"
-  printf '%s' "2026-08-06T00:00:00Z" > "$d/marker/imagesGeneratedAt"
+  write_marker "$d" "$head" "2026-08-06T00:00:00Z" local ""
   write_manifest "$d" '{"generated":"2026-08-06T09:99:99Z","imageSource":"local","imageTag":"","images":{}}'
   out="$(
     PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
@@ -688,9 +798,7 @@ assert_an_untouched_image_set_keeps_the_marker_baseline() {
   d="$(mktemp -d)"
   prepare_repo "$d"
   head="$(repo_head "$d")"
-  mkdir -p "$d/marker"
-  printf '%s' "$head" > "$d/marker/gitHead"
-  printf '%s' "2026-08-06T00:00:00Z" > "$d/marker/imagesGeneratedAt"
+  write_marker "$d" "$head" "2026-08-06T00:00:00Z" ghcr "$PIN_TAG"
   out="$(
     PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
     IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" IMAGES_GENERATED_AT="2026-08-06T00:00:00Z" \
@@ -703,6 +811,289 @@ assert_an_untouched_image_set_keeps_the_marker_baseline() {
     fail "expected baseline=[${head}]; rc=$rc out=$out"
   fi
   cleanup_fixture "$d"
+}
+
+# A MINIKUBE_IMAGE_TAG override changes the tag a run resolves without pulling
+# or rendering anything. The plan compared only gitHead and the acquisition
+# stamp, found nothing to do, and the marker was stamped with the new tag while
+# every pod kept the old one. A re-pull alone leaves the Deployments on the old
+# tag, so the full deployment is asserted with it. The same-tag run keeps the
+# marker baseline, and a marker that cannot be read proves no render either.
+assert_a_tag_override_on_a_synced_profile_re_pulls_and_re_deploys() {
+  local d head out_new out_same out_err rc_new rc_same rc_err
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  head="$(repo_head "$d")"
+  write_manifest "$d" '{"generated":"g7","imageSource":"ghcr","imageTag":"'"$PIN_TAG"'","images":{}}'
+  write_marker "$d" "$head" g7 ghcr "$PIN_TAG"
+  out_new="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
+    TEST_IMAGE_REVISION="$head" \
+    IMAGE_SOURCE=ghcr IMAGE_TAG=override-tag IMAGES_GENERATED_AT=g7 \
+      run_incremental "$d" 'incremental_plan; echo "plan repull=${INCREMENTAL_REPULL_ALL} deploy=${INCREMENTAL_FULL_DEPLOYMENT} build=${INCREMENTAL_FULL_IMAGE_BUILD}"'
+  )"
+  rc_new=$?
+  out_same="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
+    TEST_IMAGE_REVISION="$head" \
+    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" IMAGES_GENERATED_AT=g7 \
+      run_incremental "$d" 'incremental_plan; echo "plan repull=${INCREMENTAL_REPULL_ALL} deploy=${INCREMENTAL_FULL_DEPLOYMENT} build=${INCREMENTAL_FULL_IMAGE_BUILD}"'
+  )"
+  rc_same=$?
+  out_err="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
+    TEST_KUBECTL_MARKER_ERROR=1 TEST_IMAGE_REVISION="$head" \
+    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" IMAGES_GENERATED_AT=g7 \
+      run_incremental "$d" 'incremental_plan; echo "plan repull=${INCREMENTAL_REPULL_ALL} deploy=${INCREMENTAL_FULL_DEPLOYMENT} build=${INCREMENTAL_FULL_IMAGE_BUILD}"'
+  )"
+  rc_err=$?
+  if [ "$rc_new" -eq 0 ] && [ "$rc_same" -eq 0 ] && [ "$rc_err" -eq 0 ] \
+     && grep -Fqx 'plan repull=true deploy=true build=false' <<< "$out_new" \
+     && grep -Fq "ghcr:override-tag is unproven (marker=ghcr:${PIN_TAG})" <<< "$out_new" \
+     && grep -Fqx 'plan repull=false deploy=false build=false' <<< "$out_same" \
+     && ! grep -Fq 'No usable marker baseline' <<< "$out_same" \
+     && grep -Fqx 'plan repull=true deploy=true build=false' <<< "$out_err" \
+     && grep -Fq 'WARNING: unable to read' <<< "$out_err"; then
+    pass "a tag override on a synced profile re-pulls and re-deploys; the same tag keeps the baseline"
+  else
+    fail "expected override -> repull+deploy, same tag -> neither, unreadable marker -> repull+deploy; rc=$rc_new/$rc_same/$rc_err new=$out_new same=$out_same err=$out_err"
+  fi
+  cleanup_fixture "$d"
+}
+
+# The same override on a profile no sync has stamped yet: setup rendered the
+# tag it recorded in the image manifest, and the override names another.
+assert_a_tag_override_on_an_unsynced_profile_re_deploys() {
+  local d base out_new out_same rc_new rc_same
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  base="$(repo_head "$d")"
+  write_manifest "$d" '{"generated":"g7","imageSource":"ghcr","imageTag":"'"$PIN_TAG"'","images":{}}'
+  out_new="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/nomarker" \
+    TEST_IMAGE_REVISION="$base" \
+    IMAGE_SOURCE=ghcr IMAGE_TAG=override-tag IMAGES_GENERATED_AT=g7 \
+      run_incremental "$d" 'incremental_plan; echo "plan repull=${INCREMENTAL_REPULL_ALL} deploy=${INCREMENTAL_FULL_DEPLOYMENT} build=${INCREMENTAL_FULL_IMAGE_BUILD}"'
+  )"
+  rc_new=$?
+  out_same="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/nomarker" \
+    TEST_IMAGE_REVISION="$base" \
+    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" IMAGES_GENERATED_AT=g7 \
+      run_incremental "$d" 'incremental_plan; echo "plan repull=${INCREMENTAL_REPULL_ALL} deploy=${INCREMENTAL_FULL_DEPLOYMENT} build=${INCREMENTAL_FULL_IMAGE_BUILD}"'
+  )"
+  rc_same=$?
+  if [ "$rc_new" -eq 0 ] && [ "$rc_same" -eq 0 ] \
+     && grep -Fqx 'plan repull=true deploy=true build=false' <<< "$out_new" \
+     && grep -Fq "ghcr:override-tag is unproven (manifest=ghcr:${PIN_TAG})" <<< "$out_new" \
+     && grep -Fqx 'plan repull=true deploy=false build=false' <<< "$out_same"; then
+    pass "a tag override on an unsynced profile re-deploys; setup's own tag only re-pulls"
+  else
+    fail "expected override -> repull+deploy and the recorded tag -> repull only; rc=$rc_new/$rc_same new=$out_new same=$out_same"
+  fi
+  cleanup_fixture "$d"
+}
+
+# A marker stamped at the tag this run resolves does not prove the render when
+# an image acquisition at another tag has happened since. A sync at one tag, then
+# `MINIKUBE_IMAGE_TAG=<other> make minikube-setup`, then a pre-gate back at the
+# first tag left the pods on <other> under a marker naming the first. The image
+# manifest records that acquisition, so it must agree too. When it records the
+# resolved tag, the stale marker costs a re-pull and no render.
+assert_an_acquisition_at_another_tag_since_the_marker_re_deploys() {
+  local d head out_other out_same rc_other rc_same
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  head="$(repo_head "$d")"
+  write_marker "$d" "$head" g7 ghcr "$PIN_TAG"
+  write_manifest "$d" '{"generated":"g8","imageSource":"ghcr","imageTag":"other-tag","images":{}}'
+  out_other="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
+    TEST_IMAGE_REVISION="$head" \
+    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" IMAGES_GENERATED_AT=g8 \
+      run_incremental "$d" 'incremental_plan; echo "plan repull=${INCREMENTAL_REPULL_ALL} deploy=${INCREMENTAL_FULL_DEPLOYMENT} build=${INCREMENTAL_FULL_IMAGE_BUILD}"'
+  )"
+  rc_other=$?
+  write_manifest "$d" '{"generated":"g8","imageSource":"ghcr","imageTag":"'"$PIN_TAG"'","images":{}}'
+  out_same="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
+    TEST_IMAGE_REVISION="$head" \
+    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" IMAGES_GENERATED_AT=g8 \
+      run_incremental "$d" 'incremental_plan; echo "plan repull=${INCREMENTAL_REPULL_ALL} deploy=${INCREMENTAL_FULL_DEPLOYMENT} build=${INCREMENTAL_FULL_IMAGE_BUILD}"'
+  )"
+  rc_same=$?
+  if [ "$rc_other" -eq 0 ] && [ "$rc_same" -eq 0 ] \
+     && grep -Fqx 'plan repull=true deploy=true build=false' <<< "$out_other" \
+     && grep -Fq "ghcr:${PIN_TAG} is unproven (manifest=ghcr:other-tag)" <<< "$out_other" \
+     && grep -Fqx 'plan repull=true deploy=false build=false' <<< "$out_same"; then
+    pass "an acquisition at another tag since the marker re-deploys; one at the same tag only re-pulls"
+  else
+    fail "expected another-tag acquisition -> repull+deploy, same-tag -> repull only; rc=$rc_other/$rc_same other=$out_other same=$out_same"
+  fi
+  cleanup_fixture "$d"
+}
+
+# A forced ghcr sync re-pulls every release image, which discards the shadows
+# earlier syncs built. Its delta must therefore start at the release commit: from
+# the marker's gitHead it is empty, and control-api, shadowed by the sync that
+# stamped the marker, would go back to release code under a marker naming HEAD.
+# Without --force-cluster-sync nothing is re-pulled and the marker baseline holds.
+assert_a_forced_ghcr_sync_shadows_every_change_since_the_release() {
+  local d base head out_forced out_plain rc_forced rc_plain
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  base="$(repo_head "$d")"
+  echo "// shadowed by an earlier sync" >> "$d/repo/control-api/src/index.ts"
+  git -C "$d/repo" -c user.email=t@t -c user.name=t commit -qam change
+  head="$(repo_head "$d")"
+  write_manifest "$d" '{"generated":"g7","imageSource":"ghcr","imageTag":"'"$PIN_TAG"'","images":{}}'
+  write_marker "$d" "$head" g7 ghcr "$PIN_TAG"
+  out_forced="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
+    TEST_IMAGE_REVISION="$base" FORCE_CLUSTER_SYNC=true \
+    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" IMAGES_GENERATED_AT=g7 \
+      run_incremental "$d" 'incremental_plan; echo "plan targets=$(incremental_target_summary) repull=${INCREMENTAL_REPULL_ALL}"'
+  )"
+  rc_forced=$?
+  out_plain="$(
+    PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
+    TEST_IMAGE_REVISION="$base" FORCE_CLUSTER_SYNC=false \
+    IMAGE_SOURCE=ghcr IMAGE_TAG="$PIN_TAG" IMAGES_GENERATED_AT=g7 \
+      run_incremental "$d" 'incremental_plan; echo "plan targets=$(incremental_target_summary) repull=${INCREMENTAL_REPULL_ALL}"'
+  )"
+  rc_plain=$?
+  if [ "$rc_forced" -eq 0 ] && [ "$rc_plain" -eq 0 ] \
+     && grep -Fqx 'plan targets=control-api repull=true' <<< "$out_forced" \
+     && grep -Fq "release images' commit ${base:0:12}" <<< "$out_forced" \
+     && grep -Fqx 'plan targets=none repull=false' <<< "$out_plain"; then
+    pass "a forced ghcr sync shadows every change since the release commit it re-pulls"
+  else
+    fail "expected forced -> control-api from the release commit, plain -> none; rc=$rc_forced/$rc_plain forced=$out_forced plain=$out_plain"
+  fi
+  cleanup_fixture "$d"
+}
+
+# A sync over an uncommitted control-api edit builds that edit into the image,
+# and its marker names only HEAD. Once the edit is reverted the tree equals HEAD
+# again, so the plan saw no delta, built nothing, and stamped a valid marker over
+# the image still running the reverted code. The marker now lists the paths, and
+# the plan rebuilds each one, in both modes. A clean stamp keeps the empty plan.
+# A marker with no count (stamped before the list existed) or with a count its
+# list does not match is no baseline at all.
+assert_a_reverted_uncommitted_change_is_rebuilt() {
+  local d head out rc bad="" scenario mode tag want
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  head="$(repo_head "$d")"
+  for scenario in local-dirty local-clean local-legacy local-mismatch ghcr-dirty; do
+    mode="${scenario%%-*}"
+    tag=""
+    [ "$mode" = ghcr ] && tag="$PIN_TAG"
+    write_manifest "$d" '{"generated":"g7","imageSource":"'"$mode"'","imageTag":"'"$tag"'","images":{}}'
+    rm -rf "$d/marker"
+    case "$scenario" in
+      *-dirty) write_marker "$d" "$head" g7 "$mode" "$tag" 1 "control-api/src/index.ts" ;;
+      *-clean) write_marker "$d" "$head" g7 "$mode" "$tag" ;;
+      *-legacy)
+        write_marker "$d" "$head" g7 "$mode" "$tag"
+        rm -f "$d/marker/uncommittedPathCount" "$d/marker/uncommittedPaths"
+        ;;
+      *-mismatch) write_marker "$d" "$head" g7 "$mode" "$tag" 2 "control-api/src/index.ts" ;;
+    esac
+    case "$scenario" in
+      local-dirty) want='plan targets=control-api build=false reason= repull=false' ;;
+      local-clean) want='plan targets=none build=false reason= repull=false' ;;
+      local-legacy|local-mismatch) want='plan targets=none build=true reason=no-marker repull=false' ;;
+      ghcr-dirty) want='plan targets=control-api build=false reason= repull=false' ;;
+    esac
+    out="$(
+      PATH="$d/bin:$PATH" TEST_LOG_FILE="$d/ops.log" TEST_MARKER_DIR="$d/marker" \
+      IMAGE_SOURCE="$mode" IMAGE_TAG="$tag" IMAGES_GENERATED_AT=g7 \
+        run_incremental "$d" 'incremental_plan; echo "plan targets=$(incremental_target_summary) build=${INCREMENTAL_FULL_IMAGE_BUILD} reason=${INCREMENTAL_FULL_IMAGE_BUILD_REASON} repull=${INCREMENTAL_REPULL_ALL}"'
+    )"
+    rc=$?
+    if [ "$rc" -ne 0 ] || ! grep -Fqx "$want" <<< "$out"; then
+      bad+="${scenario}(rc=$rc want='$want' out=$out) "
+    fi
+  done
+  if [ -z "$bad" ] && [ -z "$(git -C "$d/repo" status --porcelain)" ]; then
+    pass "a reverted uncommitted change the marker lists is rebuilt; a marker without the list is no baseline"
+  else
+    fail "the plan ignored the marker's uncommitted paths: ${bad}status=$(git -C "$d/repo" status --porcelain)"
+  fi
+  cleanup_fixture "$d"
+}
+
+# The stamp side: every path uncommitted when the sync planned (reverted since)
+# or when it stamps lands in the marker with its count, a clean tree stamps "0",
+# and a working tree that cannot be read stamps nothing.
+assert_the_marker_records_every_uncommitted_path() {
+  local d c f out rc out_clean rc_clean out_fail rc_fail
+  d="$(mktemp -d)"
+  c="$(mktemp -d)"
+  f="$(mktemp -d)"
+  prepare_repo "$d"
+  prepare_repo "$c"
+  prepare_repo "$f"
+  make_failing_git_stub "$f"
+  for x in "$d" "$c" "$f"; do
+    write_manifest "$x" '{"generated":"g7","imageSource":"ghcr","imageTag":"'"$PIN_TAG"'","images":{}}'
+  done
+  echo "// uncommitted" >> "$d/repo/control-api/src/index.ts"
+  mkdir -p "$d/repo/rpc-proxy/src"
+  echo "export const y = 1" > "$d/repo/rpc-proxy/src/new.ts"
+  echo "// uncommitted" >> "$f/repo/control-api/src/index.ts"
+  out="$(
+    (
+      set +u
+      PATH="$d/bin:$PATH"; TEST_LOG_FILE="$d/ops.log"; TMPDIR="$d/state"
+      export PATH TEST_LOG_FILE TMPDIR
+      source_pre_gate_marker_fns "$d" >/dev/null
+      INCREMENTAL_UNCOMMITTED_PATHS="mcp-host/src/reverted.ts"
+      persist_cluster_marker fingerprint-a fingerprint-b
+    ) 2>&1
+  )"
+  rc=$?
+  out_clean="$(
+    (
+      set +u
+      PATH="$c/bin:$PATH"; TEST_LOG_FILE="$c/ops.log"; TMPDIR="$c/state"
+      export PATH TEST_LOG_FILE TMPDIR
+      source_pre_gate_marker_fns "$c" >/dev/null
+      persist_cluster_marker fingerprint-a fingerprint-b
+    ) 2>&1
+  )"
+  rc_clean=$?
+  out_fail="$(
+    (
+      set +u
+      PATH="$f/bin:$PATH"; TEST_LOG_FILE="$f/ops.log"; TMPDIR="$f/state"
+      export PATH TEST_LOG_FILE TMPDIR
+      source_pre_gate_marker_fns "$f" >/dev/null
+      TEST_GIT_FAIL=untracked
+      export TEST_GIT_FAIL
+      persist_cluster_marker fingerprint-a fingerprint-b
+    ) 2>&1
+  )"
+  rc_fail=$?
+  if [ "$rc" -eq 0 ] \
+     && grep -Fq -- '--from-literal=uncommittedPathCount=3' "$d/ops.log" \
+     && grep -Fqx -- 'mcp-host/src/reverted.ts' "$d/ops.log" \
+     && grep -Fq -- '--from-literal=uncommittedPaths=control-api/src/index.ts' "$d/ops.log" \
+     && grep -Fq -- 'rpc-proxy/src/new.ts --from-literal=gate=' "$d/ops.log" \
+     && [ "$rc_clean" -eq 0 ] \
+     && grep -Fq -- '--from-literal=uncommittedPathCount=0 --from-literal=uncommittedPaths= ' "$c/ops.log" \
+     && [ "$rc_fail" -ne 0 ] \
+     && grep -Fqx 'git-fail untracked' "$f/ops.log" \
+     && grep -Fq 'cannot list the uncommitted paths' <<< "$out_fail" \
+     && ! grep -Fq 'create configmap' "$f/ops.log"; then
+    pass "the marker records every uncommitted path with its count, and a failed read stamps nothing"
+  else
+    fail "the marker's uncommitted paths are wrong; rc=$rc/$rc_clean/$rc_fail log=$(cat "$d/ops.log") clean=$(cat "$c/ops.log") failed=$(cat "$f/ops.log") out=$out out_clean=$out_clean out_fail=$out_fail"
+  fi
+  cleanup_fixture "$d"
+  cleanup_fixture "$c"
+  cleanup_fixture "$f"
 }
 
 # ---------------------------------------------------------------------------
@@ -1118,7 +1509,7 @@ assert_the_touched_scripts_parse() {
 }
 
 assert_incremental_runtime_calls_are_bounded() {
-  local d out rc=0
+  local d out rc
   d="$(mktemp -d)"
   prepare_repo "$d"
   out="$(
@@ -1127,7 +1518,8 @@ assert_incremental_runtime_calls_are_bounded() {
     INCREMENTAL_RUNTIME_TIMEOUT_SECONDS=1 \
     MINIKUBE_DOCKER_KILL_GRACE_SECONDS=1 \
       run_incremental "$d" 'incremental_use_minikube_docker'
-  )" || rc=$?
+  )"
+  rc=$?
   if [ "$rc" -ne 0 ] \
      && grep -Fq '[HARNESS_DEADLINE] label=incremental-docker-env event=timeout' <<< "$out"; then
     pass "incremental Docker daemon selection terminates at its explicit deadline"
@@ -1138,11 +1530,12 @@ assert_incremental_runtime_calls_are_bounded() {
 }
 
 assert_empty_incremental_docker_env_fails_closed() {
-  local d out rc=0
+  local d out rc
   d="$(mktemp -d)"
   prepare_repo "$d"
   export TEST_EMPTY_DOCKER_ENV=1
-  out="$(run_incremental "$d" 'incremental_use_minikube_docker')" || rc=$?
+  out="$(run_incremental "$d" 'incremental_use_minikube_docker')"
+  rc=$?
   unset TEST_EMPTY_DOCKER_ENV
   if [ "$rc" -ne 0 ] && grep -Fq 'DOCKER_ENV_UNRESOLVED' <<<"$out"; then
     pass "empty incremental minikube docker-env output fails closed"
@@ -1152,10 +1545,120 @@ assert_empty_incremental_docker_env_fails_closed() {
   cleanup_fixture "$d"
 }
 
+# A full setup leaves INCREMENTAL_TARGETS empty, and pre-gate-sync.sh runs with
+# set -u. On bash 3.2 (macOS /bin/bash) "${arr[@]}" on an empty array is an
+# unbound variable there, so the sync dies before writing its marker. This case
+# loads the file directly under set -eu and needs no fixture repository. Its
+# witness is a run of this file under /bin/bash 3.2; bash 4.4 and later accept
+# the old form.
+#
+# Each witness has to prove its function ran. The three functions are declared
+# before any call, because an undefined incremental_has_target would also print
+# has_target=no. The one-target control proves the predicate can answer yes.
+# set -e stops the subshell before restart=done when the restart call fails.
+# The status is read with a plain assignment: on the left of `||`, bash 4.4 and
+# later ignore errexit inside the substitution, and the subshell's set -e with it.
+assert_an_empty_target_list_survives_set_u() {
+  local out rc
+  out="$(
+    (
+      set -eu
+      PROJECT_DIR="$REPO_ROOT"
+      PROFILE="clerum-test"
+      KC="false"
+      log() { printf '[pre-gate-sync] %s\n' "$*"; }
+      rollout_if_present() { :; }
+      # shellcheck source=/dev/null
+      . "$REPO_ROOT/scripts/minikube/pre-gate-incremental.sh"
+      for fn in incremental_has_target incremental_target_summary incremental_restart_targets; do
+        declare -F "$fn" >/dev/null || { echo "undefined=$fn"; exit 3; }
+      done
+      INCREMENTAL_TARGETS=("control-api|control-plane|control-api")
+      if incremental_has_target control-api; then echo "one_target=yes"; else echo "one_target=no"; fi
+      echo "one_summary=$(incremental_target_summary)"
+      INCREMENTAL_TARGETS=()
+      if incremental_has_target control-api; then echo "has_target=yes"; else echo "has_target=no"; fi
+      echo "summary=$(incremental_target_summary)"
+      incremental_restart_targets
+      echo "restart=done"
+    ) 2>&1
+  )"
+  rc=$?
+  if [ "$rc" -eq 0 ] \
+     && grep -Fxq 'one_target=yes' <<<"$out" \
+     && grep -Fxq 'one_summary=control-api' <<<"$out" \
+     && grep -Fxq 'has_target=no' <<<"$out" \
+     && grep -Fxq 'summary=none' <<<"$out" \
+     && grep -Fxq 'restart=done' <<<"$out" \
+     && ! grep -Fq 'undefined=' <<<"$out" \
+     && ! grep -Fq 'unbound variable' <<<"$out"; then
+    pass "an empty target list survives set -u (bash ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]})"
+  else
+    fail "an empty target list under set -u: rc=$rc out=$out"
+  fi
+}
+
+# CI runs this suite on ubuntu-latest, whose bash (4.4 and later) accepts
+# "${arr[@]}" on an empty array under set -u, so the case above cannot fail
+# there. This literal check can. Every function in pre-gate-incremental.sh that
+# expands one of the file's INCREMENTAL_* arrays must use the
+# ${arr[@]+"${arr[@]}"} form, or read the array's count first: the build loops
+# return on ${#INCREMENTAL_TARGETS[@]} == 0 before they expand it.
+assert_every_incremental_array_expansion_is_guarded() {
+  local src arrays report unguarded fn body missing=""
+  src="$REPO_ROOT/scripts/minikube/pre-gate-incremental.sh"
+  arrays="$(sed -n 's/^\(INCREMENTAL_[A-Z_]*\)=()$/\1/p' "$src" | tr '\n' ' ')"
+  report="$(awk -v arrays="$arrays" '
+    function strip(text, needle,   at, kept) {
+      kept = ""
+      while ((at = index(text, needle)) > 0) {
+        kept = kept substr(text, 1, at - 1)
+        text = substr(text, at + length(needle))
+      }
+      return kept text
+    }
+    function check(   i, name, rest) {
+      print "scanned " fn
+      for (i = 1; i <= count; i++) {
+        name = names[i]
+        rest = strip(body, "${" name "[@]+\"${" name "[@]}\"}")
+        if (index(rest, "\"${" name "[@]}\"") && !index(body, "${#" name "[@]}")) {
+          print "unguarded " fn " " name
+        }
+      }
+    }
+    BEGIN { count = split(arrays, names, " ") }
+    /^[a-z_]+[(][)] [{]$/ { fn = $1; sub(/[(][)]$/, "", fn); body = ""; infn = 1; next }
+    infn && /^[}]$/ { check(); infn = 0; next }
+    infn { body = body $0 "\n" }
+  ' "$src")"
+  unguarded="$(grep '^unguarded ' <<< "$report")"
+  for fn in incremental_has_target incremental_restart_targets incremental_target_summary; do
+    body="$(sed -n "/^${fn}() {\$/,/^}\$/p" "$src")"
+    # shellcheck disable=SC2016
+    if ! grep -Fqx "scanned ${fn}" <<< "$report" \
+       || [[ "$body" != *'for target in ${INCREMENTAL_TARGETS[@]+"${INCREMENTAL_TARGETS[@]}"}; do'* ]]; then
+      missing+="${fn} "
+    fi
+  done
+  if [ -z "$unguarded" ] && [ -z "$missing" ] \
+     && [[ " $arrays " == *" INCREMENTAL_TARGETS "* ]]; then
+    pass "every INCREMENTAL_* array expansion is guarded for bash 3.2 under set -u"
+  else
+    fail "an INCREMENTAL_* array expansion can abort bash 3.2 under set -u: ${unguarded:-} missing=${missing:-none} arrays=${arrays}"
+  fi
+}
+
+# Every assert_ case this file defines, one name per line.
+defined_cases() {
+  grep -oE '^assert_[a-z_]+\(\) \{' "$REPO_ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh" \
+    | sed -E 's/\(\) \{$//' | sort -u
+}
+
 assert_every_defined_case_is_invoked() {
   local self defined invoked missing
   self="$REPO_ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh"
-  defined="$(grep -oE '^assert_[a-z_]+\(\) \{' "$self" | sed -E 's/\(\) \{$//' | sort -u)"
+  defined="$(defined_cases)"
   invoked="$(grep -oE '^assert_[a-z_]+$' "$self" | sort -u)"
   missing="$(comm -23 <(printf '%s\n' "$defined") <(printf '%s\n' "$invoked"))"
   if [ -z "$missing" ]; then
@@ -1180,9 +1683,16 @@ assert_an_unresolvable_baseline_hard_fails_in_ghcr_mode
 assert_the_release_image_revision_label_supplies_the_missing_baseline
 assert_no_marker_and_no_revision_label_fails_closed
 assert_an_unreachable_docker_daemon_cannot_become_a_baseline
+assert_an_unreadable_plan_delta_stops_the_sync
 assert_a_re_acquisition_invalidates_the_marker_baseline_in_ghcr_mode
 assert_a_re_acquisition_invalidates_the_marker_baseline_in_local_mode
 assert_an_untouched_image_set_keeps_the_marker_baseline
+assert_a_tag_override_on_a_synced_profile_re_pulls_and_re_deploys
+assert_a_tag_override_on_an_unsynced_profile_re_deploys
+assert_an_acquisition_at_another_tag_since_the_marker_re_deploys
+assert_a_forced_ghcr_sync_shadows_every_change_since_the_release
+assert_a_reverted_uncommitted_change_is_rebuilt
+assert_the_marker_records_every_uncommitted_path
 assert_the_pre_gate_adopts_the_recorded_cluster_mode_over_the_environment
 assert_a_recorded_local_build_renders_the_local_overlay
 assert_the_migration_job_renders_the_overlay_the_cluster_runs
@@ -1201,6 +1711,15 @@ assert_a_targeted_build_carries_the_recorded_coordinate_forward
 assert_the_touched_scripts_parse
 assert_incremental_runtime_calls_are_bounded
 assert_empty_incremental_docker_env_fails_closed
+assert_an_empty_target_list_survives_set_u
+assert_every_incremental_array_expansion_is_guarded
 assert_every_defined_case_is_invoked
 
+# Suite verdict. FAIL=0 alone is not a pass: a run that executed none of the
+# cases, or fewer than this file defines, must fail too.
+DEFINED_CASE_COUNT="$(defined_cases | grep -c .)"
+if [ "$PASS_COUNT" -eq 0 ] || [ "$PASS_COUNT" -lt "$DEFINED_CASE_COUNT" ]; then
+  fail "${PASS_COUNT} of ${DEFINED_CASE_COUNT} defined cases passed"
+fi
+echo "${PASS_COUNT}/${DEFINED_CASE_COUNT} cases passed"
 exit $FAIL
