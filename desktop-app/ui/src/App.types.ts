@@ -17,6 +17,12 @@ export type PendingSandboxUiDeepLink = {
   failedMessageDismissed?: boolean
 }
 
+export type SandboxUiSessionInvalidation = {
+  sessionGeneration: number
+  appDeepLinkMinimumId: number
+  gfsDeepLinkMinimumId: number
+}
+
 /**
  * Which launch a gesture asks for once its commit landed. `activeTab` (reveal
  * gestures, and Refresh/Reopen/Retry with `replace`) launches the app tab the

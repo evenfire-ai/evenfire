@@ -71,6 +71,11 @@ import type { EmbedRefreshErrorEvent } from '@lib/embedOwnershipMachine.types'
 import { embedFailureMessage, embedViewState } from '@lib/embedOwnershipView'
 import { prefillNewConversationWithGfsResource } from '@lib/gfsConversationPrefill'
 import {
+  classifyGfsDeepLinkActivation,
+  derivePendingGfsDeepLinkConfirmation,
+  isGfsDeepLinkAcceptable,
+} from '@lib/gfsDeepLinkState'
+import {
   authoritativeGfsStatus,
   expireGfsPreviewTabs,
   markPluginGfsPreviewUnavailable,
@@ -146,6 +151,7 @@ import type {
   GfsResourceDeepLinkEnvelope,
   PendingSandboxUiDeepLink,
   SandboxUiDeepLinkEnvelope,
+  SandboxUiSessionInvalidation,
 } from '@/App.types'
 import { GfsDragSessionProvider } from '@/gfs/dragSession'
 import type { ActiveSandboxUiApp, NavItem, ThemeMode } from '@/uiTypes'
@@ -156,12 +162,6 @@ import {
   platformFromNavigator,
 } from '../../src/desktopCommands'
 import type { DeepLinkAcknowledgmentAuthority } from '../../src/types'
-
-type SandboxUiSessionInvalidation = {
-  sessionGeneration: number
-  appDeepLinkMinimumId: number
-  gfsDeepLinkMinimumId: number
-}
 
 type PendingSandboxUiDeepLinkLaunch = {
   linkId: number
@@ -2112,9 +2112,16 @@ export function App() {
         sessionInvalidationQueueRevisionRef.current += 1
         return
       }
-      if (!gfsDeepLinkAcceptingRef.current || value.id < gfsDeepLinkMinimumIdRef.current) return
-      if (acknowledgedGfsDeepLinkIdsRef.current.has(value.id)) return
-      if (pendingGfsDeepLinksRef.current.some(item => item.envelope.id === value.id)) return
+      if (
+        !isGfsDeepLinkAcceptable(value.id, {
+          accepting: gfsDeepLinkAcceptingRef.current,
+          minimumId: gfsDeepLinkMinimumIdRef.current,
+          acknowledgedIds: acknowledgedGfsDeepLinkIdsRef.current,
+          pending: pendingGfsDeepLinksRef.current,
+        })
+      ) {
+        return
+      }
       const uri = normalizeGfsResourceUri(value?.uri)
       if (!uri) {
         vm.pushToast('Could not open EvenDrive link: the resource route is malformed.', 'error')
@@ -3037,41 +3044,27 @@ export function App() {
   ])
 
   React.useEffect(() => {
-    const active = activeGfsDeepLinkRef.current
-    if (
-      active &&
-      (active.principalGeneration !== gfsDeepLinkGenerationRef.current ||
-        !vm.isNavigationIntentCurrent(active.intentSequence))
-    ) {
-      void acknowledgeGfsDeepLink(active.id)
+    const decision = classifyGfsDeepLinkActivation({
+      active: activeGfsDeepLinkRef.current,
+      pending: pendingGfsDeepLinksRef.current,
+      principalGeneration: gfsDeepLinkGenerationRef.current,
+      isNavigationIntentCurrent: sequence => vm.isNavigationIntentCurrent(sequence),
+      bootSplashLoading,
+      isAuthenticated: vm.isAuthenticated,
+      authenticatedPrincipalIdentity: vm.authenticatedPrincipalIdentity,
+      processingGfsDeepLinkId: processingGfsDeepLinkIdRef.current,
+    })
+    if (decision.kind === 'acknowledge') {
+      void acknowledgeGfsDeepLink(decision.id)
       return
     }
-
-    const pending = pendingGfsDeepLinksRef.current.find(item => item.request !== null)?.request
-    if (
-      pending &&
-      (pending.principalGeneration !== gfsDeepLinkGenerationRef.current ||
-        !vm.isNavigationIntentCurrent(pending.intentSequence))
-    ) {
-      void acknowledgeGfsDeepLink(pending.id)
-      return
-    }
-
-    if (
-      bootSplashLoading ||
-      !vm.isAuthenticated ||
-      !vm.authenticatedPrincipalIdentity ||
-      processingGfsDeepLinkIdRef.current !== null
-    ) {
-      return
-    }
-    if (!pending) return
-    const uri = normalizeGfsResourceUri(pending.uri)
-    if (!uri) {
-      void acknowledgeGfsDeepLink(pending.id)
+    if (decision.kind === 'wait') return
+    if (decision.kind === 'malformed') {
+      void acknowledgeGfsDeepLink(decision.id)
       vm.pushToast('Could not open EvenDrive link: the resource route is malformed.', 'error')
       return
     }
+    const pending = decision.request
     processingGfsDeepLinkIdRef.current = pending.id
     activeGfsDeepLinkRef.current = pending
     setActiveGfsDeepLink(pending)
@@ -3810,23 +3803,20 @@ export function App() {
     item => item.confirmedIdentity === vm.authenticatedPrincipalIdentity
   )
   const firstPendingGfsDeepLink = pendingGfsDeepLinks[0]
-  const pendingGfsDeepLinkConfirmation =
-    !pendingSandboxUiConfirmation &&
-    !failedSandboxUiDeepLink &&
-    !hasConfirmedSandboxUiDeepLink &&
-    processingSandboxUiDeepLinkIdRef.current === null &&
-    !bootSplashLoading &&
-    vm.isAuthenticated &&
-    !!vm.authenticatedPrincipalIdentity &&
-    !sessionInvalidation &&
-    gfsDeepLinkAcceptingRef.current &&
-    processingGfsDeepLinkIdRef.current === null &&
-    activeGfsDeepLink === null &&
-    firstPendingGfsDeepLink?.request === null &&
-    (firstPendingGfsDeepLink.receivedIdentity === null ||
-      firstPendingGfsDeepLink.receivedIdentity === vm.authenticatedPrincipalIdentity)
-      ? firstPendingGfsDeepLink
-      : null
+  const pendingGfsDeepLinkConfirmation = derivePendingGfsDeepLinkConfirmation({
+    pendingSandboxUiConfirmation,
+    failedSandboxUiDeepLink,
+    hasConfirmedSandboxUiDeepLink,
+    processingSandboxUiDeepLinkId: processingSandboxUiDeepLinkIdRef.current,
+    bootSplashLoading,
+    isAuthenticated: vm.isAuthenticated,
+    authenticatedPrincipalIdentity: vm.authenticatedPrincipalIdentity,
+    sessionInvalidation,
+    gfsDeepLinkAccepting: gfsDeepLinkAcceptingRef.current,
+    processingGfsDeepLinkId: processingGfsDeepLinkIdRef.current,
+    activeGfsDeepLink,
+    firstPendingGfsDeepLink,
+  })
   const pendingSandboxUiDeepLinkRollback = vm.authenticatedPrincipalIdentity
     ? pendingSandboxUiDeepLinks.find(
         item =>
