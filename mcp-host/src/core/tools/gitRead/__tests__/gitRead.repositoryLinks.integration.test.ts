@@ -374,14 +374,40 @@ describe('git_read repository links (P2–P4)', () => {
     expect(await verdict(repo)).toBe('directory_outside_workspace')
   })
 
-  it('the link walk stops at its entry budget', () => {
+  it('the link walk stops at its entry budget', async () => {
     const repo = freshRepo()
     const gitDir = fs.realpathSync(path.join(repo, '.git'))
-    expect(() => walkRepositoryLinks([gitDir], fx.root, [], 5)).toThrow(
-      expect.objectContaining({ category: 'repository_too_large' })
-    )
-    expect(() => walkRepositoryLinks([gitDir], fx.root, [], 200_000)).not.toThrow()
+    await expect(walkRepositoryLinks([gitDir], fx.root, [], { budget: 5 })).rejects.toMatchObject({
+      category: 'repository_too_large',
+    })
+    await expect(
+      walkRepositoryLinks([gitDir], fx.root, [], { budget: 200_000 })
+    ).resolves.toBeUndefined()
     expect(GIT_READ_LINK_WALK_BUDGET).toBe(200_000)
+  })
+
+  it('the link walk yields to the event loop between directory reads', async () => {
+    const repo = freshRepo()
+    const gitDir = fs.realpathSync(path.join(repo, '.git'))
+    for (let i = 0; i < 300; i++)
+      fs.mkdirSync(path.join(gitDir, 'many', `d${i}`), { recursive: true })
+    const order: string[] = []
+    setImmediate(() => order.push('other work'))
+    await walkRepositoryLinks([gitDir], fx.root, []).then(() => order.push('walk done'))
+    // A synchronous walk finished before any other callback could run.
+    expect(order).toEqual(['other work', 'walk done'])
+    fs.rmSync(path.join(gitDir, 'many'), { recursive: true, force: true })
+  })
+
+  it('the link walk stops with timeout past its deadline', async () => {
+    const repo = freshRepo()
+    const gitDir = fs.realpathSync(path.join(repo, '.git'))
+    await expect(
+      walkRepositoryLinks([gitDir], fx.root, [], { deadline: Date.now() - 1 })
+    ).rejects.toMatchObject({ category: 'timeout' })
+    await expect(
+      walkRepositoryLinks([gitDir], fx.root, [], { deadline: Date.now() + 60_000 })
+    ).resolves.toBeUndefined()
   })
 
   it('a repository root configured through a symlink works', async () => {

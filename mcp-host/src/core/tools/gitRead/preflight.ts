@@ -300,24 +300,32 @@ export function checkAlternates(
  * link to a directory is walked by its realpath. A file outside an object
  * store (`objects/`) with more than one hard link is refused: its other names
  * are not visible. One seen-set ends cycles; one budget bounds the whole walk.
+ *
+ * The walk is asynchronous, one directory read at a time, so a large
+ * repository does not block the event loop that serves every other
+ * conversation; past `deadline` (epoch ms) it stops with `timeout`.
  */
-export function walkRepositoryLinks(
+export async function walkRepositoryLinks(
   dirs: readonly string[],
   realRoot: string,
   objectStores: readonly string[],
-  budget = GIT_READ_LINK_WALK_BUDGET
-): void {
+  options: { budget?: number; deadline?: number } = {}
+): Promise<void> {
+  const budget = options.budget ?? GIT_READ_LINK_WALK_BUDGET
+  const deadline = options.deadline ?? Number.POSITIVE_INFINITY
   const seen = new Set<string>()
   let entries = 0
   // Files inside an object store may be hard links (`git clone --local`
   // links objects, packs and objects/info); git reads them as store data.
   const inStore = (real: string): boolean => objectStores.some(store => isInside(real, store))
-  const linkedElsewhere = (real: string): boolean => !inStore(real) && fs.lstatSync(real).nlink > 1
-  const walk = (dir: string): void => {
+  const linkedElsewhere = async (real: string): Promise<boolean> =>
+    !inStore(real) && (await fs.promises.lstat(real)).nlink > 1
+  const walk = async (dir: string): Promise<void> => {
+    if (Date.now() > deadline) throw new GitReadRefusal('timeout')
     const real = kernelPath(dir)
     if (seen.has(real)) return
     seen.add(real)
-    for (const dirent of fs.readdirSync(real, { withFileTypes: true })) {
+    for (const dirent of await fs.promises.readdir(real, { withFileTypes: true })) {
       if (++entries > budget) throw new GitReadRefusal('repository_too_large')
       const child = path.join(real, dirent.name)
       if (dirent.isSymbolicLink()) {
@@ -329,16 +337,18 @@ export function walkRepositoryLinks(
           throw new GitReadRefusal('directory_outside_workspace')
         }
         confine(target, realRoot)
-        if (fs.statSync(target).isDirectory()) walk(target)
-        else if (linkedElsewhere(target)) throw new GitReadRefusal('directory_outside_workspace')
+        if ((await fs.promises.stat(target)).isDirectory()) await walk(target)
+        else if (await linkedElsewhere(target)) {
+          throw new GitReadRefusal('directory_outside_workspace')
+        }
       } else if (dirent.isDirectory()) {
-        walk(child)
-      } else if (linkedElsewhere(child)) {
+        await walk(child)
+      } else if (await linkedElsewhere(child)) {
         throw new GitReadRefusal('directory_outside_workspace')
       }
     }
   }
-  for (const dir of dirs) walk(dir)
+  for (const dir of dirs) await walk(dir)
 }
 
 /**
@@ -733,7 +743,9 @@ export async function runPreflight(ctx: PreflightContext): Promise<PreflightResu
       ...checkAlternates(objects, realRoot),
       ...submoduleObjectStores(commonDir),
     ]
-    walkRepositoryLinks([gitDir, commonDir, ...stores], realRoot, stores)
+    await walkRepositoryLinks([gitDir, commonDir, ...stores], realRoot, stores, {
+      deadline: Date.now() + ctx.timeoutMs,
+    })
   } catch (error) {
     return { kind: 'refused', category: refusalOf(error) }
   }
