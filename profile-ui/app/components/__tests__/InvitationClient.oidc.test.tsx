@@ -236,7 +236,7 @@ describe('InvitationClient provider sign-in', () => {
     expect(fetchMock).toHaveBeenCalledOnce()
   })
 
-  it('offers no provider button when member sign-in is off', async () => {
+  it('offers no provider button and shows no error when the configuration request fails', async () => {
     fetchMock.mockRejectedValue(new TypeError('network down'))
 
     renderInvitation(pendingInvitation)
