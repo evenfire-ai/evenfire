@@ -21,6 +21,7 @@ import {
 } from '@playwright/test'
 import fs from 'node:fs'
 import path from 'node:path'
+import { startAgentChatFromFleet } from './helpers/agentNavigation.js'
 
 export const DESKTOP_APP_ROOT = path.resolve(__dirname, '../..')
 export const MAIN_ENTRY = path.join(DESKTOP_APP_ROOT, 'dist/main.js')
@@ -291,44 +292,8 @@ export async function openAgentsPage(page: Page): Promise<void> {
  * Uses exact identity (no first-available fallback), per the recorder contract.
  */
 export async function openExactAgentChat(page: Page, hostRef: string): Promise<void> {
-  const settingsMenu = page.getByTestId('nav-settings-menu')
-  if ((await settingsMenu.getAttribute('aria-expanded')) !== 'true') {
-    await settingsMenu.click()
-  }
-
-  // Agents now sits directly inside the Settings popover (no Resources submenu).
-  const agentsItem = page.getByTestId('nav-agents')
-  await expect(agentsItem).toBeVisible({ timeout: 15_000 })
-  await agentsItem.click()
-  const chatInput = page.getByRole('textbox', { name: 'Agent message composer' })
-  const exactAgent = page.locator('.agents-table-row-clickable', { hasText: hostRef }).first()
-  const emptyState = page.getByText('No agents available')
-  await expect(chatInput.or(exactAgent).or(emptyState)).toBeVisible({ timeout: 20_000 })
-
-  if (await emptyState.isVisible().catch(() => false)) {
-    throw new Error(`No agents are available for the configured Desktop test user.`)
-  }
-  if (await exactAgent.isVisible().catch(() => false)) {
-    await exactAgent.click()
-  }
-
-  await page.getByTestId('nav-chat').click()
-  const switchAgent = page.getByRole('button', { name: /^Switch chat agent$/ })
-  await expect(switchAgent).toBeVisible({ timeout: 20_000 })
-
-  if (
-    !(await chatInput.isVisible().catch(() => false)) ||
-    !(await switchAgent
-      .getByText(hostRef, { exact: true })
-      .isVisible()
-      .catch(() => false))
-  ) {
-    await switchAgent.click()
-    await page.getByRole('menuitem', { name: hostRef, exact: true }).click()
-  }
-
-  await expect(chatInput).toBeVisible({ timeout: 20_000 })
-  await expect(switchAgent).toContainText(hostRef)
+  await openAgentsPage(page)
+  await startAgentChatFromFleet(page, hostRef)
 }
 
 /** Send a chat message and wait for a non-empty assistant response. */

@@ -129,7 +129,8 @@ function assertLoadedOverview() {
   expect(
     within(screen.getByRole('region', { name: 'Agent identity' })).getByText('Active')
   ).toBeInTheDocument()
-  expect(screen.getByText(host.spec.description)).toBeInTheDocument()
+  // The overview no longer renders spec.description — it must stay absent.
+  expect(screen.queryByText(host.spec.description)).not.toBeInTheDocument()
   expect(
     within(screen.getByRole('region', { name: 'Connectors' })).getByText('documents-connector')
   ).toBeInTheDocument()

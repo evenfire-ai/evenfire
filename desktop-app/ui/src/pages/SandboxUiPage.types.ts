@@ -24,6 +24,8 @@ export type SandboxUiPageProps = {
   toastShellOverlayOpen?: boolean
   deepLinkShellOverlayOpen?: boolean
   appRootOverlayOpen?: boolean
+  /** An overlay opened from inside the chat surfaces (a delete confirmation). */
+  chatShellOverlayOpen?: boolean
   localSearchRequestId?: number
   titlebarLeadingContainer?: HTMLElement | null
   // The picker grid hands the chosen app to the owner instead of opening it

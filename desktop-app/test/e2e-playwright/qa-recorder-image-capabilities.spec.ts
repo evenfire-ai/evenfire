@@ -2,6 +2,7 @@ import { type ElectronApplication, type Page, type TestInfo, expect, test } from
 import fs from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
+import { startAgentChatFromFleet } from './helpers/agentNavigation.js'
 import {
   FIXTURE_RESPONSE_KIND,
   FIXTURE_TEXT_ONLY_CONTENT,
@@ -13,6 +14,7 @@ import {
   sha256Hex,
 } from './helpers/imageCapabilityEvidence'
 import { buildImageFixture, orderedColorListRegex } from './helpers/qaRecorderImageFixture'
+import { openAgentsPage as openIdentityAgentsPage } from './navigationHelpers.js'
 import {
   DESKTOP_APP_ROOT,
   EXTERNAL_REST_API_BASE_URL,
@@ -240,22 +242,12 @@ async function startBlankChat(page: Page) {
 }
 
 /**
- * Land on the exact configured agent through the visible Switch chat agent
- * menu. The composer is only trusted once the switch control reports the
- * configured host reference, so an auto-selected agent cannot satisfy this.
+ * Select the configured agent through its exact fleet identity, then verify
+ * the new-chat selector against the current catalog display name.
  */
 async function openConfiguredAgentChat(page: Page, hostRef: string) {
-  await page.getByTestId('nav-chat').click()
-  const switchAgent = page.getByRole('button', { name: 'Switch chat agent' })
-  await expect(switchAgent).toBeVisible({ timeout: 30_000 })
-  await switchAgent.click()
-  const visibleName = new RegExp(`^${hostRef.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')
-  const agentMenuItem = page.getByRole('menuitem', { name: visibleName })
-  await expect(agentMenuItem).toHaveCount(1)
-  await agentMenuItem.click()
-  await expect(switchAgent).toContainText(
-    new RegExp(hostRef.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
-  )
+  await openIdentityAgentsPage(page)
+  await startAgentChatFromFleet(page, hostRef)
 }
 
 /** The model options menu, opened from the composer's own chip. */
@@ -500,7 +492,7 @@ test('optional QA recorder: Desktop image capability — blocked on text-only mo
 
     await signIn(page)
 
-    // Land on the exact configured agent through the visible Switch chat agent
+    // Land on the exact configured agent through its fleet identity
     // menu. The composer is only trusted after the switch control reports the
     // configured host reference, so an auto-selected agent cannot satisfy this.
     await openConfiguredAgentChat(page, hostRef)
