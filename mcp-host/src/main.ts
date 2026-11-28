@@ -64,7 +64,8 @@ import { SessionSearchService } from './core/sessionSearch'
 import { SpilloverStorage } from './core/spillover'
 import { FsSpilloverResolver } from './core/spillover/fsResolver'
 import { isInternalGeneratedArtifactAttachment } from './core/tools/generatedArtifactAttachments'
-import { NativeToolRegistry } from './core/tools/nativeToolRegistry'
+import { probeGitRead } from './core/tools/gitRead/probe'
+import { knownNativeToolNames as knownNativeToolNamesFor } from './core/tools/nativeToolRegistry'
 import { WorkflowResultTool } from './core/tools/workflow'
 import { WorkflowBrokerRequestError } from './core/tools/workflowBrokerClient.js'
 import type { Attachment } from './core/types'
@@ -321,9 +322,10 @@ let governedRunReporter: GovernedRunReporter | null = null
 // "unknown" by validateApprovalConfig if an operator overrides them here. v1
 // scope (http_request and the other always-on tools) is unaffected. Widen this
 // snapshot if/when overrides are extended past the always-registered set.
-const knownNativeToolNames: Set<string> = new Set(
-  new NativeToolRegistry(config.nativeTool, '').listDefinitions().map(d => d.name)
-)
+// git_read: one synchronous git probe at startup (at most 3 s), memoised, so
+// the tool list never changes between tasks.
+config.nativeTool.gitRead = probeGitRead()
+const knownNativeToolNames: Set<string> = knownNativeToolNamesFor(config.nativeTool)
 
 /**
  * Stores final responses or intermediate approval notifications for tasks

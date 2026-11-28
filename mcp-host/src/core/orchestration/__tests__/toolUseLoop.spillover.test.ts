@@ -11,6 +11,7 @@ import * as os from 'os'
 import * as path from 'path'
 import { parseCodexCompletionRequestV1 } from '@clerum/llm-provider-attempt-contract'
 import { createToolDescribeTool } from '../../../capabilities/toolCatalogTools'
+import { makeFakeConversation } from '../../conversation/__testing__/makeFakeConversation'
 import type { Tool, ToolRegistry } from '../../interfaces'
 import { BasicSafety } from '../../safety/safety'
 import { DefaultToolOutputProcessor } from '../../safety/toolOutputProcessor'
@@ -179,6 +180,8 @@ describe('executeSingleTool — T1.5 spillover wiring', () => {
       ],
       {
         ...configFor({ tools: [target], taskId: 'schema-task' }),
+        // LoopConfig.conversation is required; the batch reads its redirect flag.
+        conversation: makeFakeConversation(),
         loopController: new DefaultLoopController(),
         bridge: {
           nativeNames: new Set([reader.name(), 'clerum__tool_call']),

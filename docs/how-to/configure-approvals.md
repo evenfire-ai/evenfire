@@ -6,8 +6,9 @@ an earlier approval already covers it: approving once for the rest of the
 turn, an "always" grant for the tool, or a grant for its whole MCP server lets
 later matching calls run without a new prompt. The per-tool overrides below do
 not apply to MCP tools.
-Among **native** tools, five require approval by default — `shell_exec`,
-`http_request`, `cron_manage`, `browser_open`, and `browser_navigate`.
+Among **native** tools, six require approval by default — `shell_exec`,
+`http_request`, `cron_manage`, `git_read`, `browser_open`, and
+`browser_navigate`.
 `workflow_trigger` also requires approval, except when the task came from
 Telegram, Slack or Teams. Every other native tool runs without prompting. Each
 native tool can be flipped with a per-tool override on `Host.spec.approval`.
@@ -19,6 +20,36 @@ file read ask, and guardrail `file_read` rules apply to the file (see
 `tools.file_read: false` does not loosen `tools.json_transform: true`. The
 output of `json_transform` reaches the model wrapped as tool output, like
 `file_read`'s.
+
+`git_read` is read-only git in a workspace repository, without a shell. It is
+registered when a root-owned git 2.38 or newer is installed in `/usr/bin` or
+`/bin` and the shell and file tools share one workspace root. It excludes
+platform-managed paths by name, so content stored in the repository under
+another name is not excluded; that is one reason content reads show a card
+in `auto`. It refuses a
+repository whose configuration has settings it does not accept (drivers,
+filters, includes, signing tools and the like), or whose git directory or
+object stores contain a link that leads outside the workspace or does not
+resolve. For `status`, and for `grep` and `diff` of the worktree, it also
+refuses an index that names paths outside the worktree, and for a worktree
+`grep` an index path whose leading directory is a link. It also refuses
+revisions in git notes history. In `auto`, a call that returns only names,
+ids and metadata such as blob ids, line counts, sizes and rename similarity (`status`, `log` without a
+patch, branches, tags, refs, `remote`, listings) runs with no card, and that metadata
+can describe any committed file, platform-managed paths included; a call that can return file content (`show`, `diff`, `grep`,
+`blame`, `cat_file`, `log` with a patch or pickaxe) shows a card for that one
+call. `remote` prints each URL with its user name and password replaced by
+`***`, in every mode. Its approval follows the shell and `file_read`:
+
+- `tools.shell_exec: true` or `tools.file_read: true` also make `git_read`
+  ask. `tools.git_read: false` runs it with no card only when neither is
+  `true`.
+- In manual, an approval of `shell_exec` (for the task or always) also covers
+  `git_read`; an approval of `git_read` never covers the shell.
+- Guardrail `file_read` rules apply to the files it reads, as for
+  `json_transform` (see
+  [Configure guardrails](configure-guardrails.md#file_read-rules-cover-git_read-reads)).
+  Hooks see the call as `git_read`.
 
 Pending approvals are kept in mcp-host's conversation store. The default store
 (`CLERUM_SESSION_STORE=memory`) is in memory, so a pod restart loses them.
@@ -124,7 +155,7 @@ choice, so raising it again restores that choice.
 | Mode | What a gated call does |
 | --- | --- |
 | `manual` | Today's card. The classifier is not called. |
-| `auto` | Judges `shell_exec` on the models below. Read-only commands inside the workspace run; anything else shows the shell card. `http_request` runs with no card. Every other tool still shows a card. |
+| `auto` | Judges `shell_exec` on the models below. Read-only commands inside the workspace run; anything else shows the shell card. A typed `git` command that only lists repository state (`git status`, `git log` without a patch, branch and tag listings) is answered once with a pointer to `git_read` instead, when no guardrail rule is configured and you have not denied the shell in that session; sending it again takes the shell path. `http_request` runs with no card, and so does a `git_read` call that returns only names and ids; a `git_read` call that can return file content shows a card. Every other tool still shows a card. |
 | `allow_all` | Runs every call that would have shown a card, except two. `cron_manage` asks exactly when manual would (see below). A guardrail `ask` (an explicit `ask` rule, or the `unmatched_ask` default of a Host with guardrail rules) still shows its card. |
 
 `cron_manage` asks exactly when manual would, in every mode. A task grant
@@ -296,7 +327,8 @@ from the environment, any `OPENAI_API_KEY` enables the classifier model.
 
 An explicit `tools.shell_exec: true` keeps a card on every shell call in auto,
 with no classifier and no shell memory. Remove the line if auto should judge
-shell. It does not keep a card in allow-all; a guardrail `ask` rule does. See
+shell. It does not keep a card in allow-all; a guardrail `ask` rule does. It
+also makes `git_read` card. See
 [Host CRD](../crds/host.md#approval-mode-ceiling).
 
 ## Option C — the Control UI

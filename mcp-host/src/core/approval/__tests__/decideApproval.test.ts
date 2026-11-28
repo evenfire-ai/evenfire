@@ -5,6 +5,7 @@ import type { PendingApproval } from '../../types'
 import type { ApprovalMode } from '../approvalMode'
 import { type ModeDecision, decideApproval } from '../decideApproval'
 import type { GateCause } from '../gateCause'
+import { GRANT_COVERED_BY } from '../nativeApprovalCause'
 import { shellCardDescriptor } from '../shellCard'
 import type { ShellVerdict } from '../shellClassifier'
 
@@ -361,6 +362,119 @@ describe('decideApproval', () => {
       ).toEqual({ kind: 'card', cell: 'X2', scope: 'exact_invocation' })
     }
   )
+})
+
+describe('decideApproval: git_read', () => {
+  const GIT = 'git_read'
+
+  it('auto runs a names-only git_read as A9', () => {
+    expect(
+      decideApproval({
+        mode: 'auto',
+        toolName: GIT,
+        cause: 'ordinary',
+        grants: grants(),
+        contentRead: false,
+        classifierAvailable: true,
+      })
+    ).toEqual({ kind: 'run', cell: 'A9' })
+  })
+
+  it('auto cards a git_read content read, or one not known to be names-only, as A6', () => {
+    for (const contentRead of [true, undefined]) {
+      expect(
+        decideApproval({
+          mode: 'auto',
+          toolName: GIT,
+          cause: 'ordinary',
+          grants: grants({ task: [SHELL, GIT], always: [SHELL, GIT] }),
+          ...(contentRead === undefined ? {} : { contentRead }),
+          classifierAvailable: true,
+        })
+      ).toEqual({ kind: 'card', cell: 'A6', scope: 'exact_invocation' })
+    }
+  })
+
+  it('auto cards git_read as A5 for every exact cause and admin_forced', () => {
+    for (const cause of A5_CAUSES) {
+      expect(decide({ mode: 'auto', toolName: GIT, cause })).toEqual({
+        kind: 'card',
+        cell: 'A5',
+        scope: 'exact_invocation',
+      })
+    }
+  })
+
+  it('manual cards git_read as M1 as_produced', () => {
+    expect(decide({ mode: 'manual', toolName: GIT, cause: 'ordinary' })).toEqual({
+      kind: 'card',
+      cell: 'M1',
+      scope: 'as_produced',
+    })
+  })
+
+  it('a task shell_exec grant runs git_read in manual', () => {
+    for (const cause of ['ordinary', 'admin_forced'] as const) {
+      expect(decide({ mode: 'manual', toolName: GIT, cause, task: [SHELL] })).toEqual({
+        kind: 'run',
+        cell: 'M1',
+      })
+    }
+  })
+
+  it('an always shell_exec grant runs git_read in manual', () => {
+    expect(decide({ mode: 'manual', toolName: GIT, cause: 'ordinary', always: [SHELL] })).toEqual({
+      kind: 'run',
+      cell: 'M1',
+    })
+  })
+
+  it('only a shell_exec grant covers git_read: http_request and file_read grants do not', () => {
+    expect(GRANT_COVERED_BY).toEqual({ git_read: ['shell_exec'] })
+    for (const name of [HTTP, 'file_read', 'json_transform']) {
+      expect(
+        decide({
+          mode: 'manual',
+          toolName: 'git_read',
+          cause: 'ordinary',
+          task: [name],
+          always: [name],
+        })
+      ).toEqual({ kind: 'card', cell: 'M1', scope: 'as_produced' })
+    }
+  })
+
+  it('a git_read grant does not run shell_exec', () => {
+    expect(
+      decide({ mode: 'manual', toolName: SHELL, cause: 'ordinary', task: [GIT], always: [GIT] })
+    ).toEqual({ kind: 'card', cell: 'M1', scope: 'as_produced' })
+  })
+
+  it('a shell_exec grant does not cover git_read under guardrail_ask or denied', () => {
+    for (const cause of ['guardrail_ask', 'denied'] as const) {
+      expect(
+        decide({ mode: 'manual', toolName: GIT, cause, task: [SHELL], always: [SHELL, GIT] })
+      ).toEqual({ kind: 'card', cell: 'M2', scope: 'exact_invocation' })
+    }
+  })
+
+  it('allow_all runs git_read as X1 and cards a guardrail ask as X2', () => {
+    expect(decide({ mode: 'allow_all', toolName: GIT, cause: 'ordinary' })).toEqual({
+      kind: 'run',
+      cell: 'X1',
+    })
+    expect(decide({ mode: 'allow_all', toolName: GIT, cause: 'guardrail_ask' })).toEqual({
+      kind: 'card',
+      cell: 'X2',
+      scope: 'exact_invocation',
+    })
+  })
+
+  it('a CRD false (cause none) runs git_read as N1 in every mode', () => {
+    for (const mode of MODES) {
+      expect(decide({ mode, toolName: GIT, cause: 'none' })).toEqual({ kind: 'run', cell: 'N1' })
+    }
+  })
 })
 
 describe('shellCardDescriptor', () => {

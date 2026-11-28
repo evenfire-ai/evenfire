@@ -11,9 +11,10 @@
  *
  * The decorator chain:
  *   ApprovalController (denial re-ask, re-ask for tools that start other tools
- *     while a denial is active, forced approval, live tools → delegate, exact
- *     auto_approved_tools / task_approved_tools name, then a one-shot of the
- *     same tool call id and arguments)
+ *     while a denial is active, forced approval, live tools → delegate, an
+ *     auto_approved_tools / task_approved_tools grant of the tool or of a tool
+ *     whose grant covers it (grantNames), then a one-shot of the same tool
+ *     call id and arguments)
  *     └─ UnifiedApprovalGateController (MCP tool? → suspend. Native requiresApproval? → suspend. Else → "proceed")
  *
  * A "*" entry or an MCP server prefix in auto_approved_tools does not
@@ -23,6 +24,7 @@
 import { randomUUID } from 'node:crypto'
 import { logger } from '../../logger'
 import type { GateCause } from '../approval/gateCause'
+import { grantNames } from '../approval/nativeApprovalCause'
 import { hasActiveDenials, isDenied } from '../conversation/denialPolicy'
 import { LoopController, ToolRegistry } from '../interfaces'
 import { ChatMessage, PendingApproval, ToolDefinition } from '../types'
@@ -41,6 +43,7 @@ export const SESSION_SCOPED_APPROVAL_TOOLS: ReadonlySet<string> = new Set([
   'shell_exec',
   'http_request',
   'cron_manage',
+  'git_read',
 ])
 
 /**
@@ -93,8 +96,8 @@ function reaskDescription(toolName: string, reask: 'denied' | 'denials_active'):
 }
 
 /**
- * Decorator that honors a denial, a forced approval, live tools, then an exact
- * allowlisted name, then a one-shot pending approval, before delegating.
+ * Decorator that honors a denial, a forced approval, live tools, then a name
+ * grant (grantNames), then a one-shot pending approval, before delegating.
  */
 export class ApprovalController implements LoopController {
   private readonly conversation: Conversation
@@ -133,9 +136,10 @@ export class ApprovalController implements LoopController {
 
   /**
    * Order: denial re-ask, re-ask for tools that start other tools while a
-   * denial is active, forced approval, live tools, exact allowlisted name
-   * (auto_approved_tools / task_approved_tools), one-shot of the same tool call
-   * id and arguments, otherwise the delegate.
+   * denial is active, forced approval, live tools, a name grant of the tool or
+   * of a tool whose grant covers it (auto_approved_tools / task_approved_tools,
+   * grantNames), one-shot of the same tool call id and arguments, otherwise
+   * the delegate.
    *
    * A forced approval (cron×stateless create/enable) always suspends: no stored
    * approval covers it, and the approved frozen call runs directly on resume.
@@ -186,12 +190,16 @@ export class ApprovalController implements LoopController {
         : decision
     }
 
-    // Exact-name grants: "always" approvals, then this task's plain
-    // session-scoped approvals. A mode-aware admission reads them in the table.
+    // Name grants: "always" approvals, then this task's plain session-scoped
+    // approvals, of the tool or of a tool whose grant covers it
+    // (`grantNames`). A mode-aware admission reads them in the table.
     if (
       !this.modeAware &&
-      (this.conversation.auto_approved_tools.has(toolName) ||
-        this.conversation.task_approved_tools?.has(toolName) === true)
+      grantNames(toolName).some(
+        name =>
+          this.conversation.auto_approved_tools.has(name) ||
+          this.conversation.task_approved_tools?.has(name) === true
+      )
     ) {
       return 'proceed'
     }

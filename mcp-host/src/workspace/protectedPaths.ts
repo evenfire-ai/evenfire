@@ -34,6 +34,9 @@ function isProtectedSegment(segment: string): boolean {
   return PROTECTED_WORKSPACE_DIRS.has(segment) || isRetiredGfsStoreSegment(segment)
 }
 
+/** Name prefix of the conversation database family (see `isStateDbName`). */
+export const STATE_DB_NAME_PREFIX = 'state.db'
+
 /**
  * True for every name of the conversation database family: the database, its
  * journals, and copies such as `state.db.pre-<ts>.bak` an older layout left
@@ -41,7 +44,7 @@ function isProtectedSegment(segment: string): boolean {
  * ordinary files.
  */
 export function isStateDbName(name: string): boolean {
-  return name.startsWith('state.db')
+  return name.startsWith(STATE_DB_NAME_PREFIX)
 }
 
 function normalizeWorkspacePath(relativePath: string): string {

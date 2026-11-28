@@ -1,0 +1,139 @@
+import { describe, expect, it } from 'vitest'
+import { matchTypedGitRead } from '../gitRedirect'
+
+describe('matchTypedGitRead', () => {
+  it.each([
+    ['git status', 'status'],
+    ['git -C service log -3', 'log'],
+    ['git --no-pager log -5', 'log'],
+    ['cd service && git status', 'status'],
+    ['git stash list', 'stash'],
+    ["git tag -l 'v1.*'", 'tag'],
+    ['git branch --contains abc', 'branch'],
+    ['git remote -v', 'remote'],
+    ['git remote get-url origin', 'remote'],
+    ['git reflog', 'reflog'],
+    ['git reflog -10', 'reflog'],
+    ['git reflog show', 'reflog'],
+    ['git worktree list', 'worktree'],
+    ['git branch -a -vv', 'branch'],
+    ['git branch --show-current', 'branch'],
+    ['git diff HEAD~1 -- a.txt', 'diff'],
+  ])('matches %s', (command, subcommand) => {
+    expect(matchTypedGitRead(command)).toMatchObject({ subcommand })
+  })
+
+  it.each([
+    ['git status', false],
+    ['git log -3', false],
+    ['git log --oneline --stat', false],
+    ['git --no-pager log -5', false],
+    ['git branch -a -vv', false],
+    ['git show', true],
+    ['git diff HEAD~1 -- a.txt', true],
+    ['git grep -n TODO', true],
+    ['git blame a.txt', true],
+    ['git cat-file -p HEAD', true],
+    ['git log -p', true],
+    ['git log -3p', true],
+    ['git log --patch', true],
+    ['git log -U0', true],
+    ['git log -S needle', true],
+    ['git log -Gx', true],
+    ['git log --word-diff', true],
+    ['git log -L 1,2:a.txt', true],
+    ['git log --cc', true],
+    ['git reflog show -p', true],
+    ['git reflog show --patch', true],
+    ['git log --notes', true],
+    ['git log --show-notes', true],
+    ['git log --format=%N', true],
+    ['git for-each-ref --format=%(raw)', true],
+    ['git for-each-ref --format=%(contents)', true],
+    ['git for-each-ref --format=%(refname)', false],
+    ['git reflog', false],
+  ])('%s returns content: %s', (command, content) => {
+    expect(matchTypedGitRead(command)?.content).toBe(content)
+  })
+
+  it.each([
+    'git stash',
+    'git branch -d x',
+    'git branch x',
+    'git tag v1',
+    'git remote add o u',
+    'git reflog expire',
+    'git -c x=y log',
+    'git log | head',
+    'X=1 git status',
+    'git status; rm x',
+    'git log $(cat f)',
+    'git log `cat f`',
+    'git commit -m x',
+    'git status > out.txt',
+    'git status & rm x',
+    'cd a && cd b && git status',
+    'cd a && git status && rm x',
+    'git --git-dir=x status',
+    'git',
+    'gitk status',
+    'git status\nrm x',
+    'cd a&&b&&c && git log',
+    'git log < f',
+    'git branch -D x',
+    'git tag -d v1',
+    'git tag -v v1',
+    'git tag -v',
+    'git branch --contains',
+    'git branch --set-upstream-to=x',
+    'git diff --output=x',
+    'git log --output=out.txt -p',
+    'git branch --sort=refname newb',
+    'git tag --sort=refname t1',
+  ])('does not redirect %s', command => {
+    expect(matchTypedGitRead(command)).toBeNull()
+  })
+
+  it.each([
+    ['git log --oneline -5', true],
+    ['git log -n 3 --author me --stat', true],
+    ['git log --since=2026-01-01 --format=%h --all', true],
+    ['git status -sb', true],
+    ['git status --porcelain -- src', true],
+    ['git branch -a -vv', true],
+    ['git tag -l --sort=-creatordate', true],
+    ['git for-each-ref --sort=-committerdate --format=%(refname)', true],
+    ['git rev-list --count HEAD', true],
+    ['git describe --tags --always', true],
+    ['git shortlog -sn', true],
+    ['git ls-tree -r --name-only HEAD', true],
+    ['git reflog -10', true],
+    ['git remote -v', true],
+    ['git log --merges', false],
+    ['git log --decorate --oneline', false],
+    ['git status --ignored', false],
+    ['git ls-files --others', false],
+    ['git rev-parse --short HEAD', false],
+    ['git branch --no-merged main', false],
+    ['git log -n', false],
+  ])('%s is expressible as git_read: %s', (command, expressible) => {
+    expect(matchTypedGitRead(command)).toMatchObject({ content: false, expressible })
+  })
+
+  it.each([
+    ['git status', '.'],
+    ['git -C service log -3', 'service'],
+    ['cd service && git status', 'service'],
+    ['cd apps && git -C api log -3', 'apps/api'],
+    ['git -C /etc status', null],
+    ['cd /tmp && git log', null],
+    ['git -C .. status', null],
+    ['cd a/../b && git status', null],
+    ['cd ~ && git status', null],
+    ['git -C ~/repo status', null],
+    ['git -C "repo" status', null],
+    ['git -C -x status', null],
+  ])('%s runs in git_read directory %s', (command, directory) => {
+    expect(matchTypedGitRead(command)).toMatchObject({ directory })
+  })
+})
