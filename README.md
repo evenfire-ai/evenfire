@@ -53,9 +53,8 @@ Bring agents into the conversations where your team already works. Connect
 Slack or Microsoft Teams to an agent, send it a task, and follow its replies
 and tool progress in chat.
 
-<!-- Visual slot: replace 08-team-channels.svg with 08-team-channels.png when ready. -->
 <p align="center">
-  <img src="docs/assets/readme/08-team-channels.svg" alt="Visual placeholder for an agent conversation in Slack or Microsoft Teams" width="100%">
+  <img src="docs/assets/readme/08-team-channels.png" alt="Slack thread with Evenfire Tasks listing pending Marketing and Product tasks and confirming creation of a new Marketing task" width="100%">
 </p>
 
 [Connect Slack](docs/how-to/connect-slack.md) ·
@@ -81,26 +80,11 @@ Auto-approve reduces prompts for eligible shell commands and HTTP requests;
 Allow all skips most approval prompts. Guardrail blocks and required guardrail
 reviews still apply, and scheduled-task management retains its approval rules.
 
-<!-- Visual slot: replace 09-approval-modes.svg with 09-approval-modes.png when ready. -->
 <p align="center">
-  <img src="docs/assets/readme/09-approval-modes.svg" alt="Visual placeholder for the Desktop approval mode picker: Manual, Auto-approve and Allow all" width="100%">
+  <img src="docs/assets/readme/09-approval-modes.png" alt="Desktop mode picker showing Manual, Auto-approve and Allow all, alongside an Airtable approval request" width="100%">
 </p>
 
 [Understand approval modes](docs/how-to/configure-approvals.md#approval-modes).
-
-### Set boundaries with configurable guardrails
-
-Add opt-in rules that allow, pause for review or block tool calls. Install
-hooks to moderate model calls or redact results at supported lifecycle points.
-Guardrail policies work alongside approvals, access controls and workload
-isolation; an allow decision does not bypass those controls.
-
-<!-- Visual slot: replace 10-guardrails.svg with 10-guardrails.png when ready. -->
-<p align="center">
-  <img src="docs/assets/readme/10-guardrails.svg" alt="Visual placeholder for an agent's installed guardrail hook and a tool action blocked by policy" width="100%">
-</p>
-
-[Configure guardrails](docs/how-to/configure-guardrails.md).
 
 ### Configure each agent's instructions and tools
 

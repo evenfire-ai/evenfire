@@ -1,29 +1,26 @@
 # README showcase images
 
-The root [README](../../../README.md#see-evenfire-in-action) uses seven finished PNG exports
-and three labeled SVG visual placeholders in this folder, in the order below. Each image has its own section
-heading, explanatory copy and descriptive alt text.
+The root [README](../../../README.md#see-evenfire-in-action) uses the nine
+finished PNG exports in this folder, in the order below. Each image has its
+own section heading, explanatory copy and descriptive alt text.
 
 | File | Image copy | Screenshot |
 | --- | --- | --- |
 | `01-desktop-conversation.png` | Put your agents to work | A marketing agent conversation with a downloadable draft campaign brief. |
-| `08-team-channels.svg` → `08-team-channels.png` | Bring your agents into the conversation | Planned: a real Slack or Microsoft Teams conversation with an agent. |
+| `08-team-channels.png` | Bring your agents into the conversation | A Slack thread listing Marketing and Product tasks and confirming a new Marketing task, with Slack, Teams and Telegram logos. |
 | `02-human-approvals.png` | Review before it runs | An Airtable tool action awaiting approval, with Approve, Always approve and Deny controls. |
-| `09-approval-modes.svg` → `09-approval-modes.png` | Choose how your agent takes action | Planned: the Desktop mode picker and its administrator limit. |
-| `10-guardrails.svg` → `10-guardrails.png` | Set boundaries for every agent | Planned: an installed hook and a tool action blocked by policy. |
+| `09-approval-modes.png` | Choose how your agent takes action | The Desktop mode picker showing Manual, Auto-approve and Allow all, plus an Airtable approval request. |
 | `03-agent-configuration.png` | Define its role; Choose its model; Connect its tools; Share with your team; Control its access | The agent overview with its model, connectors, members and teams. |
 | `04-marketplace.png` | Connect the tools you use | The Marketplace connector catalog. |
 | `07-plugins.png` | Build apps your agents can use | EvenPages open in Desktop alongside a Blog Post Creator agent listing blog posts found in the workspace. |
 | `05-evendrive.png` | Share files with your agents; Work on them together | A folder sharing dialog with people, a team, an agent and an access selector. |
 | `06-cost-and-usage.png` | Make agent spending visible | Token usage and request totals, broken down by team. Currency costs depend on configured model prices. |
 
-## Four new visual briefs
+## Composition notes
 
 Keep the existing 1920 × 1080 dark blue frame and white serif headlines.
 Use one large screenshot and at most one supporting crop per card. Make the
-product interaction readable at GitHub's display width. The SVGs deliberately
-say **Visual placeholder**; they reserve space without pretending a finished
-product screenshot exists.
+product interaction readable at GitHub's display width.
 
 ### Plugins — Build apps your agents can use
 
@@ -94,42 +91,6 @@ its approval rules. Keep the existing **Review before it runs** card focused
 on an individual decision; this new card explains the session-level choice.
 
 **Alternative headline:** More autonomy. Boundaries you set.
-
-### Guardrails — Set boundaries for every agent
-
-**README heading:** Set boundaries with configurable guardrails.
-
-**Recommended composition:** Use an agent conversation showing a real tool
-call blocked by a configured guardrail as the large image. Add a small crop of
-**Agents → [agent] → Advanced → Hooks** or an installed guardrail's detail
-screen to show the policy behind the behavior. Use an actual configured rule
-or hook and capture its actual effect.
-
-For a diagram-led alternative, create three clearly illustrative lanes:
-**Allow → Normal approval checks**, **Ask → Human review**, and
-**Deny → Tool blocked**. Pair the diagram with a real enforcement screenshot.
-An Allow decision does not bypass the normal approval gate.
-
-The current UI manages hook references but has no editor for tool rules,
-built-ins or the capability ceiling. Configure tool rules through the Host
-resource; do not draw a fictional rules editor. An optional model-hook card
-could instead pair the real hook detail with a verified redacted result.
-
-**Alternative headline:** Decide what runs. Review what matters.
-
-Guardrails are opt-in and complement isolation. Avoid claims that they make
-an agent completely safe, eliminate prompt injection, or cannot be bypassed
-in every possible circumstance.
-
-## Replacing a visual placeholder
-
-1. Export the composition to the PNG filename in the table, in this folder.
-2. In the root README, replace that slot's `.svg` source with `.png`, remove
-   its slot comment, and write alt text describing the actual capture.
-3. Delete only the corresponding placeholder SVG, and update this inventory
-   from planned to finished.
-
-Existing numeric filenames stay unchanged; the table records display order.
 
 ## Updating the images
 
