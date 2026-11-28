@@ -75,6 +75,17 @@ function cut(text: string): { text: string; cut: boolean } {
   return { text: head, cut: true }
 }
 
+/**
+ * `remote` prints the configured URLs, which can carry credentials
+ * (`https://user:token@host/…`, or a token as the user name). The userinfo of
+ * every URL is replaced, in every mode, so a names-only call never returns a
+ * credential. The match runs to the last `@` before the host, so an
+ * unencoded `@` inside the userinfo is covered too.
+ */
+export function withoutUrlCredentials(text: string): string {
+  return text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/]*@/gi, '$1***@')
+}
+
 function withTruncation(text: string, truncated: boolean): string {
   if (!truncated) return text
   return `${text}${text.endsWith('\n') ? '' : '\n'}${GIT_READ_TRUNCATED_LINE}`
@@ -165,7 +176,11 @@ export class GitReadTool implements Tool {
       case 'failed':
         return done(GIT_READ_FAILED_TEXT, true)
       case 'overflow': {
-        const out = cut(result.stdout)
+        const out = cut(
+          check.params.subcommand === 'remote'
+            ? withoutUrlCredentials(result.stdout)
+            : result.stdout
+        )
         return done(withTruncation(out.text, true), false)
       }
       case 'exited':
@@ -188,7 +203,9 @@ export class GitReadTool implements Tool {
     const stdout =
       check.params.subcommand === 'rev_parse'
         ? result.stdout.replace(/(^|\n)--\n?$/, '$1')
-        : result.stdout
+        : check.params.subcommand === 'remote'
+          ? withoutUrlCredentials(result.stdout)
+          : result.stdout
     const out = cut(stdout)
     let content = withTruncation(out.text, out.cut)
     if (await this.hasSubmodules(check.params, run)) {

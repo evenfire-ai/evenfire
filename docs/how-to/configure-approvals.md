@@ -30,10 +30,11 @@ filters, includes, signing tools and the like), whose files link outside the
 workspace, or whose index names paths outside the worktree. It also refuses
 revisions in git notes history. In `auto`, a call that returns only names,
 ids and metadata such as line counts and sizes (`status`, `log` without a
-patch, branches, tags, refs, listings) runs with no card, and that metadata
+patch, branches, tags, refs, `remote`, listings) runs with no card, and that metadata
 can describe any committed file, platform-managed paths included; a call that can return file content (`show`, `diff`, `grep`,
 `blame`, `cat_file`, `log` with a patch or pickaxe) shows a card for that one
-call. Its approval follows the shell and `file_read`:
+call. `remote` prints each URL with its user name and password replaced by
+`***`, in every mode. Its approval follows the shell and `file_read`:
 
 - `tools.shell_exec: true` or `tools.file_read: true` also make `git_read`
   ask. `tools.git_read: false` runs it with no card only when neither is
