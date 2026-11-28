@@ -18,6 +18,8 @@
 import { type ElectronApplication, type Locator, type Page, expect, test } from '@playwright/test'
 import { type ChildProcess } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
+import { fleetAgentActions } from './helpers/agentIdentity.js'
+import { startAgentChatFromFleet } from './helpers/agentNavigation.js'
 import {
   jsonKubectl,
   readHostSnapshot,
@@ -132,19 +134,7 @@ async function desktopProfilePath(app: ElectronApplication): Promise<string> {
 
 async function newChatFromAgentsPage(page: Page, hostName: string): Promise<void> {
   await openAgentsPage(page)
-  await page.getByRole('button', { name: `More actions for ${hostName}`, exact: true }).click()
-  const menu = page.getByRole('menu')
-  await expect(menu).toBeVisible({ timeout: 15_000 })
-  const newChat = menu
-    .getByRole('button', { name: /^New chat$/ })
-    .or(menu.getByRole('menuitem', { name: /^New chat$/ }))
-  await expect(newChat).toBeVisible()
-  await newChat.click()
-  const composer = page.getByRole('textbox', { name: 'Agent message composer' })
-  await expect(composer).toBeVisible({ timeout: 30_000 })
-  await expect(page.getByRole('button', { name: /^Switch chat agent$/ })).toContainText(hostName, {
-    timeout: 30_000,
-  })
+  await startAgentChatFromFleet(page, hostName)
 }
 
 async function openExactSession(page: Page, title: string, hostName: string): Promise<void> {
@@ -442,12 +432,8 @@ test('human journey — two Hosts, restart, cache, and two verified stateless wa
       firstProfilePath = await desktopProfilePath(app)
       await login(page, desktopCredentials())
       await openAgentsPage(page)
-      await expect(
-        page.getByRole('button', { name: `More actions for ${STATEFUL_HOST}`, exact: true })
-      ).toBeVisible({ timeout: 30_000 })
-      await expect(
-        page.getByRole('button', { name: `More actions for ${STATELESS_HOST}`, exact: true })
-      ).toBeVisible({ timeout: 30_000 })
+      await expect(fleetAgentActions(page, STATEFUL_HOST)).toBeVisible({ timeout: 30_000 })
+      await expect(fleetAgentActions(page, STATELESS_HOST)).toBeVisible({ timeout: 30_000 })
       await screenshotAndLog(page, testInfo, '01-authenticated-fleet')
 
       await newChatFromAgentsPage(page, STATELESS_HOST)

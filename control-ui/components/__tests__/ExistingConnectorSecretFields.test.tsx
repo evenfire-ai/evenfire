@@ -77,8 +77,10 @@ describe('ExistingConnectorSecretFields — metadata loading', () => {
     expect(lastSelection(onChange).ready).toBe(false)
 
     resolveList?.({ items: [SECRET_A] })
-    await waitFor(() => expect(screen.getByLabelText(/^Existing Secret/)).toBeEnabled())
-    expect(lastSelection(onChange).ready).toBe(true)
+    await waitFor(() => {
+      expect(screen.getByLabelText(/^Existing Secret/)).toBeEnabled()
+      expect(lastSelection(onChange).ready).toBe(true)
+    })
   })
 
   it('offers retry after a listing failure and recovers without losing the alert', async () => {

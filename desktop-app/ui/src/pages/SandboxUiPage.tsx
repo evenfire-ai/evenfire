@@ -180,6 +180,7 @@ export function SandboxUiPage({
   toastShellOverlayOpen = false,
   deepLinkShellOverlayOpen = false,
   appRootOverlayOpen = false,
+  chatShellOverlayOpen = false,
   localSearchRequestId = 0,
   titlebarLeadingContainer = null,
   onLaunchApp,
@@ -213,7 +214,8 @@ export function SandboxUiPage({
     sidebarShellOverlayOpen ||
     toastShellOverlayOpen ||
     deepLinkShellOverlayOpen ||
-    appRootOverlayOpen
+    appRootOverlayOpen ||
+    chatShellOverlayOpen
 
   const reload = useCallback(async () => {
     setError(null)

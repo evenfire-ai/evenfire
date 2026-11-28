@@ -1,11 +1,11 @@
 import React from 'react'
 import { SingleValueEditDialog } from '@clerum/frontend-components'
+import { AGENT_TYPE_LABELS, AGENT_TYPE_TOOLTIPS } from '../../lib/agentLifecycle'
+import { HoverTooltip } from '../HoverTooltip'
 import { IconRobot } from '../Sidebar/icons'
 import { IconPencil } from '../icons'
 import { Field, TextInput } from '../ui'
 import type { HostOverviewTabProps, HostTabKey } from './types'
-
-const DESCRIPTION_MAX_LENGTH = 100
 
 const STATUS_DOT_CLASS: Record<HostOverviewTabProps['statusTone'], string> = {
   active: 'cu-host-overview-status__dot--active',
@@ -75,17 +75,11 @@ function formatTimestamp(value: string): string {
   return `${month} ${day}, ${year} • ${hours}:${minutes} ${meridiem}`
 }
 
-function truncateDescription(value: string): string {
-  const description = value.trim()
-  if (description.length <= DESCRIPTION_MAX_LENGTH) return description
-  return `${description.slice(0, DESCRIPTION_MAX_LENGTH - 1).trimEnd()}…`
-}
-
 export function HostOverviewTab({
   hostName,
   displayName,
   loadingName = false,
-  description,
+  agentType,
   statusLabel,
   statusTone,
   contextRef,
@@ -108,8 +102,6 @@ export function HostOverviewTab({
   const [nameError, setNameError] = React.useState('')
   const [nameValid, setNameValid] = React.useState(true)
   const hasContext = Boolean(contextRef.trim())
-  const trimmedDescription = description.trim()
-  const shownDescription = truncateDescription(trimmedDescription) || 'No description provided.'
 
   async function saveName(value: string) {
     const nextName = value.trim()
@@ -168,15 +160,17 @@ export function HostOverviewTab({
             )}
           </>
         </div>
-        <div
-          className="cu-host-overview-identity__description"
-          title={trimmedDescription || undefined}
-        >
-          {shownDescription}
-        </div>
-        <div className="cu-host-overview-identity__status">
-          <StatusDot tone={statusTone} />
-          <span>{statusLabel}</span>
+        {/* __badges, not __meta: that name is the Created <dl> below. */}
+        <div className="cu-host-overview-identity__badges">
+          <HoverTooltip
+            className="cu-host-overview-identity__type"
+            label={AGENT_TYPE_LABELS[agentType]}
+            tooltip={AGENT_TYPE_TOOLTIPS[agentType]}
+          />
+          <div className="cu-host-overview-identity__status">
+            <StatusDot tone={statusTone} />
+            <span>{statusLabel}</span>
+          </div>
         </div>
 
         <div className="cu-host-overview-identity__divider" />

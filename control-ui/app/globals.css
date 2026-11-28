@@ -8005,17 +8005,30 @@ td.cu-registry-description {
   flex-shrink: 0;
 }
 
-.cu-host-overview-identity__description {
-  max-width: 100%;
-  color: var(--cu-text-muted);
-  font-size: 0.875rem;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
 .cu-host-overview-identity__slug {
   font-size: 0.875rem;
   color: var(--cu-text-muted);
+}
+
+/* Badge row (type chip + status). Not __meta: that class is the Created
+ * <dl> further down, whose left-aligned grid would override this one. */
+.cu-host-overview-identity__badges {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+}
+
+.cu-host-overview-identity__type {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.55rem;
+  border: 1px solid var(--cu-border);
+  border-radius: var(--cu-radius-pill);
+  background: var(--cu-bg-elevated);
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-xs);
+  cursor: default;
 }
 
 .cu-host-overview-identity__status {
@@ -10007,6 +10020,44 @@ td.cu-registry-description {
 .cu-table__cell-muted {
   color: var(--cu-text-muted);
   font-size: 0.8125rem;
+}
+
+/* Agent lifecycle Type cell — the tooltip card itself renders in a portal
+ * (components/HoverTooltip.tsx), so nothing here needs overflow tricks. */
+.cu-table__cell-type {
+  display: inline-flex;
+  align-items: center;
+  color: var(--cu-text-soft);
+  font-size: 0.8125rem;
+  cursor: default;
+}
+
+/* Portal hover tooltip card (HoverTooltip). Fixed near the trigger,
+ * horizontally centered by the component; no fade — it appears at once. */
+.cu-hover-tooltip-card {
+  position: fixed;
+  transform: translateX(-50%);
+  z-index: 1000;
+  width: max-content;
+  max-width: min(18rem, 72vw);
+  max-height: calc(100dvh - 16px);
+  box-sizing: border-box;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  padding: var(--cu-space-2) var(--cu-space-3);
+  color: var(--cu-text);
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1.45;
+  text-align: left;
+  white-space: normal;
+  /* Hoverable per WCAG 2.2 SC 1.4.13: the pointer may move onto the card
+   * (HoverTooltip keeps it open there); that also makes its text selectable. */
+  pointer-events: auto;
+  background: var(--cu-surface);
+  border: 1px solid var(--cu-border);
+  border-radius: var(--cu-radius-sm);
+  box-shadow: var(--cu-shadow);
 }
 
 /* Secondary identity line under a primary display name (e.g. the immutable

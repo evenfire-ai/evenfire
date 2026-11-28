@@ -23,6 +23,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { WorkflowRunArtifact, WorkflowRunListItem } from '../../src/types'
+import { fleetAgentSelector } from './helpers/agentIdentity.js'
 import { openAgentsPage } from './navigationHelpers.js'
 import {
   captureE2eEvidence,
@@ -413,7 +414,7 @@ async function waitForStreamDeliveredApprovalAttention(
 async function enterFirstPartyHostChat(page: Page): Promise<void> {
   await openAgentsPage(page)
   const chatInput = page.getByTestId('chat-input')
-  const agentLink = page.locator('.agents-table-row-clickable', { hasText: E2E_HOST_REF }).first()
+  const agentLink = page.locator(fleetAgentSelector(E2E_HOST_REF))
   await expect(chatInput.or(agentLink)).toBeVisible({ timeout: 30_000 })
   if (await agentLink.isVisible().catch(() => false)) {
     await agentLink.click()
