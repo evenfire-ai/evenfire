@@ -11,9 +11,9 @@
 <h3 align="center">Build your company's intelligence layer, without losing control.</h3>
 
 <p align="center">
-  Where your team and AI agents work together — a complete, fully open-source platform,
-  from a native desktop app to a secure, self-hosted backend.
-  Bring your own model keys; every risky action waits for a human "yes."
+  Give your team AI agents that can work with tools and files on your infrastructure.
+  Choose your models, share agents with your team, and configure approvals, access and budgets
+  from the Control UI. Work with your agents in Evenfire Desktop.
 </p>
 
 <p align="center">
@@ -24,14 +24,124 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick start</a> · <a href="#what-is-evenfire">What is Evenfire</a> · <a href="#the-platform">The platform</a> · <a href="#why-evenfire">Why</a> · <a href="#security-model">Security</a> · <a href="#supported-llm-providers">Providers</a> · <a href="#deploying-to-a-remote-cluster">Deploy</a> · <a href="docs/README.md">Docs</a> · <a href="#status">Status</a> · <a href="#community-and-license">License</a>
+  <a href="https://trendshift.io/repositories/168438?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-168438" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/168438/daily?language=TypeScript" alt="evenfire-ai/evenfire | Trendshift" width="250" height="55"/></a>
 </p>
 
 <p align="center">
-  <img src="docs/assets/control-ui-usage.webp" alt="Control UI: usage dashboard with charts of token consumption per model over time" width="82%" />
+  <a href="#see-evenfire-in-action">See it in action</a> · <a href="#quick-start">Quick start</a> · <a href="#what-is-evenfire">What is Evenfire</a> · <a href="#the-platform">The platform</a> · <a href="#why-evenfire">Why</a> · <a href="#security-model">Security</a> · <a href="#supported-llm-providers">Providers</a> · <a href="#deploying-to-a-remote-cluster">Deploy</a> · <a href="docs/README.md">Docs</a> · <a href="#status">Status</a> · <a href="#community-and-license">License</a>
 </p>
 
-<p align="center"><sub>The Control UI's usage dashboard: token consumption per model, over time. <a href="docs/surfaces/README.md">Tour all three UIs →</a></sub></p>
+## See Evenfire in action
+
+From a conversation to a tool action, Evenfire connects the work your team wants
+agents to do with the controls needed to run them. Use Desktop for day-to-day
+work and the Control UI to manage agents, connectors, access and usage.
+
+### Work with agents in Evenfire Desktop
+
+Start a conversation with an agent, give it a task, and follow its progress as
+it calls the tools you have enabled. Review its response and open the files it
+produces from the same conversation.
+
+<p align="center">
+  <img src="docs/assets/readme/01-desktop-conversation.png" alt="Marketing agent in Evenfire Desktop with a downloadable draft campaign brief" width="100%">
+</p>
+
+### Work with agents in Slack and Microsoft Teams
+
+Bring agents into the conversations where your team already works. Connect
+Slack or Microsoft Teams to an agent, send it a task, and follow its replies
+and tool progress in chat.
+
+<p align="center">
+  <img src="docs/assets/readme/08-team-channels.png" alt="Slack thread with Evenfire Tasks listing pending Marketing and Product tasks and confirming creation of a new Marketing task" width="100%">
+</p>
+
+[Connect Slack](docs/how-to/connect-slack.md) ·
+[Connect Microsoft Teams](docs/how-to/connect-teams.md).
+
+### Approve tool actions before execution
+
+Configure which tool actions require approval, then review a request before
+allowing it to proceed. In Desktop, review and approve or deny each request
+directly in the conversation.
+
+<p align="center">
+  <img src="docs/assets/readme/02-human-approvals.png" alt="Marketing agent awaiting approval for an Airtable tool action, with Approve, Always approve and Deny controls" width="100%">
+</p>
+
+[Configure approval policies](docs/how-to/configure-approvals.md).
+
+### Choose how your agent takes action
+
+Choose Manual, Auto-approve or Allow all for a Desktop conversation, within
+the limits set by your administrator. Manual keeps approval prompts;
+Auto-approve reduces prompts for eligible shell commands and HTTP requests;
+Allow all skips most approval prompts. Guardrail blocks and required guardrail
+reviews still apply, and scheduled-task management retains its approval rules.
+
+<p align="center">
+  <img src="docs/assets/readme/09-approval-modes.png" alt="Desktop mode picker showing Manual, Auto-approve and Allow all, alongside an Airtable approval request" width="100%">
+</p>
+
+[Understand approval modes](docs/how-to/configure-approvals.md#approval-modes).
+
+### Configure each agent's instructions and tools
+
+Choose an agent's model and instructions in the Control UI, assign its
+connectors, and manage which teams can use it. Give each agent the capabilities
+and access it needs for its role.
+
+<p align="center">
+  <img src="docs/assets/readme/03-agent-configuration.png" alt="Control UI agent overview showing its model, assigned connectors, members and teams" width="100%">
+</p>
+
+### Connect agents to the tools you use
+
+Browse the Marketplace to discover and install MCP connectors. Give agents
+access to the tools they need, and manage installed connectors in the Control
+UI.
+
+<p align="center">
+  <img src="docs/assets/readme/04-marketplace.png" alt="Evenfire Marketplace listing connectors including Figma, Firecrawl, GitHub and Google Sheets" width="100%">
+</p>
+
+### Build plugins with interfaces, workflows and services
+
+Build plugins that combine their own interface, multi-step workflows,
+background services, databases, webhooks and MCP tools. Open a plugin's
+interface in Desktop, and let agents interact with the tools it exposes.
+Install and manage plugins through the Control UI.
+
+<p align="center">
+  <img src="docs/assets/readme/07-plugins.png" alt="EvenPages plugin open in Evenfire Desktop alongside a Blog Post Creator agent listing blog posts found in the workspace" width="100%">
+</p>
+
+[Build a plugin](docs/agents/CLERUM_WORKFLOW_RECIPE_GUIDE.md) ·
+[Install from the Marketplace](docs/get-started/registry-quickstart.md#4-install-a-plugin).
+
+### Share files with your team and agents
+
+Share files and folders with people, teams and agents in EvenDrive. Give your
+agents access to the documents they need so they can work with you on shared
+material. File access is checked and audited by the platform.
+
+<p align="center">
+  <img src="docs/assets/readme/05-evendrive.png" alt="EvenDrive folder sharing with people, a team and an agent, with an Editor access selector" width="100%">
+</p>
+
+### Monitor usage, costs and budgets
+
+See token usage across agents, teams, providers and models. Configure model
+prices to track costs, and set scoped budgets to warn or block new work when
+budget enforcement is enabled.
+
+<p align="center">
+  <img src="docs/assets/readme/06-cost-and-usage.png" alt="Control UI token usage dashboard with request totals and usage broken down by team" width="100%">
+</p>
+
+[Track usage and configure budgets](docs/how-to/token-budgets-and-usage.md) ·
+[Tour the platform's interfaces](docs/surfaces/README.md).
 
 ---
 
@@ -86,9 +196,8 @@ Agents in Evenfire can:
 - **Call tools** over the [Model Context Protocol](https://modelcontextprotocol.io) (MCP)
 - **Share** teams, files, and cost budgets
 - **Compose** multi-step workflows
-- **Configure guardrails** through approval thresholds, budget caps, network
-  deny-rules, and tool-level scopes so risky actions automatically pause
-  for human review
+- **Apply guardrails** with opt-in allow, ask and deny rules and model hooks;
+  configure approvals, budgets and tool access alongside them
 - **Install plugins** that ship their own UX and expose themselves as MCP server tools, so agents can interact
   with them through chat
 
@@ -141,11 +250,18 @@ to its deep dive.
 ## Security model
 
 We never fully trust the model. It can be steered, misled, or simply wrong, so
-four layers constrain what it can do:
+five layers constrain what it can do:
 
-- **Risky actions wait for a human.** Commands, outbound HTTP, and browser
-  control are approval-gated: the task suspends until someone approves from the
-  channel, and callbacks are signature-verified.
+- **Approval-gated actions wait for a human.** Tool calls follow the agent's
+  approval policy and the session's effective approval mode, bounded by
+  administrator limits. Calls that require review suspend until an authorized
+  person approves or denies them.
+- **Configurable guardrails.** Opt-in tool rules can allow, require review or
+  deny a call; installed hooks can moderate model calls or redact outputs at
+  supported lifecycle points. A guardrail deny blocks the call, and a guardrail
+  ask still requires review even in Allow all mode. Guardrails complement
+  workload isolation; they are not a sandbox.
+  See [Configure guardrails](docs/how-to/configure-guardrails.md).
 - **Least privilege.** Each agent reaches only the connectors its `Context`
   grants, through short-lived, scope-narrowed tokens that can't widen
   themselves. Connector images can be restricted to an allowlist, but the check
