@@ -5,7 +5,6 @@ import {
   type GfsResourceNavigationRequest,
   assignGfsResourceNavigationOwner,
   canCompleteGfsResourceNavigation,
-  isGfsResourceNavigationActivationCurrent,
   isGfsResourceNavigationOwnerPresent,
 } from './gfsResourceNavigationIntent'
 import {
@@ -98,27 +97,6 @@ describe('GFS resource navigation intent ownership', () => {
         userNavigationGeneration: context.userNavigationGeneration + 1,
       })
     ).toBe(false)
-  })
-
-  it('rejects activations superseded by every newer explicit user navigation', () => {
-    expect(isGfsResourceNavigationActivationCurrent(8, 8)).toBe(true)
-    expect(isGfsResourceNavigationActivationCurrent(7, 8)).toBe(false)
-    expect(isGfsResourceNavigationActivationCurrent(-1, 0)).toBe(false)
-    expect(isGfsResourceNavigationActivationCurrent(Number.NaN, 0)).toBe(false)
-    fc.assert(
-      fc.property(
-        fc.integer({ min: 0, max: 1_000_000 }),
-        fc.integer({ min: 1, max: 1_000_000 }),
-        (activationGeneration, offset) => {
-          expect(
-            isGfsResourceNavigationActivationCurrent(
-              activationGeneration,
-              activationGeneration + offset
-            )
-          ).toBe(false)
-        }
-      )
-    )
   })
 
   it('rejects every strictly newer navigation intent, regardless of resolution order', () => {

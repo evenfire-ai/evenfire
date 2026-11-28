@@ -262,12 +262,6 @@ type Fixture = {
   resourceReadIdentities: Array<string | null>
   appList: ReturnType<typeof vi.fn>
   appLinkList: ReturnType<typeof vi.fn>
-  beginTrace: Array<{
-    id: number
-    intent: number
-    accepted: boolean
-    sessionGeneration: number | null
-  }>
   confirmedTrace: GfsResourceNavigationRequest[]
   activationTrace: Array<Record<string, unknown>>
   navTrace: Array<Record<string, unknown>>
@@ -499,7 +493,6 @@ describe('Spec 110 r15 cold GFS readiness replay', () => {
 
     const actual =
       await vi.importActual<typeof import('@hooks/useAppController')>('@hooks/useAppController')
-    const beginTrace: Fixture['beginTrace'] = []
     const confirmedTrace: Fixture['confirmedTrace'] = []
     const activationTrace: Fixture['activationTrace'] = []
     const navTrace: Fixture['navTrace'] = []
@@ -515,17 +508,6 @@ describe('Spec 110 r15 cold GFS readiness replay', () => {
           intentAfter: realController?.navigationIntentSequence,
         })
         return result
-      }
-      const begin = realController.beginGfsResourceNavigation
-      realController.beginGfsResourceNavigation = (...args) => {
-        const request = begin(...args)
-        beginTrace.push({
-          id: args[0],
-          intent: request?.intentSequence ?? -1,
-          accepted: request !== null,
-          sessionGeneration: realController?.sessionGeneration ?? null,
-        })
-        return request
       }
       const beginConfirmed = realController.beginConfirmedGfsResourceNavigation
       realController.beginConfirmedGfsResourceNavigation = (...args) => {
@@ -573,7 +555,6 @@ describe('Spec 110 r15 cold GFS readiness replay', () => {
       resourceReadIdentities,
       appList,
       appLinkList,
-      beginTrace,
       confirmedTrace,
       activationTrace,
       navTrace,
@@ -1951,7 +1932,6 @@ describe('Spec 110 r15 cold GFS readiness replay', () => {
     expect(observationBeforeOpen.resourceReadCountById.get(link.id)).toBe(0)
     expect(observationBeforeOpen.actualResolverEntriesById.get(link.id)).toBe(0)
     expect(observationBeforeOpen.previewFetchesById.get(link.id)).toBe(0)
-    expect(fixture.beginTrace).toEqual([])
     expect(fixture.confirmedTrace).toEqual([])
     expect(filesHarness.props?.pendingGfsDeepLink ?? null).toBeNull()
 

@@ -6,7 +6,6 @@ import {
   type GfsResourceNavigationRequest,
   assignGfsResourceNavigationOwner,
   canCompleteGfsResourceNavigation,
-  isGfsResourceNavigationActivationCurrent,
   isGfsResourceNavigationOwnerPresent,
 } from '../../lib/gfsResourceNavigationIntent'
 import {
@@ -334,39 +333,6 @@ export function useNavigationController() {
     [beginUserNavigationIntent, nextWorkspaceTabId]
   )
 
-  const beginGfsResourceNavigation = useCallback(
-    (
-      id: number,
-      uri: string,
-      principalGeneration: number,
-      userNavigationGenerationAtActivation: number
-    ): GfsResourceNavigationRequest | null => {
-      const currentGeneration = currentUserNavigationGeneration()
-      if (
-        currentGeneration === null ||
-        !isGfsResourceNavigationActivationCurrent(
-          userNavigationGenerationAtActivation,
-          currentGeneration
-        )
-      ) {
-        return null
-      }
-      const intentSequence = beginNavigationIntent()
-      const state = workspaceTabsRef.current
-      const owner = assignGfsResourceNavigationOwner(state, uri)
-      return {
-        id,
-        uri,
-        ownerTabId: owner.createDestination ? nextWorkspaceTabId() : owner.ownerTabId,
-        createDestination: owner.createDestination,
-        intentSequence,
-        principalGeneration,
-        userNavigationGenerationAtActivation,
-      }
-    },
-    [beginNavigationIntent, currentUserNavigationGeneration, nextWorkspaceTabId]
-  )
-
   const beginConfirmedGfsResourceNavigation = useCallback(
     (id: number, uri: string, principalGeneration: number): GfsResourceNavigationRequest | null => {
       const intentSequence = beginUserNavigationIntent()
@@ -528,7 +494,6 @@ export function useNavigationController() {
     navigationIntentSequence,
     beginUserNavigationIntent,
     isNavigationIntentCurrent,
-    beginGfsResourceNavigation,
     beginConfirmedGfsResourceNavigation,
     isGfsResourceNavigationCurrent,
     activateGfsResourceNavigation,

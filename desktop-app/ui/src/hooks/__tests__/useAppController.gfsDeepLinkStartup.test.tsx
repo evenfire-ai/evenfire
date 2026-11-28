@@ -69,14 +69,9 @@ describe('useAppController GFS deep-link startup', () => {
     await waitFor(() => expect(app.result.current.booting).toBe(false))
     await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
 
-    let request: ReturnType<typeof app.result.current.beginGfsResourceNavigation> = null
+    let request: ReturnType<typeof app.result.current.beginConfirmedGfsResourceNavigation> = null
     act(() => {
-      request = app.result.current.beginGfsResourceNavigation(
-        queued.id,
-        queued.uri,
-        1,
-        queued.userNavigationGenerationAtActivation
-      )
+      request = app.result.current.beginConfirmedGfsResourceNavigation(queued.id, queued.uri, 1)
     })
     expect(request).not.toBeNull()
     let activated = false
@@ -88,7 +83,7 @@ describe('useAppController GFS deep-link startup', () => {
       kind: 'files',
       id: request!.ownerTabId,
     })
-    expect(main.generation.current()).toBe(0)
+    expect(main.generation.current()).toBe(1)
   })
 
   it('does not let a later completion select Files after an explicit tab action', async () => {
@@ -102,14 +97,9 @@ describe('useAppController GFS deep-link startup', () => {
     await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
     const queued = main.enqueue()
 
-    let request: ReturnType<typeof app.result.current.beginGfsResourceNavigation> = null
+    let request: ReturnType<typeof app.result.current.beginConfirmedGfsResourceNavigation> = null
     act(() => {
-      request = app.result.current.beginGfsResourceNavigation(
-        queued.id,
-        queued.uri,
-        1,
-        queued.userNavigationGenerationAtActivation
-      )
+      request = app.result.current.beginConfirmedGfsResourceNavigation(queued.id, queued.uri, 1)
     })
     expect(request).not.toBeNull()
 
@@ -122,7 +112,7 @@ describe('useAppController GFS deep-link startup', () => {
 
   it('keeps a tab selected by the user while authenticated startup is still loading', async () => {
     const main = makeMainLinkQueue()
-    const queued = main.enqueue()
+    main.enqueue()
     const { clerum, handle } = installAppControllerClerum({ delayAuthenticatedLoad: true })
     main.connectRendererBridge(clerum)
     const app = renderAppController()
@@ -135,14 +125,6 @@ describe('useAppController GFS deep-link startup', () => {
     await waitFor(() => expect(app.result.current.booting).toBe(false))
     expect(activeWorkspaceTab(app.result.current.workspaceTabs)?.kind).toBe('settings')
     expect(main.generation.current()).toBe(1)
-    expect(
-      app.result.current.beginGfsResourceNavigation(
-        queued.id,
-        queued.uri,
-        1,
-        queued.userNavigationGenerationAtActivation
-      )
-    ).toBeNull()
   })
 
   it('preserves a queued link through signed-out boot and the later sign-in', async () => {
@@ -165,12 +147,7 @@ describe('useAppController GFS deep-link startup', () => {
     await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true))
 
     expect(main.generation.current()).toBe(0)
-    const request = app.result.current.beginGfsResourceNavigation(
-      queued.id,
-      queued.uri,
-      1,
-      queued.userNavigationGenerationAtActivation
-    )
+    const request = app.result.current.beginConfirmedGfsResourceNavigation(queued.id, queued.uri, 1)
     expect(request).not.toBeNull()
   })
 
@@ -190,13 +167,13 @@ describe('useAppController GFS deep-link startup', () => {
 
     expect(main.queue.list()).toEqual([queued])
     expect(main.generation.current()).toBe(0)
-    let request: ReturnType<typeof reopened.result.current.beginGfsResourceNavigation> = null
+    let request: ReturnType<typeof reopened.result.current.beginConfirmedGfsResourceNavigation> =
+      null
     act(() => {
-      request = reopened.result.current.beginGfsResourceNavigation(
+      request = reopened.result.current.beginConfirmedGfsResourceNavigation(
         queued.id,
         queued.uri,
-        1,
-        queued.userNavigationGenerationAtActivation
+        1
       )
     })
     expect(request).not.toBeNull()

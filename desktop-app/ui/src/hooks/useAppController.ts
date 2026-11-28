@@ -1712,7 +1712,6 @@ export function useAppController() {
     lastActiveChatTabId: nav.lastActiveChatTabId,
     openFilesSection: nav.openFilesSection,
     openPreviewSection: nav.openPreviewSection,
-    beginGfsResourceNavigation: nav.beginGfsResourceNavigation,
     beginConfirmedGfsResourceNavigation: nav.beginConfirmedGfsResourceNavigation,
     isGfsResourceNavigationCurrent: nav.isGfsResourceNavigationCurrent,
     activateGfsResourceNavigation: nav.activateGfsResourceNavigation,
