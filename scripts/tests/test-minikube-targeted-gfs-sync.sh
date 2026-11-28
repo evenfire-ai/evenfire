@@ -19,8 +19,7 @@ printf '%s\n' "$*" >>"${TEST_CALL_LOG}"
 case "$*" in
   get\ deployment\ gfsc-writer\ -n\ gfs|get\ deployment\ gfsc-reader\ -n\ gfs) exit 0 ;;
   rollout\ restart\ deployment/gfsc-writer\ -n\ gfs|rollout\ restart\ deployment/gfsc-reader\ -n\ gfs) exit 0 ;;
-  get\ deployment\ gfsc-reader\ -o*spec.replicas*) printf '1'; exit 0 ;;
-  get\ deployment\ gfsc-reader\ -o*status.readyReplicas*) printf '1'; exit 0 ;;
+  get\ deployment\ gfsc-reader\ -o*status.updatedReplicas*) printf '2|2|1|1|1|1'; exit 0 ;;
   get\ pods\ -l*gfsc-role=reader*) printf 'True|\n'; exit 0 ;;
   *) echo "unexpected kubectl call: $*" >&2; exit 90 ;;
 esac
@@ -61,7 +60,7 @@ grep -q '^rollout restart deployment/gfsc-writer -n gfs$' "${LOG_FILE}" || \
 grep -q '^rollout restart deployment/gfsc-reader -n gfs$' "${LOG_FILE}" || \
   fail 'targeted GFS sync did not restart gfsc-reader'
 grep -q '^wait gfs/gfsc-writer$' "${LOG_FILE}" || fail 'gfsc-writer readiness was not awaited'
-grep -q '^get deployment gfsc-reader -o jsonpath={.status.readyReplicas}$' "${LOG_FILE}" || \
+grep -q '^get deployment gfsc-reader -o jsonpath=.*status.updatedReplicas' "${LOG_FILE}" || \
   fail 'gfsc-reader did not use the HCC-safe readiness wait'
 if grep -q '^wait gfs/gfsc-reader$' "${LOG_FILE}"; then
   fail 'gfsc-reader used the generation-based generic rollout wait'
