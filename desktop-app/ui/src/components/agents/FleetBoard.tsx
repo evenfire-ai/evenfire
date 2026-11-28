@@ -16,6 +16,7 @@ import { IconAgents } from '@components/SidebarNav/icons'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useTeamsDataController } from '@hooks/domain/useTeamsDataController'
+import { agentDisplayLabels } from '@lib/agentDisplayLabels'
 import { clickableRowProps } from '../../lib/clickableRowProps'
 import {
   formatMcpServerAcronym,
@@ -60,9 +61,6 @@ export function FleetBoard() {
   )
   const [pendingCreateChatForAgent, setPendingCreateChatForAgent] = useState<string | null>(null)
   const fleetMenuRef = useRef<HTMLDivElement | null>(null)
-
-  const agentMockDescription =
-    'Workspace assistant for operations and support tasks. (Mock description; backend profile connection pending.)'
 
   // When selectedAgent catches up to the pending agent, create a chat
   useEffect(() => {
@@ -147,6 +145,11 @@ export function FleetBoard() {
     return [...new Set(agentNames.map(agentName => agentName.trim()).filter(Boolean))]
   }, [agentNames])
 
+  const displayLabels = useMemo(
+    () => agentDisplayLabels(allFleetAgentNames, agentDisplayByName),
+    [allFleetAgentNames, agentDisplayByName]
+  )
+
   const agentFleetRows = useMemo(
     () =>
       [...allFleetAgentNames]
@@ -174,9 +177,8 @@ export function FleetBoard() {
                 ? 'No mapped connectors'
                 : 'Mapping unavailable'
           // Visible name = agent `spec.host` display name; total over catalog
-          // agents at the producer, so the identifier is only a fallback
-          // (Decision #6 parity with the rest of the desktop surfaces).
-          const display = agentDisplayByName[agent] ?? agent
+          // agents at the producer, with identity added for collisions.
+          const display = displayLabels[agent]
           return {
             agent,
             display,
@@ -192,7 +194,7 @@ export function FleetBoard() {
           }
         }),
     [
-      agentDisplayByName,
+      displayLabels,
       agentLastActiveByAgent,
       agentMcpServerCountByAgent,
       agentMcpServersByAgent,
@@ -251,9 +253,11 @@ export function FleetBoard() {
                 </thead>
                 <tbody>
                   {filteredFleetRows.map(row => (
+                    // Stable identity is independent of the catalog display label.
                     <tr
                       key={row.agent}
                       className="da-table__row--clickable agents-table-row-clickable"
+                      data-agent-ref={row.agent}
                       {...clickableRowProps(() => onOpenAgentWorkspace(row.agent, 'mcp-servers'), {
                         ariaLabel: `Open agent ${row.display}`,
                       })}
@@ -265,14 +269,6 @@ export function FleetBoard() {
                           </span>
                           <div className="agent-row-main-copy">
                             <strong>{row.display}</strong>
-                            {row.display !== row.agent && (
-                              <span className="agent-row-description" title={row.agent}>
-                                {row.agent}
-                              </span>
-                            )}
-                            <span className="agent-row-description" title={agentMockDescription}>
-                              {agentMockDescription}
-                            </span>
                           </div>
                         </div>
                       </td>

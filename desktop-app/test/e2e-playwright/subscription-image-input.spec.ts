@@ -9,6 +9,7 @@ import type { Page, TestInfo } from '@playwright/test'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { challengeImage, challengeImageAt, paddedChallengeImage } from './codexImageChallenge.js'
+import { fleetAgentActions } from './helpers/agentIdentity.js'
 import { tileChallengeImage } from './subscriptionImageChallenge.js'
 import {
   expect,
@@ -87,10 +88,7 @@ async function startOwnedChat(page: Page, binding: ProviderBinding): Promise<voi
     }
     await expect(agents).toBeVisible()
     await agents.click()
-    const actions = page.getByRole('button', {
-      name: `More actions for ${binding.hostLabel}`,
-      exact: true,
-    })
+    const actions = fleetAgentActions(page, binding.hostRef)
     await expect(actions).toBeVisible({ timeout: 30_000 })
     await actions.click()
     await expect(actions).toHaveAttribute('aria-expanded', 'true')

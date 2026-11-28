@@ -37,6 +37,10 @@ vi.mock('@contexts/NavigationContext', () => ({
     handleSelectChatAgent: vi.fn(),
   }),
 }))
+// The real hook reads the access catalog through TanStack Query.
+vi.mock('@hooks/domain/useAgentsDataController', () => ({
+  useAgentsDataController: () => ({ agentDisplayByName: {} }),
+}))
 
 // This row stands in for the tree, without its GFS data, and mounts the real
 // anchored menu inside the real compact drawer. The real tree runs in

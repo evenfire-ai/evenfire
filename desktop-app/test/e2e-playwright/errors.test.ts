@@ -1,5 +1,6 @@
 // desktop-app/test/e2e-playwright/errors.test.ts
 import { expect, test } from './fixtures.js'
+import { fleetAgentSelector } from './helpers/agentIdentity.js'
 import { openAgentsPage } from './navigationHelpers.js'
 
 const E2E_HOST_REF = process.env.E2E_HOST_REF || 'chatllm'
@@ -7,7 +8,7 @@ const E2E_HOST_REF = process.env.E2E_HOST_REF || 'chatllm'
 test('9. sending a message returns the composer to an interactive state', async ({ appPage }) => {
   await openAgentsPage(appPage)
   const chatInput = appPage.locator('[data-testid="chat-input"]')
-  const agentLink = appPage.locator('.agents-table-row-clickable', { hasText: E2E_HOST_REF })
+  const agentLink = appPage.locator(fleetAgentSelector(E2E_HOST_REF))
   const emptyState = appPage.locator('text=No agents available')
   await expect(chatInput.or(agentLink.first()).or(emptyState)).toBeVisible({ timeout: 20_000 })
   if (await emptyState.isVisible()) {
