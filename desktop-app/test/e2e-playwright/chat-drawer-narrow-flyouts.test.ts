@@ -133,4 +133,39 @@ test.describe('narrow chat drawer flyouts', () => {
     expect(nestedRect.left).toBeGreaterThanOrEqual(drawerRect.left - 1)
     expect(nestedRect.right).toBeLessThanOrEqual(drawerRect.right + 1)
   })
+
+  test('conversation actions stay inside the 340px drawer and their trigger stays reachable', async ({
+    appPage,
+  }) => {
+    await enterAgentChat(appPage)
+    await openResourcesNavItem(appPage, 'nav-files')
+    const drawerToggle = appPage.getByTestId('chat-drawer-toggle')
+    await expect(drawerToggle).toBeVisible()
+    await drawerToggle.click()
+    await expect(appPage.locator(DRAWER)).toBeVisible()
+
+    await shrinkDrawerToMinimum(appPage)
+    const drawerRect = await rectOf(appPage, DRAWER)
+
+    // The breadcrumb may wrap and shrink in the drawer, so the trigger of the
+    // conversation's actions is inside the rail and can actually be pressed.
+    const triggerSelector = `${DRAWER} .agent-workspace-conversation-menu-trigger`
+    await expect(appPage.locator(triggerSelector)).toBeVisible()
+    const triggerRect = await rectOf(appPage, triggerSelector)
+    expect(triggerRect.left).toBeGreaterThanOrEqual(drawerRect.left - 1)
+    expect(triggerRect.right).toBeLessThanOrEqual(drawerRect.right + 1)
+    const hit = await appPage.locator(triggerSelector).evaluate(el => {
+      const r = el.getBoundingClientRect()
+      return el.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2))
+    })
+    expect(hit).toBe(true)
+
+    // The menu opens under the trigger and is confined to the drawer.
+    await appPage.locator(triggerSelector).click()
+    await expect(appPage.locator('.agent-workspace-conversation-menu-panel')).toBeVisible()
+    const panelRect = await rectOf(appPage, '.agent-workspace-conversation-menu-panel')
+    expect(panelRect.left).toBeGreaterThanOrEqual(drawerRect.left - 1)
+    expect(panelRect.right).toBeLessThanOrEqual(drawerRect.right + 1)
+    await appPage.keyboard.press('Escape')
+  })
 })

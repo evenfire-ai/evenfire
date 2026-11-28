@@ -8,6 +8,7 @@
 import { randomUUID } from 'node:crypto'
 import { challengeImage, challengeImageAt, paddedChallengeImage } from './codexImageChallenge.js'
 import { expect, test } from './fixtures.js'
+import { fleetAgentActions } from './helpers/agentIdentity.js'
 
 const hostRef = process.env.E2E_HOST_REF ?? ''
 const hostLabel = process.env.E2E_CODEX_HOST_LABEL ?? ''
@@ -51,7 +52,7 @@ async function startOwnedChat(page: import('@playwright/test').Page): Promise<vo
   }
   await expect(agents).toBeVisible()
   await agents.click()
-  const actions = page.getByRole('button', { name: `More actions for ${hostLabel}`, exact: true })
+  const actions = fleetAgentActions(page, hostRef)
   await expect(actions).toBeVisible({ timeout: 30_000 })
   await actions.click()
   await expect(actions).toHaveAttribute('aria-expanded', 'true')

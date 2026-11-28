@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { WorkflowRunArtifact, WorkflowRunListItem } from '../../src/types'
+import { fleetAgentSelector } from './helpers/agentIdentity.js'
 import { openAgentsPage } from './navigationHelpers.js'
 import {
   EXT_API,
@@ -263,9 +264,7 @@ export async function enterChatllmChat(page: Page): Promise<void> {
   await openAgentsPage(page)
   await humanRecordedPause([320, 780])
   const chatInput = page.getByTestId('chat-input')
-  const agentLink = page
-    .locator('.agents-table-row-clickable', { hasText: CHATLLM_HOST_REF })
-    .first()
+  const agentLink = page.locator(fleetAgentSelector(CHATLLM_HOST_REF))
   await expect(chatInput.or(agentLink)).toBeVisible({ timeout: 30_000 })
   if (await agentLink.isVisible().catch(() => false)) {
     await humanClick(agentLink, { afterMs: [520, 1_000] })
@@ -283,10 +282,9 @@ export async function startFreshThread(page: Page): Promise<void> {
   await openAgentsPage(page)
   await humanRecordedPause([320, 780])
   // The fleet table labels its controls with the agent display name (e.g. "chatLLM",
-  // FleetBoard.tsx), not the host ref, so find the menu inside the row that shows the ref.
+  // FleetBoard.tsx), not the host ref, so find the menu inside the row identified by its exact data-agent-ref.
   const moreActions = page
-    .locator('.agents-table-row-clickable', { hasText: CHATLLM_HOST_REF })
-    .first()
+    .locator(fleetAgentSelector(CHATLLM_HOST_REF))
     .getByRole('button', { name: /^More actions for / })
   await expect(moreActions).toBeVisible({ timeout: 30_000 })
   await humanClick(moreActions, { afterMs: [260, 620] })

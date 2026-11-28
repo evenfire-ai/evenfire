@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { RefObject } from 'react'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
+import { makeTaskKey } from '@contexts/AgentTaskTrackerContext'
 import { useAuthContext } from '@contexts/AuthContext'
 import { useChatListContext } from '@contexts/ChatListContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
 import { useNavigationContext } from '@contexts/NavigationContext'
-import { DataTable, EmptyState, IconButton, MenuItem, StatusBanner } from '@components/Common'
+import { DataTable, EmptyState, IconButton, StatusBanner } from '@components/Common'
 import { PageBreadcrumb } from '@components/PageBreadcrumb'
 import type { PageBreadcrumbItem } from '@components/PageBreadcrumb/types'
 import { ResourceBreadcrumbSwitcher } from '@components/ResourceBreadcrumbSwitcher'
@@ -19,8 +20,8 @@ import {
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useTeamsDataController } from '@hooks/domain/useTeamsDataController'
-import { useClickOutside } from '@hooks/useClickOutside'
 import { deriveConnectorRows } from '@lib/connectorRows'
+import { openConversationTitle } from '@lib/conversationEntry'
 import { deriveScopedMembers } from '@lib/scopedMembers'
 import type { ScopedMemberContextDetails, ScopedMemberTeamRow } from '@lib/scopedMembers.types'
 import type { AgentWorkspaceRoute } from '../../uiTypes'
@@ -32,6 +33,7 @@ import { AgentTitleSelector } from './AgentTitleSelector'
 import { ChatThread } from './ChatThread'
 import { ComposerPanel } from './ComposerPanel'
 import { ContextWindowIndicator } from './ContextWindowIndicator'
+import { ConversationActions } from './ConversationActions'
 import { FallbackBadge } from './FallbackBadge'
 import { SessionTokensIndicator } from './SessionTokensIndicator'
 import { AGENT_ROUTE_LABELS, AGENT_ROUTE_OPTIONS } from './agentRoutes'
@@ -101,7 +103,7 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     useMcpServersDataController({
       selectedAgent,
     })
-  const { sessionStateByChatId, activeChatId } = useChatListContext()
+  const { sessionStateByChatId, activeChatId, chatList, latestChatSessions } = useChatListContext()
   const activeSessionState = activeChatId ? sessionStateByChatId[activeChatId] : undefined
   const { hostRuntimeStatus } = useMcpRuntimeContext()
   const { scrollChatToBottom } = useAgentChatActionsContext()
@@ -122,8 +124,6 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   const [delayedScrollToBottomChatId, setDelayedScrollToBottomChatId] = useState<string | null>(
     null
   )
-  const [chatAgentRouteMenuOpen, setChatAgentRouteMenuOpen] = useState(false)
-  const chatAgentRouteMenuRef = useRef<HTMLSpanElement | null>(null)
 
   const mcpHealthNow = undefined
 
@@ -151,10 +151,6 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     )
     return () => window.clearTimeout(timeoutId)
   }, [activeChatId, showScrollToBottom])
-
-  useClickOutside(chatAgentRouteMenuRef, chatAgentRouteMenuOpen, () =>
-    setChatAgentRouteMenuOpen(false)
-  )
 
   const selectedAgentMcpServerNames = selectedAgent
     ? selectedAgentMcpServers.map(server => server.name)
@@ -263,12 +259,18 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   const isChatMode = mode === 'chat'
   const isChatScrollNavMode = isChatMode && Boolean(activeChatId)
   const rootBreadcrumbLabel = mode === 'chat' ? 'Chat' : 'Agents'
+  // The leading crumb of the chat route always goes to a fresh conversation with
+  // the selected agent: the plain "Chat" root on the new-chat landing, and the
+  // agent itself inside an open conversation — the agent is what the user goes
+  // back to.
+  const backToNewConversation = () => {
+    if (selectedAgent) onSelectChatAgent(selectedAgent, { selectLatest: false })
+  }
   const rootBreadcrumbItem: PageBreadcrumbItem =
     mode === 'chat' && selectedAgent
       ? {
-          label: rootBreadcrumbLabel,
-          onClick: () => onSelectChatAgent(selectedAgent, { selectLatest: false }),
-          className: 'page-breadcrumb-link--plain-action',
+          label: isChatScrollNavMode ? selectedAgentDisplay || 'Agent' : rootBreadcrumbLabel,
+          onClick: backToNewConversation,
         }
       : { label: rootBreadcrumbLabel }
   const routeSubtitle =
@@ -299,7 +301,7 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
   // targets: the agent NAME (click → start/switch a chat with that agent) and
   // the 3-dots (click → open a sections sub-menu: Connectors / Members /
   // Agent Files / Activity, navigating into that agent's workspace without
-  // switching the chat). This mirrors the chatAgentRouteMenu pattern.
+  // switching the chat).
   const agentSwitcherLabel = (
     <AgentTitleSelector
       ariaLabel={isChatMode ? 'Switch chat agent' : 'Switch agent'}
@@ -335,56 +337,10 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
     />
   )
 
-  const chatAgentRouteMenu = isChatMode && selectedAgent && (
-    <span className="agent-workspace-agent-route-menu" ref={chatAgentRouteMenuRef}>
-      <IconButton
-        className="agent-workspace-agent-route-trigger"
-        color="neutral"
-        label={`Open ${selectedAgent} options`}
-        size="xs"
-        variant="ghost"
-        aria-haspopup="menu"
-        aria-expanded={chatAgentRouteMenuOpen}
-        onClick={() => setChatAgentRouteMenuOpen(open => !open)}
-      >
-        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-          <circle cx="3.5" cy="8" r="1.2" />
-          <circle cx="8" cy="8" r="1.2" />
-          <circle cx="12.5" cy="8" r="1.2" />
-        </svg>
-      </IconButton>
-      {chatAgentRouteMenuOpen && (
-        <span className="agent-workspace-agent-route-menu-panel" role="menu">
-          {AGENT_ROUTE_OPTIONS.map(route => (
-            <MenuItem
-              key={route}
-              className="agent-workspace-agent-route-menu-item"
-              onClick={() => {
-                setChatAgentRouteMenuOpen(false)
-                onOpenAgentWorkspace(selectedAgent, route)
-              }}
-              role="menuitem"
-            >
-              {AGENT_ROUTE_LABELS[route]}
-            </MenuItem>
-          ))}
-        </span>
-      )}
-    </span>
-  )
-
-  // Chat-mode breadcrumb agent label. The agent NAME always shows. The route
-  // (sections) 3-dots menu shows ONLY inside an active conversation — the
-  // new-chat landing keeps its own agent selector (with 3-dots) in the title
-  // row, so the breadcrumb there shows only the root "Chat" item.
-  const agentBreadcrumbLabel = isChatMode ? (
-    <span className="agent-workspace-agent-breadcrumb-actions">
-      {selectedAgentDisplay || 'Agent'}
-      {isChatMode && activeChatId ? chatAgentRouteMenu : null}
-    </span>
-  ) : (
-    selectedAgentDisplay || 'Agent'
-  )
+  // Agents-mode agent crumb: the display name (spec.host) with the identifier as
+  // the single sanctioned fallback (Decision #6); clicking opens the agent's
+  // latest conversation.
+  const agentBreadcrumbLabel = selectedAgentDisplay || 'Agent'
   const agentBreadcrumbItem: PageBreadcrumbItem =
     mode === 'agents' && selectedAgent
       ? {
@@ -395,9 +351,20 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
           label: agentBreadcrumbLabel,
         }
 
+  // Chat-mode current crumb inside an open conversation: its title, and the
+  // actions that act on it (see ConversationActions). The new-chat landing has
+  // no conversation, so it keeps only the root crumb and its own agent selector.
+  const openConversation =
+    isChatScrollNavMode && selectedAgent && activeChatId
+      ? {
+          agentRef: selectedAgent,
+          chatId: activeChatId,
+          title: openConversationTitle(chatList, latestChatSessions, selectedAgent, activeChatId),
+        }
+      : null
+
   useEffect(() => {
     setChatScrollNavVisible(true)
-    setChatAgentRouteMenuOpen(false)
   }, [selectedAgent])
 
   // The Members tab reads the team directory (see memberTeamRows). It is an
@@ -459,19 +426,31 @@ export function AgentWorkspace({ mode = 'agents', scrollContainerRef }: AgentWor
                     // Chat-mode breadcrumb rules:
                     //  - New-chat landing (no active chat): the agent selector
                     //    lives in the title row, so the breadcrumb shows ONLY the
-                    //    root "Chat" item — no agent name, no dots.
-                    //  - Active conversation: breadcrumb = root "Chat" + the agent
-                    //    NAME plus the 3-dots route menu (see agentBreadcrumbLabel)
-                    //    so the user can jump to Details / Connectors / etc.
-                    //    without leaving the session.
-                    ...(mode === 'chat' && !activeChatId ? [] : [agentBreadcrumbItem]),
+                    //    root "Chat" item.
+                    //  - Open conversation: the agent crumb (back to a fresh
+                    //    conversation with it) + the conversation title with its
+                    //    actions (see ConversationActions).
                     ...(mode === 'agents'
-                      ? [
-                          {
-                            label: routeSwitcherLabel,
-                          },
-                        ]
-                      : []),
+                      ? [agentBreadcrumbItem, { label: routeSwitcherLabel }]
+                      : openConversation
+                        ? [
+                            {
+                              // Keyed by the conversation: its dialogs act on the
+                              // conversation whose title they opened with.
+                              label: (
+                                <ConversationActions
+                                  agentRef={openConversation.agentRef}
+                                  chatId={openConversation.chatId}
+                                  key={makeTaskKey(
+                                    openConversation.agentRef,
+                                    openConversation.chatId
+                                  )}
+                                  title={openConversation.title}
+                                />
+                              ),
+                            },
+                          ]
+                        : []),
                   ]}
                 />
                 {isChatMode && activeChatId && (

@@ -5,6 +5,8 @@ import { type ElectronApplication, type Page, expect, test } from '@playwright/t
 import { execFile, execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
+import { fleetAgentActions } from './helpers/agentIdentity.js'
+import { startAgentChatFromFleet } from './helpers/agentNavigation.js'
 import {
   type AgentGfsFixtures,
   assertGfsInfraHealthy,
@@ -514,19 +516,7 @@ async function settleHccRuntimeIdentity(hostName: string): Promise<void> {
 
 async function newChat(page: Page, hostName: string): Promise<void> {
   await openAgentsPage(page)
-  await page.getByRole('button', { name: `More actions for ${hostName}`, exact: true }).click()
-  const menu = page.getByRole('menu')
-  const newChatAction = menu
-    .getByRole('button', { name: /^New chat$/ })
-    .or(menu.getByRole('menuitem', { name: /^New chat$/ }))
-  await expect(newChatAction).toBeVisible({ timeout: 15_000 })
-  await newChatAction.click()
-  await expect(page.getByRole('textbox', { name: 'Agent message composer' })).toBeVisible({
-    timeout: 30_000,
-  })
-  await expect(page.getByRole('button', { name: /^Switch chat agent$/ })).toContainText(hostName, {
-    timeout: 30_000,
-  })
+  await startAgentChatFromFleet(page, hostName)
 }
 
 async function renameByMarker(page: Page, marker: string, title: string): Promise<void> {
@@ -744,12 +734,7 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
       await login(firstPage, desktopCredentials())
       metrics.firstLaunchToAuthenticatedMs = Date.now() - launchStarted
       await openAgentsPage(firstPage)
-      await expect(
-        firstPage.getByRole('button', {
-          name: `More actions for ${STATELESS_HOST}`,
-          exact: true,
-        })
-      ).toBeVisible({ timeout: 30_000 })
+      await expect(fleetAgentActions(firstPage, STATELESS_HOST)).toBeVisible({ timeout: 30_000 })
       runtimeProbeHosts.add(STATELESS_HOST)
       await settleHccRuntimeIdentity(STATELESS_HOST)
       beforeStateless = (await waitForStateless('ready', 270_000)).snapshot
@@ -1025,9 +1010,7 @@ test('PR849 controlled parity across pending work, GFS, host switching, and cold
       await waitAuthenticatedWithoutLogin(page)
       metrics.secondLaunchToAuthenticatedMs = Date.now() - launchStarted
       await openAgentsPage(page)
-      await expect(
-        page.getByRole('button', { name: `More actions for ${STATELESS_HOST}`, exact: true })
-      ).toBeVisible({ timeout: 30_000 })
+      await expect(fleetAgentActions(page, STATELESS_HOST)).toBeVisible({ timeout: 30_000 })
 
       await openSession(page, statelessTitle, STATELESS_HOST)
       await expect(page.getByTestId('message-list')).toContainText(statelessCode)

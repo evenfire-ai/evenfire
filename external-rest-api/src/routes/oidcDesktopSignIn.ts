@@ -113,8 +113,8 @@ function isObject(value: unknown): value is Record<string, unknown> {
 /**
  * `POST /oidc/desktop-sign-in/redeem`: Desktop's main process trades the one-use code from its
  * browser sign-in, with its PKCE verifier, for the `{ token, me }` password login returns.
- * Every answer is rebuilt from the success check below and relayFailure's allow-list; nothing
- * control-api sends is passed through as it came.
+ * Every answer is rebuilt from the success check below and relayFailure's allow-list, except
+ * `me`: the success check requires an object and relays it whole, as password login does.
  */
 export function createOidcDesktopSignInRouter(): Router {
   const router = Router()
